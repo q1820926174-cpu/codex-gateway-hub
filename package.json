@@ -1,5 +1,5 @@
 {
-  "name": "openai-compat-responses-gateway",
+  "name": "codex-gateway-hub",
   "private": false,
   "version": "0.1.0",
   "description": "OpenAI-compatible API gateway for Codex/Responses with multi-provider routing, model mapping, vision fallback, runtime switching, and usage analytics.",

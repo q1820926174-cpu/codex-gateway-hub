@@ -1946,7 +1946,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       endpoint,
       apiKey: localKey,
       model,
-      notes: "Imported from OpenAI Compat -> Responses Gateway",
+      notes: "Imported from Codex Gateway Hub",
       configFormat: "json",
       config: toBase64Utf8(JSON.stringify(inlineConfig)),
       enabled: "true"
@@ -1982,7 +1982,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       <Layout className="tc-layout">
         <Layout.Aside width="232px" className="tc-aside">
           <div className="tc-brand">
-            <div className="tc-brand-title">{t("模型网关控制台", "Model Gateway Console")}</div>
+            <div className="tc-brand-title">{t("Codex 模型网关", "Codex Gateway Hub")}</div>
             <div className="tc-brand-sub">{t("腾讯风格控制台", "Tencent Style Admin")}</div>
           </div>
 

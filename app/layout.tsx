@@ -5,8 +5,9 @@ import "react-json-view-lite/dist/index.css";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "模型网关总控台 / Model Gateway Console",
-  description: "多供应商、多本地 Key 的 OpenAI 兼容网关控制台 / OpenAI-compatible gateway console with multi-provider and multi-local-key support"
+  title: "Codex 模型网关 / Codex Gateway Hub",
+  description:
+    "多供应商、多本地 Key 的 Codex/OpenAI 兼容网关控制台 / Codex/OpenAI-compatible gateway console with multi-provider and multi-local-key support"
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

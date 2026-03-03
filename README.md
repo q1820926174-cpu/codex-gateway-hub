@@ -1,5 +1,5 @@
-# OpenAI Compat -> Responses Gateway  
-# OpenAI 兼容 -> Responses 网关
+# Codex Gateway Hub  
+# Codex 模型网关
 
 一体化 Next.js 控制台项目（前后端不分离），支持多上游供应商、多本地 Key、模型映射、视觉兜底、运行时模型切换与用量报表。  
 An integrated Next.js console (non-separated frontend/backend) for multi-upstream providers, multi-local keys, model mapping, vision fallback, runtime model switching, and usage reports.
