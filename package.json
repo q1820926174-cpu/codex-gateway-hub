@@ -1,7 +1,21 @@
 {
   "name": "openai-compat-responses-gateway",
-  "private": true,
+  "private": false,
   "version": "0.1.0",
+  "description": "OpenAI-compatible API gateway for Codex/Responses with multi-provider routing, model mapping, vision fallback, runtime switching, and usage analytics.",
+  "license": "MIT",
+  "keywords": [
+    "openai-compatible",
+    "responses-api",
+    "chat-completions",
+    "codex",
+    "llm-gateway",
+    "multi-provider",
+    "model-routing",
+    "vision-fallback",
+    "nextjs",
+    "prisma"
+  ],
   "scripts": {
     "dev": "next dev",
     "build": "next build",

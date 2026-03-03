@@ -8,6 +8,10 @@ An integrated Next.js console (non-separated frontend/backend) for multi-upstrea
 
 `openai-compatible-gateway`, `responses-api`, `chat-completions`, `codex`, `multi-provider`, `api-gateway`, `model-routing`, `vision-fallback`, `token-usage`, `one-api-style`, `nextjs`, `prisma`, `ai-proxy`, `llm-gateway`, `openai-compat`
 
+建议仓库 About 描述（可直接复制）/ Suggested GitHub About text:
+- `OpenAI-compatible Codex/Responses gateway with multi-provider routing, model mapping, vision fallback, runtime switching, and token analytics.`
+- `OpenAI 兼容的 Codex/Responses 网关，支持多上游路由、模型映射、视觉兜底、运行时切换与 Token 统计。`
+
 建议在 GitHub 仓库 Topics 中添加（便于检索）/ Suggested GitHub Topics:
 - `openai-compatible`
 - `responses-api`
