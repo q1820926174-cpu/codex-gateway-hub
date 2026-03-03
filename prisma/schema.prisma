@@ -1,0 +1,76 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model ProviderKey {
+  id              Int      @id @default(autoincrement())
+  name            String
+  localKey        String   @unique
+  upstreamChannelId Int?
+  upstreamChannel UpstreamChannel? @relation(fields: [upstreamChannelId], references: [id], onDelete: SetNull)
+  provider        String   @default("openai")
+  wireApi         String   @default("responses")
+  upstreamWireApi String   @default("responses")
+  upstreamBaseUrl String
+  upstreamApiKey  String?
+  upstreamModelsJson String @default("[]")
+  modelMappingsJson String @default("[]")
+  defaultModel    String   @default("gpt-4.1-mini")
+  supportsVision  Boolean  @default(true)
+  visionModel     String?
+  dynamicModelSwitch Boolean @default(false)
+  contextSwitchThreshold Int @default(12000)
+  contextOverflowModel String?
+  activeModelOverride String?
+  timeoutMs       Int      @default(60000)
+  enabled         Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  tokenUsageEvents TokenUsageEvent[]
+}
+
+model UpstreamChannel {
+  id               Int      @id @default(autoincrement())
+  name             String
+  provider         String   @default("openai")
+  upstreamWireApi  String   @default("responses")
+  upstreamBaseUrl  String
+  upstreamApiKey   String?
+  upstreamModelsJson String @default("[]")
+  defaultModel     String   @default("gpt-4.1-mini")
+  supportsVision   Boolean  @default(true)
+  visionModel      String?
+  timeoutMs        Int      @default(60000)
+  enabled          Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  keys             ProviderKey[]
+}
+
+model TokenUsageEvent {
+  id               Int      @id @default(autoincrement())
+  keyId            Int
+  keyName          String
+  route            String
+  requestWireApi   String
+  upstreamWireApi  String
+  requestedModel   String
+  clientModel      String
+  upstreamModel    String
+  stream           Boolean  @default(false)
+  promptTokens     Int      @default(0)
+  completionTokens Int      @default(0)
+  totalTokens      Int      @default(0)
+  minuteBucket     DateTime
+  createdAt        DateTime @default(now())
+  key              ProviderKey @relation(fields: [keyId], references: [id], onDelete: Cascade)
+
+  @@index([minuteBucket])
+  @@index([keyId, minuteBucket])
+  @@index([keyId, clientModel, minuteBucket])
+}

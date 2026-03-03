@@ -1,0 +1,34 @@
+{
+  "name": "openai-compat-responses-gateway",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "npm run prisma:generate && node --env-file=.env scripts/init-db.mjs",
+    "prisma:reset": "npm run prisma:generate && node --env-file=.env scripts/init-db.mjs --reset"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.19.2",
+    "echarts": "^6.0.0",
+    "echarts-for-react": "^3.0.6",
+    "js-tiktoken": "^1.0.21",
+    "next": "^16.0.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-json-view-lite": "^2.5.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "tdesign-react": "^1.16.6",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.6",
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "prisma": "^6.19.2",
+    "typescript": "^5.9.3"
+  }
+}
