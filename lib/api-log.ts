@@ -6,6 +6,7 @@ const SENSITIVE_KEY_RE =
   /(authorization|api[-_]?key|token|secret|password|localkey|upstreamapikey|cookie|set-cookie)/i;
 const ENABLE_CONSOLE_LOG =
   process.env.API_LOG_CONSOLE === "1" || process.env.API_LOG_CONSOLE === "true";
+const PREVIEW_ERROR_TEXT = "[preview failed]";
 
 function truncate(text: string, max = MAX_TEXT_PREVIEW) {
   if (text.length <= max) {
@@ -94,6 +95,10 @@ async function requestBodyPreview(req: Request) {
 }
 
 async function responseBodyPreview(response: Response) {
+  const contentLength = Number(response.headers.get("content-length") ?? "0");
+  if (Number.isFinite(contentLength) && contentLength > MAX_BODY_SIZE) {
+    return `[body omitted: ${contentLength} bytes]`;
+  }
   const contentType = response.headers.get("content-type") ?? "";
   if (contentType.includes("text/event-stream")) {
     return "[stream: text/event-stream]";
@@ -128,81 +133,96 @@ export async function withApiLog(
   const path = url ? `${url.pathname}${url.search}` : routeName;
 
   const reqHeaders = req ? redactHeaders(req.headers) : {};
-  const reqBody = req ? await requestBodyPreview(req) : "[no request object]";
+  const reqBodyPromise = req
+    ? requestBodyPreview(req).catch(() => PREVIEW_ERROR_TEXT)
+    : Promise.resolve("[no request object]");
   if (ENABLE_CONSOLE_LOG) {
-    if (req) {
-      const reqLog = {
-        route: routeName,
-        method,
-        path,
-        headers: reqHeaders,
-        body: reqBody
-      };
-      console.info(`[API][${requestId}] <=`, stringifyLogData(reqLog));
-    } else {
-      console.info(`[API][${requestId}] <=`, stringifyLogData({ route: routeName, method, path }));
-    }
+    void reqBodyPromise
+      .then((reqBody) => {
+        if (req) {
+          const reqLog = {
+            route: routeName,
+            method,
+            path,
+            headers: reqHeaders,
+            body: reqBody
+          };
+          console.info(`[API][${requestId}] <=`, stringifyLogData(reqLog));
+          return;
+        }
+        console.info(`[API][${requestId}] <=`, stringifyLogData({ route: routeName, method, path }));
+      })
+      .catch(() => {});
   }
 
   try {
     const response = await handler();
     const elapsedMs = Date.now() - startedAt;
-    const respLog = {
-      route: routeName,
-      method,
-      path,
-      status: response.status,
-      elapsedMs,
-      headers: redactHeaders(response.headers),
-      body: await responseBodyPreview(response)
-    };
-    if (ENABLE_CONSOLE_LOG) {
-      console.info(`[API][${requestId}] =>`, stringifyLogData(respLog));
-    }
-    void appendApiLogEntry({
-      id: requestId,
-      route: routeName,
-      method,
-      path,
-      status: response.status,
-      elapsedMs,
-      requestHeaders: reqHeaders,
-      requestBody: reqBody,
-      responseHeaders: respLog.headers,
-      responseBody: respLog.body,
-      error: null,
-      createdAt: new Date().toISOString()
-    });
+    const responseHeaders = redactHeaders(response.headers);
+    const responseBodyPromise = responseBodyPreview(response).catch(() => PREVIEW_ERROR_TEXT);
+    void (async () => {
+      const [reqBody, responseBody] = await Promise.all([reqBodyPromise, responseBodyPromise]);
+      const respLog = {
+        route: routeName,
+        method,
+        path,
+        status: response.status,
+        elapsedMs,
+        headers: responseHeaders,
+        body: responseBody
+      };
+      if (ENABLE_CONSOLE_LOG) {
+        console.info(`[API][${requestId}] =>`, stringifyLogData(respLog));
+      }
+      await appendApiLogEntry({
+        id: requestId,
+        route: routeName,
+        method,
+        path,
+        status: response.status,
+        elapsedMs,
+        requestHeaders: reqHeaders,
+        requestBody: reqBody,
+        responseHeaders: responseHeaders,
+        responseBody: responseBody,
+        error: null,
+        createdAt: new Date().toISOString()
+      });
+    })().catch(() => {});
+
     return response;
   } catch (error) {
     const elapsedMs = Date.now() - startedAt;
     const detail = error instanceof Error ? error.message : String(error);
-    if (ENABLE_CONSOLE_LOG) {
-      console.error(
-        `[API][${requestId}] xx`,
-        stringifyLogData({
-          route: routeName,
-          method,
-          path,
-          elapsedMs,
-          error: detail
-        })
-      );
-    }
-    void appendApiLogEntry({
-      id: requestId,
-      route: routeName,
-      method,
-      path,
-      status: null,
-      elapsedMs,
-      requestHeaders: reqHeaders,
-      requestBody: reqBody,
-      responseHeaders: {},
-      responseBody: "",
-      error: detail,
-      createdAt: new Date().toISOString()
-    });
+    void (async () => {
+      const reqBody = await reqBodyPromise;
+      if (ENABLE_CONSOLE_LOG) {
+        console.error(
+          `[API][${requestId}] xx`,
+          stringifyLogData({
+            route: routeName,
+            method,
+            path,
+            elapsedMs,
+            error: detail
+          })
+        );
+      }
+      await appendApiLogEntry({
+        id: requestId,
+        route: routeName,
+        method,
+        path,
+        status: null,
+        elapsedMs,
+        requestHeaders: reqHeaders,
+        requestBody: reqBody,
+        responseHeaders: {},
+        responseBody: "",
+        error: detail,
+        createdAt: new Date().toISOString()
+      });
+    })().catch(() => {});
     throw error;
   }
 }

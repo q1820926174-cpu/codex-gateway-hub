@@ -64,6 +64,104 @@ function parseBearerToken(authorizationHeader: string | null): string | null {
   return authorizationHeader.slice("bearer ".length).trim() || null;
 }
 
+type GatewayKeyCacheEntry = {
+  key: ResolvedGatewayKey;
+  expiresAt: number;
+};
+
+function parsePositiveIntEnv(value: string | undefined, fallback: number, min: number, max: number) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, Math.floor(n)));
+}
+
+const GATEWAY_KEY_CACHE_TTL_MS = parsePositiveIntEnv(
+  process.env.GATEWAY_KEY_CACHE_TTL_MS,
+  1500,
+  0,
+  60_000
+);
+const GATEWAY_KEY_CACHE_MAX = parsePositiveIntEnv(
+  process.env.GATEWAY_KEY_CACHE_MAX,
+  2048,
+  0,
+  20_000
+);
+const gatewayKeyCache = new Map<string, GatewayKeyCacheEntry>();
+
+function isGatewayKeyCacheEnabled() {
+  return GATEWAY_KEY_CACHE_TTL_MS > 0 && GATEWAY_KEY_CACHE_MAX > 0;
+}
+
+function trimGatewayKeyCache(now: number) {
+  if (!isGatewayKeyCacheEnabled()) {
+    gatewayKeyCache.clear();
+    return;
+  }
+
+  for (const [localKey, entry] of gatewayKeyCache.entries()) {
+    if (entry.expiresAt <= now) {
+      gatewayKeyCache.delete(localKey);
+    }
+  }
+
+  while (gatewayKeyCache.size > GATEWAY_KEY_CACHE_MAX) {
+    const oldest = gatewayKeyCache.keys().next().value;
+    if (!oldest) {
+      break;
+    }
+    gatewayKeyCache.delete(oldest);
+  }
+}
+
+function readGatewayKeyCache(localKey: string): ResolvedGatewayKey | null {
+  if (!isGatewayKeyCacheEnabled()) {
+    return null;
+  }
+
+  const now = Date.now();
+  const cached = gatewayKeyCache.get(localKey);
+  if (!cached) {
+    return null;
+  }
+  if (cached.expiresAt <= now) {
+    gatewayKeyCache.delete(localKey);
+    return null;
+  }
+
+  // Refresh insertion order to mimic LRU behavior.
+  gatewayKeyCache.delete(localKey);
+  gatewayKeyCache.set(localKey, cached);
+  return cached.key;
+}
+
+function writeGatewayKeyCache(localKey: string, key: ResolvedGatewayKey) {
+  if (!isGatewayKeyCacheEnabled()) {
+    return;
+  }
+  const now = Date.now();
+  trimGatewayKeyCache(now);
+  gatewayKeyCache.set(localKey, {
+    key,
+    expiresAt: now + GATEWAY_KEY_CACHE_TTL_MS
+  });
+  trimGatewayKeyCache(now);
+}
+
+export function clearGatewayKeyCache(localKey?: string | null) {
+  if (!localKey) {
+    gatewayKeyCache.clear();
+    return;
+  }
+  const normalized = localKey.trim();
+  if (!normalized) {
+    return;
+  }
+  gatewayKeyCache.delete(normalized);
+}
+
 export async function resolveGatewayKey(
   authorizationHeader: string | null
 ): Promise<KeyResolveFailure | KeyResolveSuccess> {
@@ -75,6 +173,14 @@ export async function resolveGatewayKey(
       body: {
         error: "Missing local key. Use Authorization: Bearer <local_key>."
       }
+    };
+  }
+
+  const cachedKey = readGatewayKeyCache(localKey);
+  if (cachedKey) {
+    return {
+      ok: true,
+      key: cachedKey
     };
   }
 
@@ -149,22 +255,25 @@ export async function resolveGatewayKey(
       key.visionModel ??
       null;
 
+  const resolvedKey: ResolvedGatewayKey = {
+    ...key,
+    provider: effectiveProvider,
+    upstreamWireApi: effectiveUpstreamWireApi,
+    upstreamBaseUrl: key.upstreamChannel?.upstreamBaseUrl ?? key.upstreamBaseUrl,
+    upstreamApiKey: effectiveApiKey,
+    upstreamModels,
+    modelMappings: normalizeKeyModelMappings(key.modelMappingsJson),
+    defaultModel: effectiveDefaultModel,
+    supportsVision: effectiveSupportsVision,
+    visionChannelId: effectiveVisionChannelId,
+    visionModel: effectiveVisionModel,
+    timeoutMs: key.upstreamChannel?.timeoutMs ?? key.timeoutMs
+  };
+  writeGatewayKeyCache(localKey, resolvedKey);
+
   return {
     ok: true,
-    key: {
-      ...key,
-      provider: effectiveProvider,
-      upstreamWireApi: effectiveUpstreamWireApi,
-      upstreamBaseUrl: key.upstreamChannel?.upstreamBaseUrl ?? key.upstreamBaseUrl,
-      upstreamApiKey: effectiveApiKey,
-      upstreamModels,
-      modelMappings: normalizeKeyModelMappings(key.modelMappingsJson),
-      defaultModel: effectiveDefaultModel,
-      supportsVision: effectiveSupportsVision,
-      visionChannelId: effectiveVisionChannelId,
-      visionModel: effectiveVisionModel,
-      timeoutMs: key.upstreamChannel?.timeoutMs ?? key.timeoutMs
-    }
+    key: resolvedKey
   };
 }
 

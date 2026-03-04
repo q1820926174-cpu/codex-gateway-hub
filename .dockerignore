@@ -1,0 +1,15 @@
+.git
+.gitignore
+.next
+node_modules
+logs
+coverage
+dist
+.env
+prisma/dev.db
+prisma/dev.db-journal
+public/ai-call-images
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*

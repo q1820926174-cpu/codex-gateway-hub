@@ -16,7 +16,7 @@ export type ApiLogEntry = {
   createdAt: string;
 };
 
-function logFilePath() {
+function resolveLogFilePath() {
   const custom = process.env.API_LOG_FILE?.trim();
   if (custom) {
     return path.isAbsolute(custom) ? custom : path.resolve(process.cwd(), custom);
@@ -24,16 +24,44 @@ function logFilePath() {
   return path.resolve(process.cwd(), "logs", "api-access.ndjson");
 }
 
+const API_LOG_FILE_PATH = resolveLogFilePath();
+
+let ensureDirPromise: Promise<void> | null = null;
+let appendQueue: Promise<void> = Promise.resolve();
+
+function logFilePath() {
+  return API_LOG_FILE_PATH;
+}
+
 async function ensureLogFileDir() {
-  await mkdir(path.dirname(logFilePath()), { recursive: true });
+  if (!ensureDirPromise) {
+    ensureDirPromise = mkdir(path.dirname(logFilePath()), { recursive: true })
+      .then(() => undefined)
+      .catch((error) => {
+        ensureDirPromise = null;
+        throw error;
+      });
+  }
+  await ensureDirPromise;
+}
+
+function enqueueAppend(task: () => Promise<void>) {
+  appendQueue = appendQueue.then(task, task);
+  return appendQueue;
+}
+
+async function waitForPendingAppends() {
+  await appendQueue.catch(() => {});
 }
 
 export async function appendApiLogEntry(entry: ApiLogEntry) {
   try {
-    await ensureLogFileDir();
-    await writeFile(logFilePath(), `${JSON.stringify(entry)}\n`, {
-      encoding: "utf8",
-      flag: "a"
+    await enqueueAppend(async () => {
+      await ensureLogFileDir();
+      await writeFile(logFilePath(), `${JSON.stringify(entry)}\n`, {
+        encoding: "utf8",
+        flag: "a"
+      });
     });
   } catch {
     // ignore logging side effect failures
@@ -42,6 +70,7 @@ export async function appendApiLogEntry(entry: ApiLogEntry) {
 
 export async function readApiLogEntries(limit: number) {
   try {
+    await waitForPendingAppends();
     const raw = await readFile(logFilePath(), "utf8");
     if (!raw.trim()) {
       return [];
@@ -64,6 +93,7 @@ export async function readApiLogEntries(limit: number) {
 
 export async function clearApiLogEntries() {
   try {
+    await waitForPendingAppends();
     await ensureLogFileDir();
     await truncate(logFilePath(), 0);
   } catch {

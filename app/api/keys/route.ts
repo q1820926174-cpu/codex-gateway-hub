@@ -15,6 +15,7 @@ import {
   UPSTREAM_WIRE_APIS
 } from "@/lib/key-config";
 import { normalizeUpstreamModelCode, PROVIDERS } from "@/lib/providers";
+import { clearGatewayKeyCache } from "@/lib/upstream";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -169,18 +170,16 @@ export async function POST(req: Request) {
           activeModelOverride: payload.activeModelOverride?.trim() || null,
           timeoutMs: upstreamChannel?.timeoutMs ?? payload.timeoutMs,
           enabled: payload.enabled
-        }
-      });
-      const createdWithChannel = await prisma.providerKey.findUnique({
-        where: { id: created.id },
+        },
         include: {
           upstreamChannel: {
             select: KEY_WITH_CHANNEL_SELECT
           }
         }
       });
+      clearGatewayKeyCache(created.localKey);
 
-      return NextResponse.json(gatewayKeyDto(createdWithChannel ?? created), { status: 201 });
+      return NextResponse.json(gatewayKeyDto(created), { status: 201 });
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
         return NextResponse.json(

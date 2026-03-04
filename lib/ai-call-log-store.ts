@@ -46,7 +46,7 @@ type ReadAiCallLogStats = {
   visionByKey: Array<{ keyId: number; keyName: string; count: number }>;
 };
 
-function logFilePath() {
+function resolveLogFilePath() {
   const custom = process.env.AI_CALL_LOG_FILE?.trim();
   if (custom) {
     return path.isAbsolute(custom) ? custom : path.resolve(process.cwd(), custom);
@@ -54,12 +54,38 @@ function logFilePath() {
   return path.resolve(process.cwd(), "logs", "ai-call.ndjson");
 }
 
+const AI_CALL_LOG_FILE_PATH = resolveLogFilePath();
+
+let ensureDirPromise: Promise<void> | null = null;
+let appendQueue: Promise<void> = Promise.resolve();
+
+function logFilePath() {
+  return AI_CALL_LOG_FILE_PATH;
+}
+
 function imageLogDirPath() {
   return path.resolve(process.cwd(), "public", "ai-call-images");
 }
 
 async function ensureLogFileDir() {
-  await mkdir(path.dirname(logFilePath()), { recursive: true });
+  if (!ensureDirPromise) {
+    ensureDirPromise = mkdir(path.dirname(logFilePath()), { recursive: true })
+      .then(() => undefined)
+      .catch((error) => {
+        ensureDirPromise = null;
+        throw error;
+      });
+  }
+  await ensureDirPromise;
+}
+
+function enqueueAppend(task: () => Promise<void>) {
+  appendQueue = appendQueue.then(task, task);
+  return appendQueue;
+}
+
+async function waitForPendingAppends() {
+  await appendQueue.catch(() => {});
 }
 
 function trimForFilter(value: string | null | undefined) {
@@ -73,10 +99,12 @@ function normalizeCallType(value: unknown): AiCallType {
 
 export async function appendAiCallLogEntry(entry: AiCallLogEntry) {
   try {
-    await ensureLogFileDir();
-    await writeFile(logFilePath(), `${JSON.stringify(entry)}\n`, {
-      encoding: "utf8",
-      flag: "a"
+    await enqueueAppend(async () => {
+      await ensureLogFileDir();
+      await writeFile(logFilePath(), `${JSON.stringify(entry)}\n`, {
+        encoding: "utf8",
+        flag: "a"
+      });
     });
   } catch {
     // ignore logging side effect failures
@@ -85,6 +113,7 @@ export async function appendAiCallLogEntry(entry: AiCallLogEntry) {
 
 export async function readAiCallLogEntries(query: ReadAiCallLogQuery) {
   try {
+    await waitForPendingAppends();
     const raw = await readFile(logFilePath(), "utf8");
     if (!raw.trim()) {
       return {
@@ -197,6 +226,7 @@ export async function readAiCallLogEntries(query: ReadAiCallLogQuery) {
 
 export async function clearAiCallLogEntries() {
   try {
+    await waitForPendingAppends();
     await ensureLogFileDir();
     await truncate(logFilePath(), 0);
     await rm(imageLogDirPath(), { recursive: true, force: true });

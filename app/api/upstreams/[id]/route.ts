@@ -8,6 +8,7 @@ import {
 } from "@/lib/upstream-channel-config";
 import type { ProviderName } from "@/lib/providers";
 import type { UpstreamWireApi } from "@/lib/key-config";
+import { clearGatewayKeyCache } from "@/lib/upstream";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -144,6 +145,7 @@ export async function PUT(
         }
       }
     });
+    clearGatewayKeyCache();
 
     return NextResponse.json(upstreamChannelDto(updated));
   });
@@ -165,11 +167,14 @@ export async function DELETE(
       return NextResponse.json({ error: "Upstream channel not found." }, { status: 404 });
     }
 
-    await prisma.providerKey.updateMany({
-      where: { upstreamChannelId: id },
-      data: { upstreamChannelId: null }
-    });
-    await prisma.upstreamChannel.delete({ where: { id } });
+    await prisma.$transaction([
+      prisma.providerKey.updateMany({
+        where: { upstreamChannelId: id },
+        data: { upstreamChannelId: null }
+      }),
+      prisma.upstreamChannel.delete({ where: { id } })
+    ]);
+    clearGatewayKeyCache();
     return NextResponse.json({ ok: true });
   });
 }

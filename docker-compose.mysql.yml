@@ -1,0 +1,47 @@
+services:
+  gateway:
+    container_name: codex-gateway-hub
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        DATABASE_PROVIDER: mysql
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      HOSTNAME: 0.0.0.0
+      PORT: 3000
+      DATABASE_PROVIDER: mysql
+      DATABASE_URL: mysql://${MYSQL_USER:-codex}:${MYSQL_PASSWORD:-codex}@mysql:3306/${MYSQL_DATABASE:-codex_gateway}
+      CONSOLE_ENTRY_SECRET: ${CONSOLE_ENTRY_SECRET:-}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+
+  mysql:
+    image: mysql:8.4
+    container_name: codex-gateway-mysql
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-codex_gateway}
+      MYSQL_USER: ${MYSQL_USER:-codex}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-codex}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpass}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+volumes:
+  mysql_data:

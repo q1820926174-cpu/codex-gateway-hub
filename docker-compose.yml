@@ -1,0 +1,23 @@
+services:
+  gateway:
+    container_name: codex-gateway-hub
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        DATABASE_PROVIDER: sqlite
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      HOSTNAME: 0.0.0.0
+      PORT: 3000
+      DATABASE_PROVIDER: sqlite
+      DATABASE_URL: file:../data/dev.db
+      CONSOLE_ENTRY_SECRET: ${CONSOLE_ENTRY_SECRET:-}
+    volumes:
+      - gateway_data:/app/data
+    restart: unless-stopped
+
+volumes:
+  gateway_data:

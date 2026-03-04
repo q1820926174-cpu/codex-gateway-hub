@@ -14,6 +14,7 @@ import {
   updateGatewayKeySchema
 } from "@/lib/key-config";
 import { normalizeUpstreamModelCode, type ProviderName } from "@/lib/providers";
+import { clearGatewayKeyCache } from "@/lib/upstream";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -273,6 +274,10 @@ export async function PUT(
         },
         include: KEY_WITH_CHANNEL_INCLUDE
       });
+      if (existing.localKey !== updated.localKey) {
+        clearGatewayKeyCache(existing.localKey);
+      }
+      clearGatewayKeyCache(updated.localKey);
 
       return NextResponse.json(gatewayKeyDto(updated));
     } catch (error) {
@@ -323,6 +328,7 @@ export async function DELETE(
     }
 
     await prisma.providerKey.delete({ where: { id } });
+    clearGatewayKeyCache(existing.localKey);
     return NextResponse.json({ ok: true });
   });
 }

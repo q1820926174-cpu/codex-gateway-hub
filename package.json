@@ -17,12 +17,15 @@
     "prisma"
   ],
   "scripts": {
+    "predev": "npm run prisma:generate",
+    "prebuild": "npm run prisma:generate",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "prisma:generate": "prisma generate",
-    "prisma:migrate": "npm run prisma:generate && node --env-file=.env scripts/init-db.mjs",
-    "prisma:reset": "npm run prisma:generate && node --env-file=.env scripts/init-db.mjs --reset"
+    "db:init": "node --env-file-if-exists=.env scripts/init-db.mjs",
+    "prisma:generate": "node --env-file-if-exists=.env scripts/prisma-generate.mjs",
+    "prisma:migrate": "npm run prisma:generate && npm run db:init",
+    "prisma:reset": "npm run prisma:generate && node --env-file-if-exists=.env scripts/init-db.mjs --reset"
   },
   "dependencies": {
     "@prisma/client": "^6.19.2",

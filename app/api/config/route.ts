@@ -7,14 +7,16 @@ export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
   return withApiLog(req, "GET /api/config", async () => {
-    const totalKeys = await prisma.providerKey.count();
-    const enabledKeys = await prisma.providerKey.count({
-      where: { enabled: true }
-    });
-    const totalChannels = await prisma.upstreamChannel.count();
-    const enabledChannels = await prisma.upstreamChannel.count({
-      where: { enabled: true }
-    });
+    const [totalKeys, enabledKeys, totalChannels, enabledChannels] = await Promise.all([
+      prisma.providerKey.count(),
+      prisma.providerKey.count({
+        where: { enabled: true }
+      }),
+      prisma.upstreamChannel.count(),
+      prisma.upstreamChannel.count({
+        where: { enabled: true }
+      })
+    ]);
     return NextResponse.json({
       wireApi: "responses",
       totalKeys,

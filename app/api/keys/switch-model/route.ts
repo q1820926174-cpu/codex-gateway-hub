@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { withApiLog } from "@/lib/api-log";
+import { clearGatewayKeyCache } from "@/lib/upstream";
 import {
   gatewayKeyDto,
   OPENAI_STYLE_LOCAL_KEY_MESSAGE,
@@ -273,6 +274,7 @@ export async function POST(req: Request) {
       where: { id: existing.id },
       data: updateData
     });
+    clearGatewayKeyCache(updated.localKey);
 
     return NextResponse.json({
       ok: true,
