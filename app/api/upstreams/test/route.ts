@@ -2,12 +2,15 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { withApiLog } from "@/lib/api-log";
-import { resolveUpstreamBaseUrl, UPSTREAM_WIRE_APIS } from "@/lib/key-config";
+import { normalizeUpstreamWireApiValue, resolveUpstreamBaseUrl, UPSTREAM_WIRE_APIS } from "@/lib/key-config";
+import { extractAnthropicMessageText } from "@/lib/anthropic-compat";
 import { normalizeUpstreamModelCode, PROVIDERS, sanitizeBaseUrl } from "@/lib/providers";
 import { extractLegacyChatCompletionText, extractResponseText } from "@/lib/mapper";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+const DEFAULT_ANTHROPIC_VERSION = process.env.ANTHROPIC_VERSION?.trim() || "2023-06-01";
 
 const testUpstreamSchema = z
   .object({
@@ -45,7 +48,10 @@ const testUpstreamSchema = z
     }
   });
 
-function buildUpstreamEndpoint(baseUrl: string, resourcePath: "responses" | "chat/completions") {
+function buildUpstreamEndpoint(
+  baseUrl: string,
+  resourcePath: "responses" | "chat/completions" | "messages"
+) {
   const normalized = sanitizeBaseUrl(baseUrl);
   if (/\/v\d+(?:\.\d+)?$/i.test(normalized)) {
     return `${normalized}/${resourcePath}`;
@@ -79,6 +85,57 @@ function previewString(value: unknown, maxLen = 220) {
   }
 }
 
+function buildRequestBody(upstreamWireApi: (typeof UPSTREAM_WIRE_APIS)[number], model: string, testPrompt: string) {
+  if (upstreamWireApi === "responses") {
+    return {
+      model,
+      input: [
+        {
+          role: "user",
+          content: [{ type: "input_text", text: testPrompt }]
+        }
+      ],
+      max_output_tokens: 80
+    };
+  }
+  if (upstreamWireApi === "anthropic_messages") {
+    return {
+      model,
+      messages: [{ role: "user", content: testPrompt }],
+      max_tokens: 80
+    };
+  }
+  return {
+    model,
+    messages: [{ role: "user", content: testPrompt }],
+    max_tokens: 80
+  };
+}
+
+function buildRequestHeaders(upstreamWireApi: (typeof UPSTREAM_WIRE_APIS)[number], upstreamApiKey: string): Record<string, string> {
+  if (upstreamWireApi === "anthropic_messages") {
+    return {
+      "content-type": "application/json",
+      "x-api-key": upstreamApiKey,
+      "anthropic-version": DEFAULT_ANTHROPIC_VERSION
+    };
+  }
+  return {
+    "content-type": "application/json",
+    authorization: `Bearer ${upstreamApiKey}`
+  };
+}
+
+function extractResponsePreview(upstreamWireApi: (typeof UPSTREAM_WIRE_APIS)[number], upstreamBody: unknown) {
+  if (upstreamWireApi === "responses") {
+    return extractResponseText(upstreamBody).trim();
+  }
+  if (upstreamWireApi === "anthropic_messages") {
+    return extractAnthropicMessageText(upstreamBody).trim();
+  }
+  return extractLegacyChatCompletionText(upstreamBody).trim();
+}
+
 export async function POST(req: Request) {
   return withApiLog(req, "POST /api/upstreams/test", async () => {
     const body = await req.json().catch(() => ({}));
@@ -108,19 +165,14 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "provider is required." }, { status: 400 });
     }
 
-    const upstreamWireApi =
-      payload.upstreamWireApi ??
-      (channel?.upstreamWireApi === "chat_completions" ? "chat_completions" : "responses");
-    if (!upstreamWireApi) {
-      return NextResponse.json({ error: "upstreamWireApi is required." }, { status: 400 });
-    }
-
+    const upstreamWireApi = normalizeUpstreamWireApiValue(
+      payload.upstreamWireApi ?? channel?.upstreamWireApi
+    );
     const modelRaw = payload.model?.trim() || channel?.defaultModel || "";
     if (!modelRaw) {
       return NextResponse.json({ error: "model is required." }, { status: 400 });
     }
     const model = normalizeUpstreamModelCode(provider, modelRaw);
-
     const timeoutMs = payload.timeoutMs ?? channel?.timeoutMs ?? 60000;
 
     const upstreamApiKey =
@@ -144,38 +196,22 @@ export async function POST(req: Request) {
       );
     }
 
-    const requestBody =
+    const requestBody = buildRequestBody(upstreamWireApi, model, payload.testPrompt);
+    const endpoint = buildUpstreamEndpoint(
+      upstreamBaseUrl,
       upstreamWireApi === "responses"
-        ? {
-            model,
-            input: [
-              {
-                role: "user",
-                content: [{ type: "input_text", text: payload.testPrompt }]
-              }
-            ],
-            max_output_tokens: 80
-          }
-        : {
-            model,
-            messages: [{ role: "user", content: payload.testPrompt }],
-            max_tokens: 80
-          };
-
-    const endpoint =
-      upstreamWireApi === "responses"
-        ? buildUpstreamEndpoint(upstreamBaseUrl, "responses")
-        : buildUpstreamEndpoint(upstreamBaseUrl, "chat/completions");
+        ? "responses"
+        : upstreamWireApi === "anthropic_messages"
+          ? "messages"
+          : "chat/completions"
+    );
 
     const startAt = Date.now();
     let response: Response;
     try {
       response = await fetch(endpoint, {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${upstreamApiKey}`
-        },
+        headers: buildRequestHeaders(upstreamWireApi, upstreamApiKey),
         body: JSON.stringify(requestBody),
         signal: AbortSignal.timeout(timeoutMs)
       });
@@ -183,8 +219,7 @@ export async function POST(req: Request) {
       return NextResponse.json(
         {
           error: "Failed to request upstream endpoint.",
-          detail: error instanceof Error ? error.message : String(error),
-          endpoint
+          detail: error instanceof Error ? error.message : String(error)
         },
         { status: 504 }
       );
@@ -192,23 +227,20 @@ export async function POST(req: Request) {
 
     const latencyMs = Date.now() - startAt;
     const upstreamBody = await parseUpstreamBody(response);
+
     if (!response.ok) {
       return NextResponse.json(
         {
           error: "Upstream model test failed.",
           upstreamStatus: response.status,
           latencyMs,
-          endpoint,
           upstreamPreview: previewString(upstreamBody, 420)
         },
         { status: 502 }
       );
     }
 
-    const outputText =
-      upstreamWireApi === "responses"
-        ? extractResponseText(upstreamBody).trim()
-        : extractLegacyChatCompletionText(upstreamBody).trim();
+    const outputText = extractResponsePreview(upstreamWireApi, upstreamBody);
 
     return NextResponse.json({
       ok: true,

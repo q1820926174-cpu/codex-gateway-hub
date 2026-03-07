@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withApiLog } from "@/lib/api-log";
+import { requireConsoleApiAuth } from "@/lib/console-api-auth";
 import { clearTokenUsageEvents, readTokenUsageReport } from "@/lib/usage-report";
 
 export const runtime = "nodejs";
@@ -49,6 +50,11 @@ function resolveDateTime(value: string | null) {
 
 export async function GET(req: Request) {
   return withApiLog(req, "GET /api/usage", async () => {
+    const authError = requireConsoleApiAuth(req);
+    if (authError) {
+      return authError;
+    }
+
     const url = new URL(req.url);
     const report = await readTokenUsageReport({
       minutes: resolveMinutes(url.searchParams.get("minutes")),
@@ -63,6 +69,11 @@ export async function GET(req: Request) {
 
 export async function DELETE(req: Request) {
   return withApiLog(req, "DELETE /api/usage", async () => {
+    const authError = requireConsoleApiAuth(req);
+    if (authError) {
+      return authError;
+    }
+
     await clearTokenUsageEvents();
     return NextResponse.json({ ok: true });
   });

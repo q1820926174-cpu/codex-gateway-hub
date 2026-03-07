@@ -26,6 +26,10 @@ export type LegacyChatRequest = {
     summary?: string;
     [key: string]: unknown;
   };
+  anthropic_output_config?: {
+    effort?: string;
+    [key: string]: unknown;
+  };
   text?: {
     verbosity?: string;
     [key: string]: unknown;
@@ -798,6 +802,50 @@ export function extractLegacyChatCompletionText(responseJson: unknown): string {
   return "";
 }
 
+function extractLegacyChatCompletionReasoning(responseJson: unknown): string {
+  if (!responseJson || typeof responseJson !== "object") {
+    return "";
+  }
+
+  const payload = responseJson as {
+    choices?: Array<{
+      message?: {
+        reasoning_content?: unknown;
+      };
+      delta?: {
+        reasoning_content?: unknown;
+      };
+    }>;
+  };
+
+  const choice = payload.choices?.[0];
+  if (!choice) {
+    return "";
+  }
+
+  const reasoningContent = choice.message?.reasoning_content ?? choice.delta?.reasoning_content;
+  if (typeof reasoningContent === "string") {
+    return reasoningContent.trim();
+  }
+  if (!Array.isArray(reasoningContent)) {
+    return "";
+  }
+  return reasoningContent
+    .map((part) => {
+      if (typeof part === "string") {
+        return part;
+      }
+      if (part && typeof part === "object" && "text" in part) {
+        const text = (part as { text?: unknown }).text;
+        return typeof text === "string" ? text : "";
+      }
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
 export function mapLegacyChatCompletionToResponses(responseJson: unknown, fallbackModel: string) {
   const payload = responseJson as {
     id?: string;
@@ -836,6 +884,7 @@ export function mapLegacyChatCompletionToResponses(responseJson: unknown, fallba
     ? Math.max(0, Math.floor(usageTotalRaw))
     : promptTokens + completionTokens;
   const outputText = extractLegacyChatCompletionText(responseJson);
+  const reasoningText = extractLegacyChatCompletionReasoning(responseJson);
   const toolCalls = (payload.choices?.[0]?.message?.tool_calls ?? [])
     .map((item, index) => {
       if (!item || typeof item !== "object") {
@@ -871,6 +920,17 @@ export function mapLegacyChatCompletionToResponses(responseJson: unknown, fallba
     .filter((item): item is NonNullable<typeof item> => item !== null);
 
   const outputItems: Array<unknown> = [];
+  if (reasoningText) {
+    outputItems.push({
+      type: "reasoning",
+      summary: [
+        {
+          type: "summary_text",
+          text: reasoningText
+        }
+      ]
+    });
+  }
   if (outputText) {
     outputItems.push({
       type: "message",

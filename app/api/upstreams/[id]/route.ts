@@ -1,13 +1,14 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { withApiLog } from "@/lib/api-log";
+import { requireConsoleApiAuth } from "@/lib/console-api-auth";
 import {
   normalizeChannelPayload,
   updateUpstreamChannelSchema,
   upstreamChannelDto
 } from "@/lib/upstream-channel-config";
 import type { ProviderName } from "@/lib/providers";
-import type { UpstreamWireApi } from "@/lib/key-config";
+import { normalizeUpstreamWireApiValue, type UpstreamWireApi } from "@/lib/key-config";
 import { clearGatewayKeyCache } from "@/lib/upstream";
 
 export const runtime = "nodejs";
@@ -26,6 +27,11 @@ export async function GET(
   context: { params: Promise<{ id: string }> }
 ) {
   return withApiLog(req, "GET /api/upstreams/:id", async () => {
+    const authError = requireConsoleApiAuth(req);
+    if (authError) {
+      return authError;
+    }
+
     const { id: rawId } = await context.params;
     const id = parseId(rawId);
     if (id === null) {
@@ -55,6 +61,11 @@ export async function PUT(
   context: { params: Promise<{ id: string }> }
 ) {
   return withApiLog(req, "PUT /api/upstreams/:id", async () => {
+    const authError = requireConsoleApiAuth(req);
+    if (authError) {
+      return authError;
+    }
+
     const { id: rawId } = await context.params;
     const id = parseId(rawId);
     if (id === null) {
@@ -80,11 +91,9 @@ export async function PUT(
     }
 
     const nextProvider = (payload.provider ?? existing.provider) as ProviderName;
-    const nextUpstreamWireApi =
-      payload.upstreamWireApi ??
-      (existing.upstreamWireApi === "chat_completions"
-        ? "chat_completions"
-        : "responses");
+    const nextUpstreamWireApi = normalizeUpstreamWireApiValue(
+      payload.upstreamWireApi ?? existing.upstreamWireApi
+    );
     const normalizedNextUpstreamWireApi = nextUpstreamWireApi as UpstreamWireApi;
     const nextDefaultModel = payload.defaultModel?.trim() ?? existing.defaultModel;
     const nextSupportsVision = payload.supportsVision ?? existing.supportsVision;
@@ -156,6 +165,11 @@ export async function DELETE(
   context: { params: Promise<{ id: string }> }
 ) {
   return withApiLog(req, "DELETE /api/upstreams/:id", async () => {
+    const authError = requireConsoleApiAuth(req);
+    if (authError) {
+      return authError;
+    }
+
     const { id: rawId } = await context.params;
     const id = parseId(rawId);
     if (id === null) {

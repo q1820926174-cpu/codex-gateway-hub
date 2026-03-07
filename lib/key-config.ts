@@ -1,8 +1,18 @@
 import { z } from "zod";
 import { defaultBaseUrlForProvider, PROVIDERS, sanitizeBaseUrl, type ProviderName } from "@/lib/providers";
 
-export const UPSTREAM_WIRE_APIS = ["responses", "chat_completions"] as const;
+export const UPSTREAM_WIRE_APIS = ["responses", "chat_completions", "anthropic_messages"] as const;
 export type UpstreamWireApi = (typeof UPSTREAM_WIRE_APIS)[number];
+
+export function normalizeUpstreamWireApiValue(value: string | null | undefined): UpstreamWireApi {
+  if (value === "chat_completions") {
+    return "chat_completions";
+  }
+  if (value === "anthropic_messages") {
+    return "anthropic_messages";
+  }
+  return "responses";
+}
 const MAX_UPSTREAM_MODELS = 64;
 const MAX_KEY_MODEL_MAPPINGS = 128;
 export const OPENAI_STYLE_LOCAL_KEY_REGEX = /^sk-(?:proj-)?[A-Za-z0-9_-]{20,}$/;
@@ -392,10 +402,9 @@ export function gatewayKeyDto<
   }
 >(key: T) {
   const effectiveProvider = key.upstreamChannel?.provider ?? key.provider;
-  const effectiveUpstreamWireApi =
-    (key.upstreamChannel?.upstreamWireApi ?? key.upstreamWireApi) === "chat_completions"
-      ? "chat_completions"
-      : "responses";
+  const effectiveUpstreamWireApi = normalizeUpstreamWireApiValue(
+    key.upstreamChannel?.upstreamWireApi ?? key.upstreamWireApi
+  );
   const effectiveDefaultModel = key.upstreamChannel?.defaultModel ?? key.defaultModel;
   const effectiveSupportsVision = key.upstreamChannel?.supportsVision ?? key.supportsVision;
   const effectiveVisionModel = key.upstreamChannel?.visionModel ?? key.visionModel;

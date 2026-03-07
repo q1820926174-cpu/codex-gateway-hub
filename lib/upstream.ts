@@ -3,6 +3,7 @@ import { sanitizeBaseUrl } from "@/lib/providers";
 import {
   normalizeKeyModelMappings,
   normalizeUpstreamModels,
+  normalizeUpstreamWireApiValue,
   pickModelFromPool,
   type KeyModelMapping,
   type UpstreamModelConfig,
@@ -45,7 +46,7 @@ type KeyResolveSuccess = {
 
 export type ResolvedGatewayKey = KeyResolveSuccess["key"];
 
-function buildUpstreamEndpoint(baseUrl: string, resourcePath: "responses" | "chat/completions" | "completions") {
+function buildUpstreamEndpoint(baseUrl: string, resourcePath: "responses" | "chat/completions" | "completions" | "messages") {
   const normalized = sanitizeBaseUrl(baseUrl);
   if (/\/v\d+(?:\.\d+)?$/i.test(normalized)) {
     return `${normalized}/${resourcePath}`;
@@ -54,7 +55,35 @@ function buildUpstreamEndpoint(baseUrl: string, resourcePath: "responses" | "cha
 }
 
 function normalizeUpstreamWireApi(value: string): UpstreamWireApi {
-  return value === "chat_completions" ? "chat_completions" : "responses";
+  return normalizeUpstreamWireApiValue(value);
+}
+
+const DEFAULT_ANTHROPIC_VERSION = process.env.ANTHROPIC_VERSION?.trim() || "2023-06-01";
+
+type AnthropicHeaderOverrides = {
+  anthropicVersion?: string | null;
+  anthropicBeta?: string | null;
+};
+
+function buildOpenAiStyleHeaders(apiKey: string): Record<string, string> {
+  return {
+    "content-type": "application/json",
+    authorization: `Bearer ${apiKey}`
+  };
+}
+
+function buildAnthropicHeaders(apiKey: string, overrides?: AnthropicHeaderOverrides): Record<string, string> {
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    "x-api-key": apiKey,
+    "anthropic-version": overrides?.anthropicVersion?.trim() || DEFAULT_ANTHROPIC_VERSION
+  };
+
+  if (overrides?.anthropicBeta?.trim()) {
+    headers["anthropic-beta"] = overrides.anthropicBeta.trim();
+  }
+
+  return headers;
 }
 
 function parseBearerToken(authorizationHeader: string | null): string | null {
@@ -62,6 +91,14 @@ function parseBearerToken(authorizationHeader: string | null): string | null {
     return null;
   }
   return authorizationHeader.slice("bearer ".length).trim() || null;
+}
+
+function parseRawApiKey(rawKey: string | null | undefined): string | null {
+  if (typeof rawKey !== "string") {
+    return null;
+  }
+  const normalized = rawKey.trim();
+  return normalized || null;
 }
 
 type GatewayKeyCacheEntry = {
@@ -163,15 +200,16 @@ export function clearGatewayKeyCache(localKey?: string | null) {
 }
 
 export async function resolveGatewayKey(
-  authorizationHeader: string | null
+  authorizationHeader: string | null,
+  rawApiKey?: string | null
 ): Promise<KeyResolveFailure | KeyResolveSuccess> {
-  const localKey = parseBearerToken(authorizationHeader);
+  const localKey = parseBearerToken(authorizationHeader) ?? parseRawApiKey(rawApiKey);
   if (!localKey) {
     return {
       ok: false,
       status: 401,
       body: {
-        error: "Missing local key. Use Authorization: Bearer <local_key>."
+        error: "Missing local key. Use Authorization: Bearer <local_key> or x-api-key: <local_key>."
       }
     };
   }
@@ -280,10 +318,7 @@ export async function resolveGatewayKey(
 export async function callResponsesApi(payload: unknown, key: ResolvedGatewayKey) {
   const response = await fetch(buildUpstreamEndpoint(key.upstreamBaseUrl, "responses"), {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${key.upstreamApiKey!.trim()}`
-    },
+    headers: buildOpenAiStyleHeaders(key.upstreamApiKey!.trim()),
     body: JSON.stringify(payload),
     signal: AbortSignal.timeout(key.timeoutMs)
   });
@@ -308,28 +343,42 @@ export async function callResponsesApi(payload: unknown, key: ResolvedGatewayKey
 }
 
 function buildStreamProxyHeaders(upstreamResponse: Response) {
-  const headers = new Headers(upstreamResponse.headers);
+  const headers = new Headers();
+  const allowedHeaders = [
+    "content-type",
+    "cache-control",
+    "connection",
+    "transfer-encoding",
+    "x-request-id",
+    "request-id",
+    "x-correlation-id",
+    "x-trace-id",
+    "x-accel-buffering"
+  ] as const;
+  for (const headerName of allowedHeaders) {
+    const value = upstreamResponse.headers.get(headerName);
+    if (value) {
+      headers.set(headerName, value);
+    }
+  }
   if (!headers.get("content-type")) {
     headers.set("content-type", "text/event-stream; charset=utf-8");
   }
   if (!headers.get("cache-control")) {
     headers.set("cache-control", "no-cache");
   }
-  headers.delete("content-length");
   return headers;
 }
 
 async function callStreamEndpoint(
-  resource: "responses" | "chat/completions" | "completions",
+  resource: "responses" | "chat/completions" | "completions" | "messages",
   payload: unknown,
-  key: ResolvedGatewayKey
+  key: ResolvedGatewayKey,
+  headers: Record<string, string> = buildOpenAiStyleHeaders(key.upstreamApiKey!.trim())
 ) {
   const upstreamResponse = await fetch(buildUpstreamEndpoint(key.upstreamBaseUrl, resource), {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${key.upstreamApiKey!.trim()}`
-    },
+    headers,
     body: JSON.stringify(payload),
     signal: AbortSignal.timeout(key.timeoutMs)
   });
@@ -357,14 +406,11 @@ async function callJsonEndpoint(path: string, payload: unknown, key: ResolvedGat
   const response = await fetch(
     buildUpstreamEndpoint(
       key.upstreamBaseUrl,
-      resource === "chat/completions" ? "chat/completions" : "completions"
+      resource === "chat/completions" ? "chat/completions" : resource === "messages" ? "messages" : "completions"
     ),
     {
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${key.upstreamApiKey!.trim()}`
-      },
+      headers: buildOpenAiStyleHeaders(key.upstreamApiKey!.trim()),
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(key.timeoutMs)
     }
@@ -400,4 +446,54 @@ export async function callChatCompletionsApi(payload: unknown, key: ResolvedGate
 
 export async function callCompletionsApi(payload: unknown, key: ResolvedGatewayKey) {
   return callJsonEndpoint("/v1/completions", payload, key);
+}
+
+
+export async function callAnthropicMessagesApi(
+  payload: unknown,
+  key: ResolvedGatewayKey,
+  headerOverrides?: AnthropicHeaderOverrides
+) {
+  const response = await fetch(buildUpstreamEndpoint(key.upstreamBaseUrl, "messages"), {
+    method: "POST",
+    headers: buildAnthropicHeaders(key.upstreamApiKey!.trim(), headerOverrides),
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(key.timeoutMs)
+  });
+
+  const contentType = response.headers.get("content-type") ?? "";
+  const parsedBody = contentType.includes("application/json")
+    ? await response.json().catch(() => ({}))
+    : { raw: await response.text().catch(() => "") };
+
+  if (!response.ok) {
+    return {
+      ok: false as const,
+      status: response.status,
+      body: {
+        error: "Upstream anthropic messages API error",
+        status: response.status,
+        upstreamBody: parsedBody
+      }
+    };
+  }
+
+  return {
+    ok: true as const,
+    status: 200,
+    body: parsedBody
+  };
+}
+
+export async function callAnthropicMessagesApiStream(
+  payload: unknown,
+  key: ResolvedGatewayKey,
+  headerOverrides?: AnthropicHeaderOverrides
+) {
+  return callStreamEndpoint(
+    "messages",
+    payload,
+    key,
+    buildAnthropicHeaders(key.upstreamApiKey!.trim(), headerOverrides)
+  );
 }

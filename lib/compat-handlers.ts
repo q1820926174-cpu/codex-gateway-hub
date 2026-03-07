@@ -1,5 +1,16 @@
 import { NextResponse } from "next/server";
 import {
+  extractAnthropicAssistantMessage,
+  extractAnthropicMessageText,
+  mapAnthropicMessagesToLegacyChat,
+  mapAnthropicToLegacyChat,
+  mapAnthropicToResponses,
+  mapLegacyChatToAnthropicMessages,
+  mapResponsesRequestToAnthropicMessages,
+  mapResponsesToAnthropicMessage,
+  type AnthropicMessagesRequest
+} from "@/lib/anthropic-compat";
+import {
   collectImageInputs,
   extractLegacyChatCompletionText,
   extractResponseText,
@@ -16,6 +27,8 @@ import {
   replaceImagesWithCaptions
 } from "@/lib/mapper";
 import {
+  callAnthropicMessagesApi,
+  callAnthropicMessagesApiStream,
   callChatCompletionsApi,
   callChatCompletionsApiStream,
   callCompletionsApi,
@@ -25,7 +38,7 @@ import {
   resolveGatewayKey
 } from "@/lib/upstream";
 import { prisma } from "@/lib/prisma";
-import { mapModelByKeyMappings, normalizeUpstreamModels } from "@/lib/key-config";
+import { mapModelByKeyMappings, normalizeUpstreamModels, normalizeUpstreamWireApiValue } from "@/lib/key-config";
 import { normalizeUpstreamModelCode } from "@/lib/providers";
 import {
   estimateLegacyChatTokens,
@@ -61,7 +74,7 @@ type RuntimeModelResolved = {
   clientModel: string;
 };
 
-type RequestWireApi = "responses" | "chat_completions" | "completions";
+type RequestWireApi = "responses" | "chat_completions" | "completions" | "anthropic_messages";
 
 type UsageTraceContext = {
   key: ResolvedGatewayKey;
@@ -77,6 +90,75 @@ type UsageTraceContext = {
 };
 
 const MAX_LOG_TEXT_CHARS = 12_000;
+
+function classifyAnthropicErrorType(status: number) {
+  if (status === 401 || status === 403) {
+    return "authentication_error";
+  }
+  if (status === 429) {
+    return "rate_limit_error";
+  }
+  if (status >= 500) {
+    return "api_error";
+  }
+  return "invalid_request_error";
+}
+
+function buildAnthropicErrorBody(status: number, message: string) {
+  return {
+    type: "error",
+    error: {
+      type: classifyAnthropicErrorType(status),
+      message
+    }
+  };
+}
+
+function anthropicErrorResponse(status: number, message: string) {
+  return NextResponse.json(buildAnthropicErrorBody(status, message), { status });
+}
+
+function extractAnthropicUpstreamErrorMessage(body: unknown, fallback: string) {
+  if (!body || typeof body !== "object") {
+    return fallback;
+  }
+
+  const payload = body as {
+    error?: unknown;
+    upstreamBody?: unknown;
+  };
+
+  if (typeof payload.error === "string" && payload.error.trim()) {
+    const upstreamBody = payload.upstreamBody;
+    if (typeof upstreamBody === "string" && upstreamBody.trim()) {
+      return `${payload.error.trim()}: ${upstreamBody.trim()}`;
+    }
+    if (upstreamBody && typeof upstreamBody === "object") {
+      const nestedError =
+        "error" in upstreamBody && upstreamBody.error && typeof upstreamBody.error === "object"
+          ? (upstreamBody.error as { message?: unknown }).message
+          : undefined;
+      if (typeof nestedError === "string" && nestedError.trim()) {
+        return nestedError.trim();
+      }
+    }
+    return payload.error.trim();
+  }
+
+  return fallback;
+}
+
+async function anthropicErrorResponseFromStream(upstream: Response, fallbackMessage: string) {
+  const contentType = upstream.headers.get("content-type") ?? "";
+  const parsed = contentType.includes("application/json")
+    ? await upstream.json().catch(() => ({}))
+    : await upstream.text().catch(() => "");
+  const message = extractAnthropicUpstreamErrorMessage(
+    typeof parsed === "string" ? { error: parsed } : parsed,
+    fallbackMessage
+  );
+  return anthropicErrorResponse(upstream.status || 500, message);
+}
 
 function clipLogText(value: string, max = MAX_LOG_TEXT_CHARS) {
   const normalized = value.trim();
@@ -466,6 +548,31 @@ function extractChatReasoningDeltaFromChunk(payload: unknown): string {
     .join("");
 }
 
+function extractResponsesReasoningDelta(payload: unknown): string {
+  if (!payload || typeof payload !== "object") {
+    return "";
+  }
+  const type = (payload as { type?: unknown }).type;
+  if (
+    type !== "response.reasoning_text.delta" &&
+    type !== "response.reasoning_summary_text.delta"
+  ) {
+    return "";
+  }
+
+  const delta = (payload as { delta?: unknown }).delta;
+  if (typeof delta === "string") {
+    return delta;
+  }
+  if (delta && typeof delta === "object") {
+    const text =
+      ("text" in delta ? (delta as { text?: unknown }).text : undefined) ??
+      ("delta" in delta ? (delta as { delta?: unknown }).delta : undefined);
+    return typeof text === "string" ? text : "";
+  }
+  return "";
+}
+
 type ChatToolCallDelta = {
   index: number;
   callId?: string;
@@ -554,6 +661,93 @@ function extractChatToolCallDeltasFromChunk(payload: unknown): ChatToolCallDelta
   return deltas;
 }
 
+type AnthropicToolUseDelta = {
+  index: number;
+  callId?: string;
+  name?: string;
+  inputJsonDelta?: string;
+};
+
+function extractAnthropicTextDeltaFromChunk(payload: unknown): string {
+  if (!payload || typeof payload !== "object") {
+    return "";
+  }
+  const type = (payload as { type?: unknown }).type;
+  if (type !== "content_block_delta") {
+    return "";
+  }
+  const delta = (payload as { delta?: unknown }).delta;
+  if (!delta || typeof delta !== "object") {
+    return "";
+  }
+  if ((delta as { type?: unknown }).type !== "text_delta") {
+    return "";
+  }
+  const text = (delta as { text?: unknown }).text;
+  return typeof text === "string" ? text : "";
+}
+
+function extractAnthropicToolUseDeltaFromChunk(payload: unknown): AnthropicToolUseDelta[] {
+  if (!payload || typeof payload !== "object") {
+    return [];
+  }
+  const type = (payload as { type?: unknown }).type;
+  if (type === "content_block_start") {
+    const index = typeof (payload as { index?: unknown }).index === "number"
+      ? (payload as { index: number }).index
+      : 0;
+    const block = (payload as { content_block?: unknown }).content_block;
+    if (!block || typeof block !== "object" || (block as { type?: unknown }).type !== "tool_use") {
+      return [];
+    }
+    const callId = (block as { id?: unknown }).id;
+    const name = (block as { name?: unknown }).name;
+    return [{
+      index,
+      callId: typeof callId === "string" && callId.trim() ? callId.trim() : undefined,
+      name: typeof name === "string" && name.trim() ? name.trim() : undefined
+    }];
+  }
+  if (type === "content_block_delta") {
+    const index = typeof (payload as { index?: unknown }).index === "number"
+      ? (payload as { index: number }).index
+      : 0;
+    const delta = (payload as { delta?: unknown }).delta;
+    if (!delta || typeof delta !== "object" || (delta as { type?: unknown }).type !== "input_json_delta") {
+      return [];
+    }
+    const partial = (delta as { partial_json?: unknown }).partial_json;
+    return [{
+      index,
+      inputJsonDelta: typeof partial === "string" ? partial : ""
+    }];
+  }
+  return [];
+}
+
+function extractAnthropicFinishReason(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+  const type = (payload as { type?: unknown }).type;
+  if (type === "message_delta") {
+    const delta = (payload as { delta?: unknown }).delta;
+    if (delta && typeof delta === "object") {
+      const stopReason = (delta as { stop_reason?: unknown }).stop_reason;
+      return typeof stopReason === "string" && stopReason ? stopReason : null;
+    }
+  }
+  if (type === "message") {
+    const stopReason = (payload as { stop_reason?: unknown }).stop_reason;
+    return typeof stopReason === "string" && stopReason ? stopReason : null;
+  }
+  return null;
+}
+
+function extractAnthropicUsageFromChunk(payload: unknown) {
+  return extractTokenUsageFromPayload(payload);
+}
+
 function extractChatFinishReason(payload: unknown): string | null {
   if (!payload || typeof payload !== "object") {
     return null;
@@ -629,32 +823,211 @@ function normalizeOptionalField(value: unknown) {
   return value.trim();
 }
 
+function extractAnthropicUpstreamHeaderOverrides(req: Request) {
+  return {
+    anthropicVersion: req.headers.get("anthropic-version"),
+    anthropicBeta: req.headers.get("anthropic-beta")
+  };
+}
+
 function isThinkingDisabledByEffort(effort: string) {
   const normalized = effort.trim().toLowerCase();
   return normalized === "none" || normalized === "off" || normalized === "disabled" || normalized === "minimal";
 }
 
-function applyCodexThinkingModeForChat<T extends LegacyChatRequest>(payload: T, provider: string): T {
-  const reasoningEffort = normalizeOptionalField(payload.reasoning_effort);
-  if (!reasoningEffort) {
-    return payload;
+function normalizeThinkingType(value: unknown) {
+  if (typeof value !== "string") {
+    return "";
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "enabled" || normalized === "disabled" || normalized === "adaptive") {
+    return normalized;
+  }
+  return "";
+}
+
+function normalizeThinkingBudget(value: unknown) {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num <= 0) {
+    return 0;
+  }
+  return Math.floor(num);
+}
+
+function sanitizeLegacyContentForGenericUpstream(content: unknown, role: LegacyChatMessage["role"]) {
+  if (typeof content === "string") {
+    return content;
+  }
+  if (!Array.isArray(content)) {
+    return content;
   }
 
+  const textParts: string[] = [];
+  const contentParts: Array<
+    | { type: "text"; text: string }
+    | { type: "image_url"; image_url: { url: string; detail?: string } }
+  > = [];
+
+  for (const part of content) {
+    if (typeof part === "string") {
+      const text = part.trim();
+      if (text) {
+        textParts.push(text);
+      }
+      continue;
+    }
+    if (!part || typeof part !== "object") {
+      continue;
+    }
+
+    const rawType = "type" in part ? (part as { type?: unknown }).type : undefined;
+    const rawText = "text" in part ? (part as { text?: unknown }).text : undefined;
+    if ((rawType === "text" || typeof rawText === "string") && typeof rawText === "string" && rawText.trim()) {
+      const text = rawText.trim();
+      textParts.push(text);
+      contentParts.push({ type: "text", text });
+      continue;
+    }
+
+    if (rawType !== "image_url") {
+      continue;
+    }
+
+    const imageValue = "image_url" in part ? (part as { image_url?: unknown }).image_url : undefined;
+    const detailValue = "detail" in part ? (part as { detail?: unknown }).detail : undefined;
+    const imageUrl =
+      typeof imageValue === "string"
+        ? imageValue.trim()
+        : imageValue && typeof imageValue === "object" && typeof (imageValue as { url?: unknown }).url === "string"
+          ? (imageValue as { url: string }).url.trim()
+          : "";
+    const detail =
+      typeof detailValue === "string"
+        ? detailValue.trim()
+        : imageValue && typeof imageValue === "object" && typeof (imageValue as { detail?: unknown }).detail === "string"
+          ? ((imageValue as { detail: string }).detail).trim()
+          : "";
+    if (!imageUrl) {
+      continue;
+    }
+
+    contentParts.push({
+      type: "image_url",
+      image_url: {
+        url: imageUrl,
+        ...(detail ? { detail } : {})
+      }
+    });
+  }
+
+  if (role === "assistant" || role === "system" || role === "tool") {
+    return textParts.join("\n\n").trim();
+  }
+
+  if (!contentParts.length) {
+    return textParts.join("\n\n").trim();
+  }
+  if (contentParts.every((part) => part.type === "text")) {
+    return textParts.join("\n\n").trim();
+  }
+  return contentParts;
+}
+
+function sanitizeLegacyMessagesForGenericUpstream(messages: LegacyChatRequest["messages"] | undefined) {
+  if (!Array.isArray(messages)) {
+    return messages;
+  }
+  return messages.map((message) => ({
+    ...message,
+    content: sanitizeLegacyContentForGenericUpstream(message.content, message.role)
+  }));
+}
+
+function resolveReasoningEffortForChatPayload(payload: LegacyChatRequest) {
+  const direct = normalizeOptionalField(payload.reasoning_effort);
+  if (direct) {
+    return direct;
+  }
+
+  const thinking = payload.thinking;
+  if (!thinking || typeof thinking !== "object") {
+    return "";
+  }
+  const type = normalizeThinkingType((thinking as { type?: unknown }).type);
+  if (!type) {
+    return "";
+  }
+  if (type === "disabled") {
+    return "minimal";
+  }
+  if (type !== "enabled") {
+    return "";
+  }
+
+  const budget = normalizeThinkingBudget((thinking as { budget_tokens?: unknown }).budget_tokens);
+  if (budget >= 4096) {
+    return "high";
+  }
+  if (budget >= 1024) {
+    return "medium";
+  }
+  return "low";
+}
+
+function resolveThinkingBudgetFromEffort(effort: string) {
+  const normalized = effort.trim().toLowerCase();
+  if (normalized === "high") {
+    return 4096;
+  }
+  if (normalized === "medium") {
+    return 2048;
+  }
+  if (normalized && !isThinkingDisabledByEffort(normalized)) {
+    return 1024;
+  }
+  return 0;
+}
+
+function applyCodexThinkingModeForChat<T extends LegacyChatRequest>(payload: T, provider: string): T {
+  const reasoningEffort = resolveReasoningEffortForChatPayload(payload);
+
   const nextPayload: LegacyChatRequest = {
-    ...payload
+    ...payload,
+    messages: sanitizeLegacyMessagesForGenericUpstream(payload.messages)
   };
-  // GLM chat/completions uses thinking.{type, clear_thinking} for reasoning mode.
+  // GLM chat/completions follows documented `thinking.type` only.
   const normalizedProvider = provider.trim().toLowerCase();
   if (normalizedProvider === "glm") {
+    const existingThinking = payload.thinking && typeof payload.thinking === "object" ? payload.thinking : null;
+    const incomingType = normalizeThinkingType(existingThinking ? (existingThinking as { type?: unknown }).type : undefined);
+    const type = incomingType
+      ? incomingType === "disabled"
+        ? "disabled"
+        : "enabled"
+      : reasoningEffort
+        ? (isThinkingDisabledByEffort(reasoningEffort) ? "disabled" : "enabled")
+        : "";
+
+    nextPayload.anthropic_output_config = undefined;
     nextPayload.reasoning_effort = undefined;
     nextPayload.verbosity = undefined;
+    if (!type) {
+      nextPayload.thinking = undefined;
+      return nextPayload as T;
+    }
+
     nextPayload.thinking = {
-      type: isThinkingDisabledByEffort(reasoningEffort) ? "disabled" : "enabled",
-      clear_thinking: true
+      type
     };
     return nextPayload as T;
   }
-  // For other providers keep upstream-native reasoning fields and do not inject system hints.
+  // `thinking` is Anthropic-specific. For generic chat/completions upstreams we normalize it
+  // into reasoning_effort and remove unsupported fields.
+  nextPayload.anthropic_output_config = undefined;
+  nextPayload.thinking = undefined;
+  if (reasoningEffort) {
+    nextPayload.reasoning_effort = reasoningEffort;
+  }
   return nextPayload as T;
 }
 
@@ -727,7 +1100,10 @@ function trackUsageFromSse(
   let explicitUsage: ReturnType<typeof extractTokenUsageFromPayload> | null = null;
 
   const absorbPayload = (payload: unknown) => {
-    const usage = extractTokenUsageFromPayload(payload);
+    const usage =
+      streamWireApi === "anthropic_messages"
+        ? extractAnthropicUsageFromChunk(payload)
+        : extractTokenUsageFromPayload(payload);
     if (usage) {
       explicitUsage = usage;
     }
@@ -742,6 +1118,14 @@ function trackUsageFromSse(
         if (typeof delta === "string" && delta) {
           completionText += delta;
         }
+      }
+      return;
+    }
+
+    if (streamWireApi === "anthropic_messages") {
+      const delta = extractAnthropicTextDeltaFromChunk(payload);
+      if (delta) {
+        completionText += delta;
       }
       return;
     }
@@ -1217,6 +1601,342 @@ function transformChatStreamToResponses(
   });
 }
 
+function transformChatStreamToAnthropic(
+  upstream: Response,
+  model: string,
+  options?: {
+    promptTokensEstimate?: number;
+  }
+) {
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const emitEvent = (event: string, payload: unknown) => {
+        controller.enqueue(
+          encoder.encode(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`)
+        );
+      };
+
+      let closed = false;
+      let buffer = "";
+      let messageStarted = false;
+      let messageId = `msg_${crypto.randomUUID().replace(/-/g, "")}`;
+      let resolvedModel = model;
+      let nextContentIndex = 0;
+      let activeThinkingBlockIndex: number | null = null;
+      let thinkingBlockClosed = true;
+      let activeTextBlockIndex: number | null = null;
+      let textBlockClosed = true;
+      let emittedThinking = false;
+      let emittedText = false;
+      let finalOutputTokens = 0;
+      let stopReason: "end_turn" | "tool_use" | "max_tokens" | "stop_sequence" = "end_turn";
+
+      type PendingToolCall = {
+        index: number;
+        callId: string;
+        name: string;
+        arguments: string;
+        emitted: boolean;
+      };
+
+      const pendingToolCalls = new Map<number, PendingToolCall>();
+
+      const ensureMessageStarted = (inputTokens?: number) => {
+        if (messageStarted) {
+          return;
+        }
+
+        emitEvent("message_start", {
+          type: "message_start",
+          message: {
+            id: messageId,
+            type: "message",
+            role: "assistant",
+            model: resolvedModel,
+            content: [],
+            stop_reason: null,
+            stop_sequence: null,
+            usage: {
+              input_tokens: Math.max(0, Math.floor(inputTokens ?? options?.promptTokensEstimate ?? 0)),
+              output_tokens: 0
+            }
+          }
+        });
+        messageStarted = true;
+      };
+
+      const closeThinkingBlock = () => {
+        if (activeThinkingBlockIndex === null || thinkingBlockClosed) {
+          return;
+        }
+        emitEvent("content_block_stop", {
+          type: "content_block_stop",
+          index: activeThinkingBlockIndex
+        });
+        thinkingBlockClosed = true;
+      };
+
+      const closeTextBlock = () => {
+        if (activeTextBlockIndex === null || textBlockClosed) {
+          return;
+        }
+        emitEvent("content_block_stop", {
+          type: "content_block_stop",
+          index: activeTextBlockIndex
+        });
+        textBlockClosed = true;
+      };
+
+      const ensureThinkingBlock = () => {
+        ensureMessageStarted();
+        closeTextBlock();
+        if (activeThinkingBlockIndex !== null && !thinkingBlockClosed) {
+          return;
+        }
+        activeThinkingBlockIndex = nextContentIndex;
+        nextContentIndex += 1;
+        thinkingBlockClosed = false;
+        emitEvent("content_block_start", {
+          type: "content_block_start",
+          index: activeThinkingBlockIndex,
+          content_block: {
+            type: "thinking",
+            thinking: ""
+          }
+        });
+      };
+
+      const ensureTextBlock = () => {
+        ensureMessageStarted();
+        closeThinkingBlock();
+        if (activeTextBlockIndex !== null && !textBlockClosed) {
+          return;
+        }
+        activeTextBlockIndex = nextContentIndex;
+        nextContentIndex += 1;
+        textBlockClosed = false;
+        emitEvent("content_block_start", {
+          type: "content_block_start",
+          index: activeTextBlockIndex,
+          content_block: {
+            type: "text",
+            text: ""
+          }
+        });
+      };
+
+      const emitThinkingDelta = (delta: string) => {
+        if (!delta) {
+          return;
+        }
+        ensureThinkingBlock();
+        emittedThinking = true;
+        emitEvent("content_block_delta", {
+          type: "content_block_delta",
+          index: activeThinkingBlockIndex,
+          delta: {
+            type: "thinking_delta",
+            thinking: delta
+          }
+        });
+      };
+
+      const emitTextDelta = (delta: string) => {
+        if (!delta) {
+          return;
+        }
+        ensureTextBlock();
+        emittedText = true;
+        emitEvent("content_block_delta", {
+          type: "content_block_delta",
+          index: activeTextBlockIndex,
+          delta: {
+            type: "text_delta",
+            text: delta
+          }
+        });
+      };
+
+      const emitToolUse = (call: PendingToolCall) => {
+        if (call.emitted || !call.callId.trim()) {
+          return;
+        }
+        ensureMessageStarted();
+        closeThinkingBlock();
+        closeTextBlock();
+
+        const index = nextContentIndex;
+        nextContentIndex += 1;
+        emitEvent("content_block_start", {
+          type: "content_block_start",
+          index,
+          content_block: {
+            type: "tool_use",
+            id: call.callId.trim(),
+            name: call.name || "unknown_tool",
+            input: {}
+          }
+        });
+        if (call.arguments.trim()) {
+          emitEvent("content_block_delta", {
+            type: "content_block_delta",
+            index,
+            delta: {
+              type: "input_json_delta",
+              partial_json: call.arguments
+            }
+          });
+        }
+        emitEvent("content_block_stop", {
+          type: "content_block_stop",
+          index
+        });
+        call.emitted = true;
+        stopReason = "tool_use";
+      };
+
+      const emitPendingToolCalls = () => {
+        for (const call of Array.from(pendingToolCalls.values()).sort((a, b) => a.index - b.index)) {
+          emitToolUse(call);
+        }
+      };
+
+      const finish = () => {
+        if (closed) {
+          return;
+        }
+        closed = true;
+        closeThinkingBlock();
+        closeTextBlock();
+        emitPendingToolCalls();
+        ensureMessageStarted();
+        emitEvent("message_delta", {
+          type: "message_delta",
+          delta: {
+            stop_reason: stopReason,
+            stop_sequence: null
+          },
+          usage: {
+            output_tokens: finalOutputTokens
+          }
+        });
+        emitEvent("message_stop", {
+          type: "message_stop"
+        });
+        controller.close();
+      };
+
+      const processPayload = (payload: unknown) => {
+        if (!payload || typeof payload !== "object") {
+          return;
+        }
+
+        const usage = extractTokenUsageFromPayload(payload);
+        if (usage) {
+          finalOutputTokens = Math.max(finalOutputTokens, usage.completionTokens ?? 0);
+        }
+
+        const reasoningDelta = extractChatReasoningDeltaFromChunk(payload);
+        if (reasoningDelta) {
+          emitThinkingDelta(reasoningDelta);
+        }
+
+        for (const toolCallDelta of extractChatToolCallDeltasFromChunk(payload)) {
+          const existing = pendingToolCalls.get(toolCallDelta.index) ?? {
+            index: toolCallDelta.index,
+            callId: toolCallDelta.callId ?? `call_${messageId}_${Math.max(0, toolCallDelta.index)}`,
+            name: "",
+            arguments: "",
+            emitted: false
+          };
+
+          if (toolCallDelta.callId) {
+            existing.callId = toolCallDelta.callId;
+          }
+          if (toolCallDelta.namePart) {
+            if (!existing.name) {
+              existing.name = toolCallDelta.namePart;
+            } else if (!existing.name.endsWith(toolCallDelta.namePart)) {
+              existing.name += toolCallDelta.namePart;
+            }
+          }
+          if (toolCallDelta.argumentsPart) {
+            existing.arguments += toolCallDelta.argumentsPart;
+          }
+          pendingToolCalls.set(toolCallDelta.index, existing);
+        }
+
+        const textDelta = extractChatDeltaTextFromChunk(payload);
+        if (textDelta) {
+          emitTextDelta(textDelta);
+        }
+
+        const finishReason = extractChatFinishReason(payload);
+        if (!finishReason) {
+          return;
+        }
+        if (finishReason === "tool_calls") {
+          stopReason = "tool_use";
+        } else if (finishReason === "length") {
+          stopReason = "max_tokens";
+        } else {
+          stopReason = "end_turn";
+        }
+        finish();
+      };
+
+      try {
+        if (!upstream.body) {
+          finish();
+          return;
+        }
+
+        const reader = upstream.body.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) {
+            break;
+          }
+
+          buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+          let boundary = buffer.indexOf("\n\n");
+          while (boundary !== -1) {
+            const block = buffer.slice(0, boundary);
+            buffer = buffer.slice(boundary + 2);
+            const data = extractSseData(block);
+            if (data && data !== "[DONE]") {
+              try {
+                processPayload(JSON.parse(data));
+              } catch {
+              }
+            }
+            boundary = buffer.indexOf("\n\n");
+          }
+        }
+
+        const tail = extractSseData(buffer.trim());
+        if (tail && tail !== "[DONE]") {
+          try {
+            processPayload(JSON.parse(tail));
+          } catch {
+          }
+        }
+        finish();
+      } catch (error) {
+        controller.error(error);
+      }
+    }
+  });
+
+  return new Response(stream, {
+    status: upstream.status,
+    headers: SSE_RESPONSE_HEADERS
+  });
+}
+
 function transformResponsesStreamToLegacyChat(upstream: Response, model: string) {
   const chatId = `chatcmpl_${crypto.randomUUID().replace(/-/g, "")}`;
   const created = Math.floor(Date.now() / 1000);
@@ -1379,6 +2099,665 @@ function transformResponsesStreamToLegacyCompletion(upstream: Response, model: s
   });
 }
 
+function transformResponsesStreamToAnthropic(
+  upstream: Response,
+  model: string,
+  options?: {
+    promptTokensEstimate?: number;
+  }
+) {
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const emitEvent = (event: string, payload: unknown) => {
+        controller.enqueue(
+          encoder.encode(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`)
+        );
+      };
+
+      let closed = false;
+      let buffer = "";
+      let messageStarted = false;
+      let messageId = `msg_${crypto.randomUUID().replace(/-/g, "")}`;
+      let resolvedModel = model;
+      let nextContentIndex = 0;
+      let activeThinkingBlockIndex: number | null = null;
+      let thinkingBlockClosed = true;
+      let activeTextBlockIndex: number | null = null;
+      let textBlockClosed = true;
+      let emittedThinking = false;
+      let emittedText = false;
+      let finalOutputTokens = 0;
+      let stopReason: "end_turn" | "tool_use" | "max_tokens" | "stop_sequence" = "end_turn";
+      const emittedToolIds = new Set<string>();
+
+      const ensureMessageStarted = (params?: {
+        id?: string;
+        model?: string;
+        inputTokens?: number;
+      }) => {
+        if (messageStarted) {
+          return;
+        }
+        if (
+          typeof params?.id === "string" &&
+          params.id.trim() &&
+          params.id.trim().startsWith("msg_")
+        ) {
+          messageId = params.id.trim();
+        }
+        if (typeof params?.model === "string" && params.model.trim()) {
+          resolvedModel = params.model.trim();
+        }
+
+        emitEvent("message_start", {
+          type: "message_start",
+          message: {
+            id: messageId,
+            type: "message",
+            role: "assistant",
+            model: resolvedModel,
+            content: [],
+            stop_reason: null,
+            stop_sequence: null,
+            usage: {
+              input_tokens: Math.max(
+                0,
+                Math.floor(params?.inputTokens ?? options?.promptTokensEstimate ?? 0)
+              ),
+              output_tokens: 0
+            }
+          }
+        });
+        messageStarted = true;
+      };
+
+      const closeThinkingBlock = () => {
+        if (activeThinkingBlockIndex === null || thinkingBlockClosed) {
+          return;
+        }
+        emitEvent("content_block_stop", {
+          type: "content_block_stop",
+          index: activeThinkingBlockIndex
+        });
+        thinkingBlockClosed = true;
+      };
+
+      const ensureThinkingBlock = () => {
+        ensureMessageStarted();
+        closeTextBlock();
+        if (activeThinkingBlockIndex !== null && !thinkingBlockClosed) {
+          return;
+        }
+        activeThinkingBlockIndex = nextContentIndex;
+        nextContentIndex += 1;
+        thinkingBlockClosed = false;
+        emitEvent("content_block_start", {
+          type: "content_block_start",
+          index: activeThinkingBlockIndex,
+          content_block: {
+            type: "thinking",
+            thinking: ""
+          }
+        });
+      };
+
+      const closeTextBlock = () => {
+        if (activeTextBlockIndex === null || textBlockClosed) {
+          return;
+        }
+        emitEvent("content_block_stop", {
+          type: "content_block_stop",
+          index: activeTextBlockIndex
+        });
+        textBlockClosed = true;
+      };
+
+      const ensureTextBlock = () => {
+        ensureMessageStarted();
+        closeThinkingBlock();
+        if (activeTextBlockIndex !== null && !textBlockClosed) {
+          return;
+        }
+        activeTextBlockIndex = nextContentIndex;
+        nextContentIndex += 1;
+        textBlockClosed = false;
+        emitEvent("content_block_start", {
+          type: "content_block_start",
+          index: activeTextBlockIndex,
+          content_block: {
+            type: "text",
+            text: ""
+          }
+        });
+      };
+
+      const emitThinkingDelta = (delta: string) => {
+        if (!delta) {
+          return;
+        }
+        ensureThinkingBlock();
+        emittedThinking = true;
+        emitEvent("content_block_delta", {
+          type: "content_block_delta",
+          index: activeThinkingBlockIndex,
+          delta: {
+            type: "thinking_delta",
+            thinking: delta
+          }
+        });
+      };
+
+      const emitTextDelta = (delta: string) => {
+        if (!delta) {
+          return;
+        }
+        ensureTextBlock();
+        emittedText = true;
+        emitEvent("content_block_delta", {
+          type: "content_block_delta",
+          index: activeTextBlockIndex,
+          delta: {
+            type: "text_delta",
+            text: delta
+          }
+        });
+      };
+
+      const emitToolUse = (toolId: string, name: string, inputJson: string) => {
+        const normalizedToolId = toolId.trim();
+        if (!normalizedToolId || emittedToolIds.has(normalizedToolId)) {
+          return;
+        }
+        emittedToolIds.add(normalizedToolId);
+        ensureMessageStarted();
+        closeThinkingBlock();
+        closeTextBlock();
+
+        const index = nextContentIndex;
+        nextContentIndex += 1;
+        emitEvent("content_block_start", {
+          type: "content_block_start",
+          index,
+          content_block: {
+            type: "tool_use",
+            id: normalizedToolId,
+            name,
+            input: {}
+          }
+        });
+
+        if (inputJson.trim()) {
+          emitEvent("content_block_delta", {
+            type: "content_block_delta",
+            index,
+            delta: {
+              type: "input_json_delta",
+              partial_json: inputJson
+            }
+          });
+        }
+
+        emitEvent("content_block_stop", {
+          type: "content_block_stop",
+          index
+        });
+        stopReason = "tool_use";
+      };
+
+      const emitFromAnthropicMessage = (
+        anthropicMessage: ReturnType<typeof mapResponsesToAnthropicMessage>
+      ) => {
+        for (const block of anthropicMessage.content) {
+          if (block.type === "thinking") {
+            if (!emittedThinking && block.thinking) {
+              emitThinkingDelta(block.thinking);
+            }
+            continue;
+          }
+          if (block.type === "text") {
+            if (!emittedText && block.text) {
+              emitTextDelta(block.text);
+            }
+            continue;
+          }
+          emitToolUse(block.id, block.name, JSON.stringify(block.input));
+        }
+        if (stopReason !== "tool_use") {
+          stopReason = anthropicMessage.stop_reason;
+        }
+        finalOutputTokens = Math.max(finalOutputTokens, anthropicMessage.usage.output_tokens);
+      };
+
+      const finish = () => {
+        if (closed) {
+          return;
+        }
+        closed = true;
+        closeThinkingBlock();
+        closeTextBlock();
+        ensureMessageStarted();
+        emitEvent("message_delta", {
+          type: "message_delta",
+          delta: {
+            stop_reason: stopReason,
+            stop_sequence: null
+          },
+          usage: {
+            output_tokens: finalOutputTokens
+          }
+        });
+        emitEvent("message_stop", {
+          type: "message_stop"
+        });
+        controller.close();
+      };
+
+      const processPayload = (payload: unknown) => {
+        if (!payload || typeof payload !== "object") {
+          return;
+        }
+
+        const type = (payload as { type?: unknown }).type;
+        if (type === "response.created") {
+          const response = (payload as { response?: { id?: unknown; model?: unknown } }).response;
+          ensureMessageStarted({
+            id: typeof response?.id === "string" ? response.id : undefined,
+            model: typeof response?.model === "string" ? response.model : undefined,
+            inputTokens:
+              extractTokenUsageFromPayload(payload)?.promptTokens ?? options?.promptTokensEstimate
+          });
+          return;
+        }
+
+        if (type === "response.output_text.delta") {
+          const delta = (payload as { delta?: unknown }).delta;
+          if (typeof delta === "string" && delta) {
+            emitTextDelta(delta);
+          }
+          return;
+        }
+
+        const reasoningDelta = extractResponsesReasoningDelta(payload);
+        if (reasoningDelta) {
+          emitThinkingDelta(reasoningDelta);
+          return;
+        }
+
+        if (type === "response.output_item.done") {
+          const item = (payload as { item?: unknown }).item;
+          if (!item || typeof item !== "object") {
+            return;
+          }
+          const itemType = "type" in item ? (item as { type?: unknown }).type : undefined;
+          if (itemType === "function_call") {
+            const callId = "call_id" in item ? (item as { call_id?: unknown }).call_id : undefined;
+            const name = "name" in item ? (item as { name?: unknown }).name : undefined;
+            const args = "arguments" in item ? (item as { arguments?: unknown }).arguments : undefined;
+            if (
+              typeof callId === "string" &&
+              callId.trim() &&
+              typeof name === "string" &&
+              name.trim()
+            ) {
+              emitToolUse(callId.trim(), name.trim(), typeof args === "string" ? args : "");
+            }
+            return;
+          }
+
+          if ((itemType === "message" || itemType === "reasoning") && (!emittedText || !emittedThinking)) {
+            const anthropicMessage = mapResponsesToAnthropicMessage(
+              {
+                model: resolvedModel,
+                output: [item]
+              },
+              resolvedModel
+            );
+            emitFromAnthropicMessage(anthropicMessage);
+          }
+          return;
+        }
+
+        if (type === "response.completed") {
+          const response = (payload as { response?: unknown }).response;
+          const anthropicMessage = mapResponsesToAnthropicMessage(response, resolvedModel);
+          ensureMessageStarted({
+            id: anthropicMessage.id,
+            model: anthropicMessage.model,
+            inputTokens:
+              extractTokenUsageFromPayload(response)?.promptTokens ?? options?.promptTokensEstimate
+          });
+          resolvedModel = anthropicMessage.model;
+          emitFromAnthropicMessage(anthropicMessage);
+          finish();
+        }
+      };
+
+      try {
+        if (!upstream.body) {
+          finish();
+          return;
+        }
+
+        const reader = upstream.body.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) {
+            break;
+          }
+
+          buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+          let boundary = buffer.indexOf("\n\n");
+          while (boundary !== -1) {
+            const block = buffer.slice(0, boundary);
+            buffer = buffer.slice(boundary + 2);
+            const data = extractSseData(block);
+            if (data && data !== "[DONE]") {
+              try {
+                processPayload(JSON.parse(data));
+              } catch {
+              }
+            }
+            boundary = buffer.indexOf("\n\n");
+          }
+        }
+
+        const tail = extractSseData(buffer.trim());
+        if (tail && tail !== "[DONE]") {
+          try {
+            processPayload(JSON.parse(tail));
+          } catch {
+          }
+        }
+        finish();
+      } catch (error) {
+        controller.error(error);
+      }
+    }
+  });
+
+  return new Response(stream, {
+    status: upstream.status,
+    headers: SSE_RESPONSE_HEADERS
+  });
+}
+
+function transformAnthropicStreamToResponses(
+  upstream: Response,
+  model: string,
+  options?: {
+    promptTokensEstimate?: number;
+    onCompleted?: (payload: {
+      responseId: string;
+      assistantMessage: LegacyChatMessage | null;
+    }) => void | Promise<void>;
+  }
+) {
+  const responseId = `resp_${crypto.randomUUID().replace(/-/g, "")}`;
+  const createdAt = Math.floor(Date.now() / 1000);
+  type ResponseOutputItem =
+    | {
+        id: string;
+        type: "message";
+        role: "assistant";
+        content: Array<{
+          type: "output_text";
+          text: string;
+        }>;
+      }
+    | {
+        type: "function_call";
+        call_id: string;
+        name: string;
+        arguments: string;
+      };
+
+  type PendingToolCall = {
+    index: number;
+    callId: string;
+    name: string;
+    arguments: string;
+    emitted: boolean;
+  };
+
+  let completed = false;
+  let outputText = "";
+  let explicitUsage: ReturnType<typeof extractTokenUsageFromPayload> | null = null;
+  let responseCreated = false;
+  let messageItemDone = false;
+  const pendingToolCalls = new Map<number, PendingToolCall>();
+  const completedOutputItems: ResponseOutputItem[] = [];
+
+  const ensureResponseCreated = (emitJson: (payload: unknown) => void) => {
+    if (responseCreated) {
+      return;
+    }
+    emitJson({
+      type: "response.created",
+      response: {
+        id: responseId,
+        object: "response",
+        created_at: createdAt,
+        model,
+        status: "in_progress"
+      }
+    });
+    responseCreated = true;
+  };
+
+  const emitMessageItemDone = (emitJson: (payload: unknown) => void) => {
+    if (messageItemDone) {
+      return;
+    }
+    const item: ResponseOutputItem = {
+      id: `msg_${crypto.randomUUID().replace(/-/g, "")}`,
+      type: "message",
+      role: "assistant",
+      content: [
+        {
+          type: "output_text",
+          text: outputText
+        }
+      ]
+    };
+    emitJson({
+      type: "response.output_item.done",
+      item
+    });
+    completedOutputItems.push(item);
+    messageItemDone = true;
+  };
+
+  const emitPendingToolCall = (emitJson: (payload: unknown) => void, call: PendingToolCall) => {
+    if (call.emitted) {
+      return;
+    }
+    const item: ResponseOutputItem = {
+      type: "function_call",
+      call_id: call.callId,
+      name: call.name || "unknown_tool",
+      arguments: call.arguments
+    };
+    emitJson({
+      type: "response.output_item.done",
+      item
+    });
+    completedOutputItems.push(item);
+    call.emitted = true;
+  };
+
+  const emitCompleted = (emitJson: (payload: unknown) => void) => {
+    if (completed) {
+      return;
+    }
+    ensureResponseCreated(emitJson);
+    if (outputText || !messageItemDone) {
+      emitMessageItemDone(emitJson);
+    }
+    for (const call of Array.from(pendingToolCalls.values()).sort((a, b) => a.index - b.index)) {
+      emitPendingToolCall(emitJson, call);
+    }
+    completed = true;
+    const completionTokensEstimate = outputText
+      ? estimatePlainTextTokens(outputText, model)
+      : 0;
+    const usage = normalizeUsageValues(
+      explicitUsage,
+      Math.max(0, options?.promptTokensEstimate ?? 0),
+      completionTokensEstimate
+    );
+    emitJson({
+      type: "response.completed",
+      response: {
+        id: responseId,
+        object: "response",
+        created_at: createdAt,
+        model,
+        status: "completed",
+        output: completedOutputItems,
+        output_text: outputText,
+        usage: {
+          input_tokens: usage.promptTokens,
+          output_tokens: usage.completionTokens,
+          total_tokens: usage.totalTokens,
+          input_tokens_details: {
+            cached_tokens: 0
+          },
+          output_tokens_details: {
+            reasoning_tokens: 0
+          }
+        },
+        incomplete_details: null
+      }
+    });
+    if (options?.onCompleted) {
+      const assistantToolCalls = Array.from(pendingToolCalls.values())
+        .sort((a, b) => a.index - b.index)
+        .map((call) => ({
+          id: call.callId,
+          type: "function" as const,
+          function: {
+            name: call.name || "unknown_tool",
+            arguments: call.arguments
+          }
+        }));
+      const assistantMessage =
+        outputText || assistantToolCalls.length
+          ? ({
+              role: "assistant",
+              content: outputText,
+              ...(assistantToolCalls.length ? { tool_calls: assistantToolCalls } : {})
+            } satisfies LegacyChatMessage)
+          : null;
+      void Promise.resolve(
+        options.onCompleted({
+          responseId,
+          assistantMessage
+        })
+      ).catch((error) => {
+        console.error(
+          "[responses] anthropic continuation context failed",
+          error instanceof Error ? error.message : String(error)
+        );
+      });
+    }
+  };
+
+  return transformSseStream(upstream, {
+    onStart: (emitJson) => {
+      ensureResponseCreated(emitJson);
+    },
+    onData: (data, emitJson) => {
+      let payload: unknown;
+      try {
+        payload = JSON.parse(data);
+      } catch {
+        return;
+      }
+      const usage = extractTokenUsageFromPayload(payload);
+      if (usage) {
+        explicitUsage = usage;
+      }
+      const type = (payload as { type?: unknown }).type;
+      if (type === "content_block_delta") {
+        const textDelta = extractAnthropicTextDeltaFromChunk(payload);
+        if (textDelta) {
+          ensureResponseCreated(emitJson);
+          outputText += textDelta;
+          emitJson({
+            type: "response.output_text.delta",
+            delta: textDelta
+          });
+          return;
+        }
+        for (const toolDelta of extractAnthropicToolUseDeltaFromChunk(payload)) {
+          const existing = pendingToolCalls.get(toolDelta.index) ?? {
+            index: toolDelta.index,
+            callId: `call_${responseId}_${toolDelta.index}`,
+            name: "",
+            arguments: "",
+            emitted: false
+          };
+          if (toolDelta.callId) {
+            existing.callId = toolDelta.callId;
+          }
+          if (toolDelta.name) {
+            existing.name = toolDelta.name;
+          }
+          if (toolDelta.inputJsonDelta) {
+            existing.arguments += toolDelta.inputJsonDelta;
+          }
+          pendingToolCalls.set(toolDelta.index, existing);
+        }
+        return;
+      }
+      if (type === "content_block_start") {
+        for (const toolDelta of extractAnthropicToolUseDeltaFromChunk(payload)) {
+          const existing = pendingToolCalls.get(toolDelta.index) ?? {
+            index: toolDelta.index,
+            callId: `call_${responseId}_${toolDelta.index}`,
+            name: "",
+            arguments: "",
+            emitted: false
+          };
+          if (toolDelta.callId) {
+            existing.callId = toolDelta.callId;
+          }
+          if (toolDelta.name) {
+            existing.name = toolDelta.name;
+          }
+          pendingToolCalls.set(toolDelta.index, existing);
+        }
+        return;
+      }
+      if (type === "content_block_stop") {
+        const index = typeof (payload as { index?: unknown }).index === "number"
+          ? (payload as { index: number }).index
+          : -1;
+        const existing = pendingToolCalls.get(index);
+        if (existing && !existing.emitted) {
+          ensureResponseCreated(emitJson);
+          emitPendingToolCall(emitJson, existing);
+        }
+        return;
+      }
+      const finishReason = extractAnthropicFinishReason(payload);
+      if (finishReason) {
+        emitCompleted(emitJson);
+        return;
+      }
+      if (type === "message_stop") {
+        emitCompleted(emitJson);
+      }
+    },
+    onDone: (emitJson) => {
+      emitCompleted(emitJson);
+    }
+  });
+}
+
 async function resolveVisionFallbackRuntimeKey(key: ResolvedGatewayKey) {
   if (!key.visionChannelId) {
     return { ok: true as const, key };
@@ -1412,7 +2791,7 @@ async function resolveVisionFallbackRuntimeKey(key: ResolvedGatewayKey) {
 
   const channelModels = normalizeUpstreamModels(channel.upstreamModelsJson, {
     model: channel.defaultModel,
-    upstreamWireApi: channel.upstreamWireApi === "chat_completions" ? "chat_completions" : "responses",
+    upstreamWireApi: normalizeUpstreamWireApiValue(channel.upstreamWireApi),
     supportsVision: channel.supportsVision,
     visionModel: channel.visionModel
   });
@@ -1431,7 +2810,7 @@ async function resolveVisionFallbackRuntimeKey(key: ResolvedGatewayKey) {
   );
   const visionWireApi =
     selectedVisionProfile?.upstreamWireApi ??
-    (channel.upstreamWireApi === "chat_completions" ? "chat_completions" : "responses");
+    normalizeUpstreamWireApiValue(channel.upstreamWireApi);
 
   return {
     ok: true as const,
@@ -1667,31 +3046,66 @@ async function describeImagesWithVisionModel(
             },
             visionRuntimeKey
           )
-        : await callChatCompletionsApi(
-            {
-              model: visionModelForCaption,
-              messages: [
-                {
-                  role: "user",
-                  content: [
-                    {
-                      type: "text",
-                      text: captionPrompt
-                    },
-                    {
-                      type: "image_url",
-                      image_url: {
-                        url: image.imageUrl,
-                        detail: image.detail
+        : visionRuntimeKey.upstreamWireApi === "anthropic_messages"
+          ? await callAnthropicMessagesApi(
+              {
+                model: visionModelForCaption,
+                messages: [
+                  {
+                    role: "user",
+                    content: [
+                      {
+                        type: "text",
+                        text: captionPrompt
+                      },
+                      image.imageUrl.startsWith("data:")
+                        ? {
+                            type: "image",
+                            source: {
+                              type: "base64",
+                              media_type: image.imageUrl.slice(5, image.imageUrl.indexOf(';')),
+                              data: image.imageUrl.slice(image.imageUrl.indexOf(',') + 1)
+                            }
+                          }
+                        : {
+                            type: "image",
+                            source: {
+                              type: "url",
+                              url: image.imageUrl
+                            }
+                          }
+                    ]
+                  }
+                ],
+                max_tokens: 1200
+              },
+              visionRuntimeKey
+            )
+          : await callChatCompletionsApi(
+              {
+                model: visionModelForCaption,
+                messages: [
+                  {
+                    role: "user",
+                    content: [
+                      {
+                        type: "text",
+                        text: captionPrompt
+                      },
+                      {
+                        type: "image_url",
+                        image_url: {
+                          url: image.imageUrl,
+                          detail: image.detail
+                        }
                       }
-                    }
-                  ]
-                }
-              ],
-              max_tokens: 1200
-            },
-            visionRuntimeKey
-          );
+                    ]
+                  }
+                ],
+                max_tokens: 1200
+              },
+              visionRuntimeKey
+            );
 
     if (!captionResp.ok) {
       return {
@@ -1714,7 +3128,9 @@ async function describeImagesWithVisionModel(
     const caption =
       visionRuntimeKey.upstreamWireApi === "responses"
         ? extractResponseText(captionResp.body).trim()
-        : extractLegacyChatCompletionText(captionResp.body).trim();
+        : visionRuntimeKey.upstreamWireApi === "anthropic_messages"
+          ? extractAnthropicMessageText(captionResp.body).trim()
+          : extractLegacyChatCompletionText(captionResp.body).trim();
     const finalCaption = caption || "Image content provided.";
     captions.push(finalCaption);
     await appendAiCallLogEntry({
@@ -1864,6 +3280,37 @@ export async function handleLegacyChatCompletions(
         userPrompt: promptSnapshot.userPrompt
       });
     }
+    if (runtimeKey.upstreamWireApi === "anthropic_messages") {
+      const upstreamPayload = mapLegacyChatToAnthropicMessages(
+        {
+          ...rewritten.body,
+          model: modelResolved.upstreamModel,
+          stream: true
+        },
+        runtimeKey.defaultModel
+      );
+      upstreamPayload.model = modelResolved.upstreamModel;
+      const upstream = await callAnthropicMessagesApiStream(upstreamPayload, runtimeKey);
+      if (!upstream.ok) {
+        return upstream;
+      }
+      const tracked = trackUsageFromSse(upstream, "anthropic_messages", {
+        key: runtimeKey,
+        route,
+        requestWireApi: "chat_completions",
+        requestedModel,
+        clientModel: modelResolved.clientModel,
+        upstreamModel: modelResolved.upstreamModel,
+        promptTokensEstimate,
+        stream: true,
+        systemPrompt: promptSnapshot.systemPrompt,
+        userPrompt: promptSnapshot.userPrompt
+      });
+      const responsesStream = transformAnthropicStreamToResponses(tracked, modelResolved.clientModel, {
+        promptTokensEstimate
+      });
+      return transformResponsesStreamToLegacyChat(responsesStream, modelResolved.clientModel);
+    }
     const payload = mapLegacyChatToResponses(rewritten.body, runtimeKey.defaultModel, {
       allowVisionInput: runtimeKey.supportsVision
     });
@@ -1928,6 +3375,38 @@ export async function handleLegacyChatCompletions(
     return NextResponse.json(upstream.body);
   }
 
+  if (runtimeKey.upstreamWireApi === "anthropic_messages") {
+    const upstreamPayload = mapLegacyChatToAnthropicMessages(
+      {
+        ...rewritten.body,
+        model: modelResolved.upstreamModel
+      },
+      runtimeKey.defaultModel
+    );
+    upstreamPayload.model = modelResolved.upstreamModel;
+    const upstream = await callAnthropicMessagesApi(upstreamPayload, runtimeKey);
+    if (!upstream.ok) {
+      return NextResponse.json(upstream.body, { status: upstream.status });
+    }
+    void persistUsageEvent(
+      {
+        key: runtimeKey,
+        route,
+        requestWireApi: "chat_completions",
+        requestedModel,
+        clientModel: modelResolved.clientModel,
+        upstreamModel: modelResolved.upstreamModel,
+        promptTokensEstimate,
+        stream: false,
+        systemPrompt: promptSnapshot.systemPrompt,
+        userPrompt: promptSnapshot.userPrompt
+      },
+      extractTokenUsageFromPayload(upstream.body),
+      extractAnthropicMessageText(upstream.body)
+    );
+    return NextResponse.json(mapAnthropicToLegacyChat(upstream.body, modelResolved.clientModel));
+  }
+
   const payload = mapLegacyChatToResponses(rewritten.body, runtimeKey.defaultModel, {
     allowVisionInput: runtimeKey.supportsVision
   });
@@ -1954,6 +3433,259 @@ export async function handleLegacyChatCompletions(
   );
 
   return NextResponse.json(mapResponsesToLegacyChat(upstream.body, modelResolved.clientModel));
+}
+
+export async function handleAnthropicMessages(
+  req: Request,
+  route = "/v1/messages"
+) {
+  const body = (await req.json().catch(() => ({}))) as AnthropicMessagesRequest;
+  const anthropicUpstreamHeaderOverrides = extractAnthropicUpstreamHeaderOverrides(req);
+
+  const resolved = await resolveGatewayKey(
+    req.headers.get("authorization"),
+    req.headers.get("x-api-key")
+  );
+  if (!resolved.ok) {
+    return anthropicErrorResponse(resolved.status, resolved.body.error);
+  }
+
+  const legacyBody = mapAnthropicMessagesToLegacyChat(body, resolved.key.defaultModel);
+  const promptSnapshot = extractPromptSnapshotFromLegacyMessages(
+    normalizeLegacyMessages(legacyBody.messages as LegacyChatRequest["messages"])
+  );
+
+  const requestedModel = pickRequestedModel(body.model, resolved.key);
+  const mappedRequestedModel = mapRequestedModelForKey(requestedModel, resolved.key);
+  const promptTokensEstimate = estimateLegacyChatTokens(legacyBody, mappedRequestedModel);
+  const dynamicPick = pickModelByContext(
+    mappedRequestedModel,
+    promptTokensEstimate,
+    resolved.key
+  );
+  const runtimeResolved = resolveRuntimeModel(resolved.key, dynamicPick.model);
+  const modelResolved = {
+    ...runtimeResolved,
+    clientModel: dynamicPick.switched ? dynamicPick.model : requestedModel
+  };
+  const runtimeKey = modelResolved.runtimeKey;
+
+  const rewritten = await describeImagesWithVisionModel(legacyBody, runtimeKey, {
+    route,
+    requestWireApi: "anthropic_messages",
+    requestedModel,
+    clientModel: modelResolved.clientModel
+  });
+  if (!rewritten.ok) {
+    return anthropicErrorResponse(rewritten.status, extractAnthropicUpstreamErrorMessage(rewritten.body, "Vision fallback request failed."));
+  }
+
+  if (body.stream === true) {
+    if (runtimeKey.upstreamWireApi === "chat_completions") {
+      const upstreamPayload = applyCodexThinkingModeForChat(
+        {
+          ...rewritten.body,
+          model: modelResolved.upstreamModel,
+          stream: true
+        },
+        runtimeKey.provider
+      );
+      const upstream = await callChatCompletionsApiStream(upstreamPayload, runtimeKey);
+      if (!upstream.ok) {
+        return anthropicErrorResponseFromStream(upstream, "Upstream chat/completions API error");
+      }
+      const tracked = trackUsageFromSse(upstream, "chat_completions", {
+        key: runtimeKey,
+        route,
+        requestWireApi: "anthropic_messages",
+        requestedModel,
+        clientModel: modelResolved.clientModel,
+        upstreamModel: modelResolved.upstreamModel,
+        promptTokensEstimate,
+        stream: true,
+        systemPrompt: promptSnapshot.systemPrompt,
+        userPrompt: promptSnapshot.userPrompt
+      });
+      return transformChatStreamToAnthropic(tracked, modelResolved.clientModel, {
+        promptTokensEstimate
+      });
+    }
+
+    if (runtimeKey.upstreamWireApi === "anthropic_messages") {
+      const upstreamPayload = mapLegacyChatToAnthropicMessages(
+        {
+          ...rewritten.body,
+          model: modelResolved.upstreamModel,
+          stream: true
+        },
+        runtimeKey.defaultModel
+      );
+      upstreamPayload.model = modelResolved.upstreamModel;
+      const upstream = await callAnthropicMessagesApiStream(
+        upstreamPayload,
+        runtimeKey,
+        anthropicUpstreamHeaderOverrides
+      );
+
+      if (!upstream.ok) {
+        return anthropicErrorResponseFromStream(upstream, "Upstream anthropic messages API error");
+      }
+      return trackUsageFromSse(upstream, "anthropic_messages", {
+        key: runtimeKey,
+        route,
+        requestWireApi: "anthropic_messages",
+        requestedModel,
+        clientModel: modelResolved.clientModel,
+        upstreamModel: modelResolved.upstreamModel,
+        promptTokensEstimate,
+        stream: true,
+        systemPrompt: promptSnapshot.systemPrompt,
+        userPrompt: promptSnapshot.userPrompt
+      });
+    }
+
+    const payload = mapLegacyChatToResponses(rewritten.body, runtimeKey.defaultModel, {
+      allowVisionInput: runtimeKey.supportsVision
+    });
+    payload.model = modelResolved.upstreamModel;
+    const upstream = await callResponsesApiStream(
+      {
+        ...payload,
+        model: modelResolved.upstreamModel,
+        stream: true
+      },
+      runtimeKey
+    );
+    if (!upstream.ok) {
+      return anthropicErrorResponseFromStream(upstream, "Upstream responses API error");
+    }
+    const tracked = trackUsageFromSse(upstream, "responses", {
+      key: runtimeKey,
+      route,
+      requestWireApi: "anthropic_messages",
+      requestedModel,
+      clientModel: modelResolved.clientModel,
+      upstreamModel: modelResolved.upstreamModel,
+      promptTokensEstimate,
+      stream: true,
+      systemPrompt: promptSnapshot.systemPrompt,
+      userPrompt: promptSnapshot.userPrompt
+    });
+    return transformResponsesStreamToAnthropic(tracked, modelResolved.clientModel, {
+      promptTokensEstimate
+    });
+  }
+
+  if (runtimeKey.upstreamWireApi === "chat_completions") {
+    const upstreamPayload = applyCodexThinkingModeForChat(
+      {
+        ...rewritten.body,
+        model: modelResolved.upstreamModel
+      },
+      runtimeKey.provider
+    );
+    const upstream = await callChatCompletionsApi(upstreamPayload, runtimeKey);
+    if (!upstream.ok) {
+      return anthropicErrorResponse(
+        upstream.status,
+        extractAnthropicUpstreamErrorMessage(upstream.body, "Upstream chat/completions API error")
+      );
+    }
+    void persistUsageEvent(
+      {
+        key: runtimeKey,
+        route,
+        requestWireApi: "anthropic_messages",
+        requestedModel,
+        clientModel: modelResolved.clientModel,
+        upstreamModel: modelResolved.upstreamModel,
+        promptTokensEstimate,
+        stream: false,
+        systemPrompt: promptSnapshot.systemPrompt,
+        userPrompt: promptSnapshot.userPrompt
+      },
+      extractTokenUsageFromPayload(upstream.body),
+      extractLegacyChatCompletionText(upstream.body)
+    );
+    const responsesPayload = mapLegacyChatCompletionToResponses(
+      upstream.body,
+      modelResolved.clientModel
+    );
+    return NextResponse.json(
+      mapResponsesToAnthropicMessage(responsesPayload, modelResolved.clientModel)
+    );
+  }
+
+  if (runtimeKey.upstreamWireApi === "anthropic_messages") {
+    const upstreamPayload = mapLegacyChatToAnthropicMessages(
+      {
+        ...rewritten.body,
+        model: modelResolved.upstreamModel
+      },
+      runtimeKey.defaultModel
+    );
+    upstreamPayload.model = modelResolved.upstreamModel;
+    const upstream = await callAnthropicMessagesApi(
+      upstreamPayload,
+      runtimeKey,
+      anthropicUpstreamHeaderOverrides
+    );
+    if (!upstream.ok) {
+      return anthropicErrorResponse(
+        upstream.status,
+        extractAnthropicUpstreamErrorMessage(upstream.body, "Upstream anthropic messages API error")
+      );
+    }
+    void persistUsageEvent(
+      {
+        key: runtimeKey,
+        route,
+        requestWireApi: "anthropic_messages",
+        requestedModel,
+        clientModel: modelResolved.clientModel,
+        upstreamModel: modelResolved.upstreamModel,
+        promptTokensEstimate,
+        stream: false,
+        systemPrompt: promptSnapshot.systemPrompt,
+        userPrompt: promptSnapshot.userPrompt
+      },
+      extractTokenUsageFromPayload(upstream.body),
+      extractAnthropicMessageText(upstream.body)
+    );
+    return NextResponse.json(upstream.body);
+  }
+
+  const payload = mapLegacyChatToResponses(rewritten.body, runtimeKey.defaultModel, {
+    allowVisionInput: runtimeKey.supportsVision
+  });
+  payload.model = modelResolved.upstreamModel;
+  const upstream = await callResponsesApi(payload, runtimeKey);
+  if (!upstream.ok) {
+    return anthropicErrorResponse(
+      upstream.status,
+      extractAnthropicUpstreamErrorMessage(upstream.body, "Upstream responses API error")
+    );
+  }
+  void persistUsageEvent(
+    {
+      key: runtimeKey,
+      route,
+      requestWireApi: "anthropic_messages",
+      requestedModel,
+      clientModel: modelResolved.clientModel,
+      upstreamModel: modelResolved.upstreamModel,
+      promptTokensEstimate,
+      stream: false,
+      systemPrompt: promptSnapshot.systemPrompt,
+      userPrompt: promptSnapshot.userPrompt
+    },
+    extractTokenUsageFromPayload(upstream.body),
+    extractResponseText(upstream.body)
+  );
+
+  return NextResponse.json(
+    mapResponsesToAnthropicMessage(upstream.body, modelResolved.clientModel)
+  );
 }
 
 export async function handleLegacyCompletions(
@@ -2008,6 +3740,38 @@ export async function handleLegacyCompletions(
         systemPrompt: promptSnapshot.systemPrompt,
         userPrompt: promptSnapshot.userPrompt
       });
+    }
+    if (runtimeKey.upstreamWireApi === "anthropic_messages") {
+      const responsesPayload = mapLegacyCompletionToResponses(body, runtimeKey.defaultModel);
+      const upstreamPayload = mapResponsesRequestToAnthropicMessages(
+        {
+          ...responsesPayload,
+          model: modelResolved.upstreamModel,
+          stream: true
+        },
+        runtimeKey.defaultModel
+      );
+      upstreamPayload.model = modelResolved.upstreamModel;
+      const upstream = await callAnthropicMessagesApiStream(upstreamPayload, runtimeKey);
+      if (!upstream.ok) {
+        return upstream;
+      }
+      const tracked = trackUsageFromSse(upstream, "anthropic_messages", {
+        key: runtimeKey,
+        route,
+        requestWireApi: "completions",
+        requestedModel,
+        clientModel: modelResolved.clientModel,
+        upstreamModel: modelResolved.upstreamModel,
+        promptTokensEstimate,
+        stream: true,
+        systemPrompt: promptSnapshot.systemPrompt,
+        userPrompt: promptSnapshot.userPrompt
+      });
+      const responsesStream = transformAnthropicStreamToResponses(tracked, modelResolved.clientModel, {
+        promptTokensEstimate
+      });
+      return transformResponsesStreamToLegacyCompletion(responsesStream, modelResolved.clientModel);
     }
     const payload = mapLegacyCompletionToResponses(body, runtimeKey.defaultModel);
     payload.model = modelResolved.upstreamModel;
@@ -2067,6 +3831,44 @@ export async function handleLegacyCompletions(
     return NextResponse.json(upstream.body);
   }
 
+  if (runtimeKey.upstreamWireApi === "anthropic_messages") {
+    const responsesPayload = mapLegacyCompletionToResponses(body, runtimeKey.defaultModel);
+    const upstreamPayload = mapResponsesRequestToAnthropicMessages(
+      {
+        ...responsesPayload,
+        model: modelResolved.upstreamModel
+      },
+      runtimeKey.defaultModel
+    );
+    upstreamPayload.model = modelResolved.upstreamModel;
+    const upstream = await callAnthropicMessagesApi(upstreamPayload, runtimeKey);
+    if (!upstream.ok) {
+      return NextResponse.json(upstream.body, { status: upstream.status });
+    }
+    void persistUsageEvent(
+      {
+        key: runtimeKey,
+        route,
+        requestWireApi: "completions",
+        requestedModel,
+        clientModel: modelResolved.clientModel,
+        upstreamModel: modelResolved.upstreamModel,
+        promptTokensEstimate,
+        stream: false,
+        systemPrompt: promptSnapshot.systemPrompt,
+        userPrompt: promptSnapshot.userPrompt
+      },
+      extractTokenUsageFromPayload(upstream.body),
+      extractAnthropicMessageText(upstream.body)
+    );
+    return NextResponse.json(
+      mapResponsesToLegacyCompletion(
+        mapAnthropicToResponses(upstream.body, modelResolved.clientModel),
+        modelResolved.clientModel
+      )
+    );
+  }
+
   const payload = mapLegacyCompletionToResponses(body, runtimeKey.defaultModel);
   payload.model = modelResolved.upstreamModel;
   const upstream = await callResponsesApi(payload, runtimeKey);
@@ -2118,6 +3920,7 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
     clientModel: dynamicPick.switched ? dynamicPick.model : requestedModel
   };
   const runtimeKey = modelResolved.runtimeKey;
+  const responseContextScope = String(resolved.key.id);
 
   if (body.stream === true) {
     if (runtimeKey.upstreamWireApi === "responses") {
@@ -2155,8 +3958,67 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
       });
     }
 
+    if (runtimeKey.upstreamWireApi === "anthropic_messages") {
+      const mapped = mapResponsesRequestToLegacyChat(body, modelResolved.upstreamModel);
+      const previousMessages = readResponseContext(responseContextScope, body.previous_response_id);
+      const incomingMessages = normalizeLegacyMessages(mapped.messages as LegacyChatRequest["messages"]);
+      const mergedMessages = mergeContinuationMessages(previousMessages, incomingMessages);
+      const rewritten = await describeImagesWithVisionModel(
+        {
+          messages: mergedMessages
+        },
+        runtimeKey,
+        {
+          route,
+          requestWireApi: "responses",
+          requestedModel,
+          clientModel: modelResolved.clientModel
+        }
+      );
+      if (!rewritten.ok) {
+        return NextResponse.json(rewritten.body, { status: rewritten.status });
+      }
+
+      const legacyPayload = {
+        ...mapped,
+        model: modelResolved.upstreamModel,
+        messages: rewritten.body.messages,
+        stream: true
+      };
+      const anthropicPayload = mapLegacyChatToAnthropicMessages(legacyPayload, runtimeKey.defaultModel);
+      anthropicPayload.model = modelResolved.upstreamModel;
+      const upstream = await callAnthropicMessagesApiStream(anthropicPayload, runtimeKey);
+      if (!upstream.ok) {
+        return upstream;
+      }
+      const tracked = trackUsageFromSse(upstream, "anthropic_messages", {
+        key: runtimeKey,
+        route,
+        requestWireApi: "responses",
+        requestedModel,
+        clientModel: modelResolved.clientModel,
+        upstreamModel: modelResolved.upstreamModel,
+        promptTokensEstimate,
+        stream: true,
+        systemPrompt: promptSnapshot.systemPrompt,
+        userPrompt: promptSnapshot.userPrompt
+      });
+      const contextBaseMessages = normalizeLegacyMessages(
+        legacyPayload.messages as LegacyChatRequest["messages"]
+      );
+      return transformAnthropicStreamToResponses(tracked, modelResolved.clientModel, {
+        promptTokensEstimate,
+        onCompleted: ({ responseId, assistantMessage }) => {
+          const nextMessages = assistantMessage
+            ? [...contextBaseMessages, assistantMessage]
+            : contextBaseMessages;
+          writeResponseContext(responseContextScope, responseId, nextMessages);
+        }
+      });
+    }
+
     const mapped = mapResponsesRequestToLegacyChat(body, modelResolved.upstreamModel);
-    const previousMessages = readResponseContext(body.previous_response_id);
+    const previousMessages = readResponseContext(responseContextScope, body.previous_response_id);
     const incomingMessages = normalizeLegacyMessages(mapped.messages as LegacyChatRequest["messages"]);
     const mergedMessages = mergeContinuationMessages(previousMessages, incomingMessages);
     const rewritten = await describeImagesWithVisionModel(
@@ -2207,7 +4069,7 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
         const nextMessages = assistantMessage
           ? [...contextBaseMessages, assistantMessage]
           : contextBaseMessages;
-        writeResponseContext(responseId, nextMessages);
+        writeResponseContext(responseContextScope, responseId, nextMessages);
       }
     });
   }
@@ -2251,8 +4113,64 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
     return NextResponse.json(upstream.body);
   }
 
+  if (runtimeKey.upstreamWireApi === "anthropic_messages") {
+    const mapped = mapResponsesRequestToLegacyChat(body, modelResolved.upstreamModel);
+    const previousMessages = readResponseContext(responseContextScope, body.previous_response_id);
+    const incomingMessages = normalizeLegacyMessages(mapped.messages as LegacyChatRequest["messages"]);
+    const mergedMessages = mergeContinuationMessages(previousMessages, incomingMessages);
+    const rewritten = await describeImagesWithVisionModel(
+      {
+        messages: mergedMessages
+      },
+      runtimeKey,
+      {
+        route,
+        requestWireApi: "responses",
+        requestedModel,
+        clientModel: modelResolved.clientModel
+      }
+    );
+    if (!rewritten.ok) {
+      return NextResponse.json(rewritten.body, { status: rewritten.status });
+    }
+
+    const legacyPayload = {
+      ...mapped,
+      model: modelResolved.upstreamModel,
+      messages: rewritten.body.messages
+    };
+    const anthropicPayload = mapLegacyChatToAnthropicMessages(legacyPayload, runtimeKey.defaultModel);
+    anthropicPayload.model = modelResolved.upstreamModel;
+    const upstream = await callAnthropicMessagesApi(anthropicPayload, runtimeKey);
+    if (!upstream.ok) {
+      return NextResponse.json(upstream.body, { status: upstream.status });
+    }
+    void persistUsageEvent(
+      {
+        key: runtimeKey,
+        route,
+        requestWireApi: "responses",
+        requestedModel,
+        clientModel: modelResolved.clientModel,
+        upstreamModel: modelResolved.upstreamModel,
+        promptTokensEstimate,
+        stream: false,
+        systemPrompt: promptSnapshot.systemPrompt,
+        userPrompt: promptSnapshot.userPrompt
+      },
+      extractTokenUsageFromPayload(upstream.body),
+      extractAnthropicMessageText(upstream.body)
+    );
+    const mappedResponse = mapAnthropicToResponses(upstream.body, modelResolved.clientModel);
+    const baseMessages = normalizeLegacyMessages(legacyPayload.messages as LegacyChatRequest["messages"]);
+    const assistantMessage = extractAnthropicAssistantMessage(upstream.body);
+    const nextMessages = assistantMessage ? [...baseMessages, assistantMessage] : baseMessages;
+    writeResponseContext(responseContextScope, mappedResponse.id, nextMessages);
+    return NextResponse.json(mappedResponse);
+  }
+
   const mapped = mapResponsesRequestToLegacyChat(body, modelResolved.upstreamModel);
-  const previousMessages = readResponseContext(body.previous_response_id);
+  const previousMessages = readResponseContext(responseContextScope, body.previous_response_id);
   const incomingMessages = normalizeLegacyMessages(mapped.messages as LegacyChatRequest["messages"]);
   const mergedMessages = mergeContinuationMessages(previousMessages, incomingMessages);
   const rewritten = await describeImagesWithVisionModel(
@@ -2303,6 +4221,6 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
   const baseMessages = normalizeLegacyMessages(upstreamPayload.messages as LegacyChatRequest["messages"]);
   const assistantMessage = extractAssistantMessageFromLegacyChatPayload(upstream.body);
   const nextMessages = assistantMessage ? [...baseMessages, assistantMessage] : baseMessages;
-  writeResponseContext(mappedResponse.id, nextMessages);
+  writeResponseContext(responseContextScope, mappedResponse.id, nextMessages);
   return NextResponse.json(mappedResponse);
 }

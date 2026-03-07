@@ -23,11 +23,13 @@ The main purpose of this project is to connect legacy third-party OpenAI-compati
 
 ## Core Features / 核心能力
 
-- OpenAI 兼容网关：`/v1/chat/completions`、`/v1/completions`、`/v1/responses` / OpenAI-compatible gateway endpoints.
-- 双线兼容上游协议：`responses` + `chat_completions` / Dual upstream protocol compatibility.
+- OpenAI + Anthropic 兼容网关：`/v1/chat/completions`、`/v1/completions`、`/v1/responses`、`/v1/messages`；上游支持 `responses`、`chat_completions`、`anthropic_messages` / OpenAI + Anthropic-compatible gateway endpoints with three upstream wire APIs.
+- 三线兼容上游协议：`responses` + `chat_completions` + `anthropic_messages` / Triple upstream protocol compatibility.
 - 多 Key + 多渠道 + 每 Key 独立模型映射 / Multi keys + multi channels + per-key model mapping.
 - 跨渠道视觉兜底（主模型不支持视觉时先图片转文本） / Cross-channel vision fallback when primary model lacks image support.
 - 运行时 API 切模、清空覆盖、启停 Key / Runtime model switching, override clearing, and key enable or disable.
+- 控制台入口暗号保护 + Cookie 鉴权 / Entry-secret protected console access with cookie-based auth.
+- 网关与入口接口内置轻量内存限流 / Built-in lightweight in-memory rate limiting for gateway and entry APIs.
 - 请求日志、AI 调用日志、分钟级 Token 报表 / Request logs, AI call logs, and minute-level token reports.
 - 控制台中英文切换（右上角） / Bilingual console language switch (top-right corner).
 
@@ -111,6 +113,7 @@ docker compose -f docker-compose.postgres.yml down
 DATABASE_PROVIDER="sqlite"
 DATABASE_URL="file:./dev.db"
 CONSOLE_ENTRY_SECRET=""
+ANTHROPIC_VERSION="2023-06-01"
 GATEWAY_KEY_CACHE_TTL_MS="1500"
 GATEWAY_KEY_CACHE_MAX="2048"
 ```
@@ -121,12 +124,14 @@ GATEWAY_KEY_CACHE_MAX="2048"
 - PostgreSQL 连接串示例 / PostgreSQL URL example:  
   `DATABASE_URL="postgresql://codex:codex@127.0.0.1:5432/codex_gateway?schema=public"`
 - `CONSOLE_ENTRY_SECRET` 留空表示关闭入口暗号 / Empty `CONSOLE_ENTRY_SECRET` disables entry-secret protection.
+- `ANTHROPIC_VERSION` 用于 Anthropic 上游默认请求头，未显式传入时回落到该值 / `ANTHROPIC_VERSION` sets the default Anthropic upstream header when the client does not send one.
 - `GATEWAY_KEY_CACHE_TTL_MS` 与 `GATEWAY_KEY_CACHE_MAX` 用于高并发下本地 Key 缓存 / These two variables control local-key cache for high concurrency.
 - `GATEWAY_KEY_CACHE_TTL_MS=0` 可关闭缓存 / Set `GATEWAY_KEY_CACHE_TTL_MS=0` to disable cache.
 - 配置入口暗号后，访问 `/` 或 `/console/*` 会先跳转 `/secret-entry` / With entry-secret enabled, `/` and `/console/*` redirect to `/secret-entry`.
 
 ## Console Routes / 控制台路由
 
+- `/secret-entry` - 入口暗号页 / Entry-secret unlock page
 - `/console/access` - 本地 Key 接入 / Local key access
 - `/console/upstream` - 上游渠道管理 / Upstream channel management
 - `/console/runtime` - 运行时调度 / Runtime scheduling
@@ -136,6 +141,12 @@ GATEWAY_KEY_CACHE_MAX="2048"
 
 ## Main APIs / 主要接口
 
+- Gateway compatibility routes / 网关兼容路由
+  - `POST /v1/chat/completions`（别名：`/api/v1/chat/completions`）
+  - `POST /v1/completions`（别名：`/api/v1/completions`）
+  - `POST /v1/responses`（别名：`/api/v1/responses`）
+  - `POST /v1/messages`（别名：`/api/v1/messages`）
+- Console/admin routes / 控制台与管理路由
 - `GET /api/health`
 - `GET /api/config`
 - `GET /api/keys`
@@ -158,8 +169,14 @@ GATEWAY_KEY_CACHE_MAX="2048"
 - `DELETE /api/logs`
 - `GET /api/call-logs`
 - `DELETE /api/call-logs`
-- `POST /api/secret-entry`
-- `DELETE /api/secret-entry`
+- `POST /api/secret-entry`（提交入口暗号并写入 Cookie / submit entry secret and set cookie）
+- `DELETE /api/secret-entry`（清除入口 Cookie / clear entry cookie）
+
+## Auth & Rate Limit / 鉴权与限流
+
+- 所有网关兼容路由都使用本地 Key 鉴权，支持 `Authorization: Bearer <local_key>` 或 `x-api-key: <local_key>` / All gateway-compatible routes authenticate with the local key via either `Authorization: Bearer <local_key>` or `x-api-key: <local_key>`.
+- `POST /v1/messages` 与 `/api/v1/messages` 额外透传 `anthropic-version`、`anthropic-beta` 到 Anthropic 上游；如果客户端未传 `anthropic-version`，则默认使用 `ANTHROPIC_VERSION` 或 `2023-06-01` / `POST /v1/messages` and `/api/v1/messages` also forward `anthropic-version` and `anthropic-beta`; when omitted, `anthropic-version` defaults to `ANTHROPIC_VERSION` or `2023-06-01`.
+- `/v1/*`、`/api/v1/*` 以及 `/api/secret-entry` 默认启用轻量内存限流：单 IP 每分钟 120 次；超限返回 `429` 与 `retryAfterSeconds` / `/v1/*`, `/api/v1/*`, and `/api/secret-entry` use lightweight in-memory rate limiting by default: 120 requests per IP per minute, returning `429` with `retryAfterSeconds` when exceeded.
 
 ## Runtime Switch API / 运行时切换接口
 
@@ -256,6 +273,22 @@ curl http://127.0.0.1:3000/v1/responses \
   }'
 ```
 
+### Anthropic Messages
+
+```bash
+curl http://127.0.0.1:3000/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: <your_local_key>" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{
+    "model": "claude-sonnet-4-5",
+    "max_tokens": 512,
+    "messages": [
+      {"role":"user","content":"用一句话介绍你自己"}
+    ]
+  }'
+```
+
 ## Codex Config Example / Codex 配置示例
 
 ```toml
@@ -268,7 +301,7 @@ model = "gpt-4.1-mini"
 
 - `wireApi` 固定为 `responses` / `wireApi` is fixed to `responses`.
 - 本地 Key 必须符合 OpenAI 风格（`sk-...` 或 `sk-proj-...`） / Local key must match OpenAI-style format (`sk-...` or `sk-proj-...`).
-- 客户端认证使用本地 Key，不是上游 API Key / Client auth uses local key, not upstream API key.
+- 客户端认证使用本地 Key，不是上游 API Key；所有 `/v1/*` 与 `/api/v1/*` 兼容路由均支持 `Authorization: Bearer` 与 `x-api-key` / Client auth uses the local key instead of the upstream API key; all `/v1/*` and `/api/v1/*` compatibility routes accept both `Authorization: Bearer` and `x-api-key`.
 
 ## License / 许可证
 

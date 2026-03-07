@@ -3,11 +3,14 @@ import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { withApiLog } from "@/lib/api-log";
 import { resolveUpstreamBaseUrl, UPSTREAM_WIRE_APIS } from "@/lib/key-config";
+import { extractAnthropicMessageText } from "@/lib/anthropic-compat";
 import { normalizeUpstreamModelCode, PROVIDERS, sanitizeBaseUrl } from "@/lib/providers";
 import { extractLegacyChatCompletionText, extractResponseText } from "@/lib/mapper";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+const DEFAULT_ANTHROPIC_VERSION = process.env.ANTHROPIC_VERSION?.trim() || "2023-06-01";
 
 const testUpstreamSchema = z.object({
   id: z.number().int().positive().optional(),
@@ -51,12 +54,66 @@ function previewString(value: unknown, maxLen = 220) {
   }
 }
 
-function buildUpstreamEndpoint(baseUrl: string, resourcePath: "responses" | "chat/completions") {
+function buildUpstreamEndpoint(
+  baseUrl: string,
+  resourcePath: "responses" | "chat/completions" | "messages"
+) {
   const normalized = sanitizeBaseUrl(baseUrl);
   if (/\/v\d+(?:\.\d+)?$/i.test(normalized)) {
     return `${normalized}/${resourcePath}`;
   }
   return `${normalized}/v1/${resourcePath}`;
+}
+
+function buildRequestBody(upstreamWireApi: (typeof UPSTREAM_WIRE_APIS)[number], model: string, testPrompt: string) {
+  if (upstreamWireApi === "responses") {
+    return {
+      model,
+      input: [
+        {
+          role: "user",
+          content: [{ type: "input_text", text: testPrompt }]
+        }
+      ],
+      max_output_tokens: 80
+    };
+  }
+  if (upstreamWireApi === "anthropic_messages") {
+    return {
+      model,
+      messages: [{ role: "user", content: testPrompt }],
+      max_tokens: 80
+    };
+  }
+  return {
+    model,
+    messages: [{ role: "user", content: testPrompt }],
+    max_tokens: 80
+  };
+}
+
+function buildRequestHeaders(upstreamWireApi: (typeof UPSTREAM_WIRE_APIS)[number], upstreamApiKey: string): Record<string, string> {
+  if (upstreamWireApi === "anthropic_messages") {
+    return {
+      "content-type": "application/json",
+      "x-api-key": upstreamApiKey,
+      "anthropic-version": DEFAULT_ANTHROPIC_VERSION
+    };
+  }
+  return {
+    "content-type": "application/json",
+    authorization: `Bearer ${upstreamApiKey}`
+  };
+}
+
+function extractResponsePreview(upstreamWireApi: (typeof UPSTREAM_WIRE_APIS)[number], upstreamBody: unknown) {
+  if (upstreamWireApi === "responses") {
+    return extractResponseText(upstreamBody).trim();
+  }
+  if (upstreamWireApi === "anthropic_messages") {
+    return extractAnthropicMessageText(upstreamBody).trim();
+  }
+  return extractLegacyChatCompletionText(upstreamBody).trim();
 }
 
 export async function POST(req: Request) {
@@ -100,39 +157,22 @@ export async function POST(req: Request) {
     }
 
     const model = normalizeUpstreamModelCode(payload.provider, payload.defaultModel);
-
-    const requestBody =
+    const requestBody = buildRequestBody(payload.upstreamWireApi, model, payload.testPrompt);
+    const endpoint = buildUpstreamEndpoint(
+      upstreamBaseUrl,
       payload.upstreamWireApi === "responses"
-        ? {
-            model,
-            input: [
-              {
-                role: "user",
-                content: [{ type: "input_text", text: payload.testPrompt }]
-              }
-            ],
-            max_output_tokens: 80
-          }
-        : {
-            model,
-            messages: [{ role: "user", content: payload.testPrompt }],
-            max_tokens: 80
-          };
-
-    const endpoint =
-      payload.upstreamWireApi === "responses"
-        ? buildUpstreamEndpoint(upstreamBaseUrl, "responses")
-        : buildUpstreamEndpoint(upstreamBaseUrl, "chat/completions");
+        ? "responses"
+        : payload.upstreamWireApi === "anthropic_messages"
+          ? "messages"
+          : "chat/completions"
+    );
 
     const startAt = Date.now();
     let response: Response;
     try {
       response = await fetch(endpoint, {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${nextUpstreamApiKey}`
-        },
+        headers: buildRequestHeaders(payload.upstreamWireApi, nextUpstreamApiKey),
         body: JSON.stringify(requestBody),
         signal: AbortSignal.timeout(payload.timeoutMs)
       });
@@ -161,10 +201,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const outputText =
-      payload.upstreamWireApi === "responses"
-        ? extractResponseText(upstreamBody).trim()
-        : extractLegacyChatCompletionText(upstreamBody).trim();
+    const outputText = extractResponsePreview(payload.upstreamWireApi, upstreamBody);
 
     return NextResponse.json({
       ok: true,

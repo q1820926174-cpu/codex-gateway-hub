@@ -1,13 +1,30 @@
 import type { LegacyChatMessage } from "@/lib/mapper";
 
 type ContextRecord = {
-  responseId: string;
   messages: LegacyChatMessage[];
   updatedAt: number;
 };
 
 const MAX_CONTEXT_RECORDS = 2000;
 const contextStore = new Map<string, ContextRecord>();
+
+function buildScopedContextKey(scope: string, responseId: string | null | undefined) {
+  if (typeof scope !== "string") {
+    return null;
+  }
+  const normalizedScope = scope.trim();
+  if (!normalizedScope) {
+    return null;
+  }
+  if (!responseId || typeof responseId !== "string") {
+    return null;
+  }
+  const normalizedResponseId = responseId.trim();
+  if (!normalizedResponseId) {
+    return null;
+  }
+  return `${normalizedScope}::${normalizedResponseId}`;
+}
 
 function cloneMessages(messages: LegacyChatMessage[]): LegacyChatMessage[] {
   return messages.map((message) => ({
@@ -26,11 +43,11 @@ function cloneMessages(messages: LegacyChatMessage[]): LegacyChatMessage[] {
   }));
 }
 
-export function readResponseContext(responseId: string | null | undefined): LegacyChatMessage[] {
-  if (!responseId || typeof responseId !== "string") {
-    return [];
-  }
-  const key = responseId.trim();
+export function readResponseContext(
+  scope: string,
+  responseId: string | null | undefined
+): LegacyChatMessage[] {
+  const key = buildScopedContextKey(scope, responseId);
   if (!key) {
     return [];
   }
@@ -42,14 +59,17 @@ export function readResponseContext(responseId: string | null | undefined): Lega
   return cloneMessages(record.messages);
 }
 
-export function writeResponseContext(responseId: string, messages: LegacyChatMessage[]) {
-  const key = responseId.trim();
+export function writeResponseContext(
+  scope: string,
+  responseId: string,
+  messages: LegacyChatMessage[]
+) {
+  const key = buildScopedContextKey(scope, responseId);
   if (!key) {
     return;
   }
 
   contextStore.set(key, {
-    responseId: key,
     messages: cloneMessages(messages),
     updatedAt: Date.now()
   });

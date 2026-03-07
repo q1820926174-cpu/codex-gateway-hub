@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { handleLegacyCompletions } from "@/lib/compat-handlers";
+import { handleAnthropicMessages } from "@/lib/compat-handlers";
 import { withApiLog } from "@/lib/api-log";
 import { checkRateLimit } from "@/lib/rate-limit";
 
@@ -8,7 +8,7 @@ export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
   const rateLimit = checkRateLimit(req, {
-    bucket: "/api/v1/completions",
+    bucket: "/api/v1/messages",
     limit: 120,
     windowMs: 60_000
   });
@@ -22,7 +22,7 @@ export async function POST(req: Request) {
     );
   }
 
-  return withApiLog(req, "POST /api/v1/completions", () =>
-    handleLegacyCompletions(req, "/api/v1/completions")
+  return withApiLog(req, "POST /api/v1/messages", () =>
+    handleAnthropicMessages(req, "/api/v1/messages")
   );
 }

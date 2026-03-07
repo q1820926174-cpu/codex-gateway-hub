@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { clearApiLogEntries, readApiLogEntries } from "@/lib/api-log-store";
+import { requireConsoleApiAuth } from "@/lib/console-api-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -13,6 +14,11 @@ function resolveLimit(value: string | null) {
 }
 
 export async function GET(req: Request) {
+  const authError = requireConsoleApiAuth(req);
+  if (authError) {
+    return authError;
+  }
+
   const url = new URL(req.url);
   const limit = resolveLimit(url.searchParams.get("limit"));
   const items = await readApiLogEntries(limit);
@@ -21,7 +27,12 @@ export async function GET(req: Request) {
   });
 }
 
-export async function DELETE() {
+export async function DELETE(req: Request) {
+  const authError = requireConsoleApiAuth(req);
+  if (authError) {
+    return authError;
+  }
+
   await clearApiLogEntries();
   return NextResponse.json({ ok: true });
 }

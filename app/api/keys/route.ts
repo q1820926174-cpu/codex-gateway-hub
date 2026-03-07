@@ -2,12 +2,14 @@ import { NextResponse } from "next/server";
 import { Prisma, type UpstreamChannel } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { withApiLog } from "@/lib/api-log";
+import { requireConsoleApiAuth } from "@/lib/console-api-auth";
 import {
   createGatewayKeySchema,
   ensureModelExistsInPool,
   gatewayKeyDto,
   normalizeKeyModelMappings,
   normalizeUpstreamModels,
+  normalizeUpstreamWireApiValue,
   pickModelFromPool,
   resolveUpstreamBaseUrl,
   serializeKeyModelMappings,
@@ -36,6 +38,11 @@ const KEY_WITH_CHANNEL_SELECT = {
 
 export async function GET(req: Request) {
   return withApiLog(req, "GET /api/keys", async () => {
+    const authError = requireConsoleApiAuth(req);
+    if (authError) {
+      return authError;
+    }
+
     const keys = await prisma.providerKey.findMany({
       include: {
         upstreamChannel: {
@@ -56,6 +63,11 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   return withApiLog(req, "POST /api/keys", async () => {
+    const authError = requireConsoleApiAuth(req);
+    if (authError) {
+      return authError;
+    }
+
     const body = await req.json().catch(() => ({}));
     const parsed = createGatewayKeySchema.safeParse(body);
     if (!parsed.success) {
@@ -87,12 +99,9 @@ export async function POST(req: Request) {
 
     const defaultModel = (upstreamChannel?.defaultModel ?? payload.defaultModel).trim();
     const effectiveProvider = (upstreamChannel?.provider ?? payload.provider) as (typeof PROVIDERS)[number];
-    const effectiveWireApi =
-      (upstreamChannel?.upstreamWireApi === "chat_completions"
-        ? "chat_completions"
-        : upstreamChannel?.upstreamWireApi === "responses"
-          ? "responses"
-          : payload.upstreamWireApi) as (typeof UPSTREAM_WIRE_APIS)[number];
+    const effectiveWireApi = normalizeUpstreamWireApiValue(
+      upstreamChannel?.upstreamWireApi ?? payload.upstreamWireApi
+    ) as (typeof UPSTREAM_WIRE_APIS)[number];
     const normalizedModelMappings = keyModelMappings.map((item) => ({
       ...item,
       targetModel: normalizeUpstreamModelCode(effectiveProvider, item.targetModel)

@@ -102,7 +102,8 @@ export function extractTokenUsageFromPayload(payload: unknown): UsageValue | nul
 
   const nestedUsage = toUsageObject(root.usage);
   const responseUsage = toUsageObject(toUsageObject(root.response)?.usage);
-  const usage = nestedUsage ?? responseUsage ?? root;
+  const messageUsage = toUsageObject(toUsageObject(root.message)?.usage);
+  const usage = nestedUsage ?? responseUsage ?? messageUsage ?? root;
 
   const promptTokens = readTokenNumber(usage, ["prompt_tokens", "input_tokens"]);
   const completionTokens = readTokenNumber(usage, ["completion_tokens", "output_tokens"]);

@@ -4,6 +4,7 @@ import {
   readAiCallLogEntries,
   type AiCallType
 } from "@/lib/ai-call-log-store";
+import { requireConsoleApiAuth } from "@/lib/console-api-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -35,6 +36,11 @@ function resolveCallType(value: string | null): AiCallType | null {
 }
 
 export async function GET(req: Request) {
+  const authError = requireConsoleApiAuth(req);
+  if (authError) {
+    return authError;
+  }
+
   const url = new URL(req.url);
   const limit = resolveLimit(url.searchParams.get("limit"));
   const keyId = resolveKeyId(url.searchParams.get("keyId"));
@@ -53,7 +59,12 @@ export async function GET(req: Request) {
   });
 }
 
-export async function DELETE() {
+export async function DELETE(req: Request) {
+  const authError = requireConsoleApiAuth(req);
+  if (authError) {
+    return authError;
+  }
+
   await clearAiCallLogEntries();
   return NextResponse.json({ ok: true });
 }

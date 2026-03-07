@@ -5,6 +5,11 @@ import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import {
+  WorkspaceHero,
+  type WorkspaceHeroAction,
+  type WorkspaceHeroStat
+} from "@/components/console/workspace-hero";
 import { JsonViewer } from "@/components/json-viewer";
 import { useLocale, type LocaleCode } from "@/components/locale-provider";
 import {
@@ -34,14 +39,15 @@ import type { EChartsOption } from "echarts";
 
 const ReactECharts = dynamic(() => import("echarts-for-react"), { ssr: false });
 
-const PROVIDERS = ["openai", "openrouter", "xai", "deepseek", "glm", "doubao", "custom"] as const;
+const PROVIDERS = ["openai", "anthropic", "openrouter", "xai", "deepseek", "glm", "doubao", "custom"] as const;
 type ProviderName = (typeof PROVIDERS)[number];
 
-const UPSTREAM_WIRE_APIS = ["responses", "chat_completions"] as const;
+const UPSTREAM_WIRE_APIS = ["responses", "chat_completions", "anthropic_messages"] as const;
 type UpstreamWireApi = (typeof UPSTREAM_WIRE_APIS)[number];
 
 const PROVIDER_DEFAULT_BASE_URL: Record<Exclude<ProviderName, "custom">, string> = {
   openai: "https://api.openai.com",
+  anthropic: "https://api.anthropic.com",
   openrouter: "https://openrouter.ai/api",
   xai: "https://api.x.ai",
   deepseek: "https://api.deepseek.com",
@@ -51,13 +57,16 @@ const PROVIDER_DEFAULT_BASE_URL: Record<Exclude<ProviderName, "custom">, string>
 
 const PROVIDER_META: Record<ProviderName, { label: string; tip: string }> = {
   openai: { label: "OpenAI", tip: "国际通用生态" },
+  anthropic: { label: "Anthropic", tip: "Claude 官方协议" },
   openrouter: { label: "OpenRouter", tip: "聚合多家模型" },
   xai: { label: "xAI", tip: "Grok 体系" },
   deepseek: { label: "DeepSeek", tip: "高性价比" },
   glm: { label: "GLM", tip: "智谱开放平台" },
   doubao: { label: "豆包", tip: "火山方舟" },
-  custom: { label: "自定义", tip: "兼容 OpenAI 格式" }
+  custom: { label: "自定义", tip: "兼容 OpenAI 或 Anthropic 格式" }
 };
+
+const DEFAULT_GATEWAY_ORIGIN = "http://127.0.0.1:3000";
 
 const CN_DATE_FORMATTER = new Intl.DateTimeFormat("zh-CN", {
   year: "numeric",
@@ -108,7 +117,7 @@ const LOCALE_OPTIONS: Array<{ label: string; value: LocaleCode }> = [
   { label: "English", value: "en-US" }
 ];
 
-export type EditorModule = "access" | "upstream" | "runtime" | "logs" | "calls" | "usage";
+export type EditorModule = "access" | "upstream" | "runtime" | "logs" | "calls" | "usage" | "docs";
 type SettingsConsoleProps = {
   module?: EditorModule;
 };
@@ -119,8 +128,102 @@ const MODULE_LABEL: Record<EditorModule, { zh: string; en: string }> = {
   runtime: { zh: "运行时调度", en: "Runtime" },
   logs: { zh: "请求日志", en: "Request Logs" },
   calls: { zh: "AI 调用日志", en: "AI Call Logs" },
-  usage: { zh: "用量报表", en: "Usage Report" }
+  usage: { zh: "用量报表", en: "Usage Report" },
+  docs: { zh: "接口文档", en: "API Docs" }
 };
+
+const MODULE_SUMMARY: Record<EditorModule, { zh: string; en: string }> = {
+  access: {
+    zh: "管理本地 Key 鉴权、映射策略和调用方入口。",
+    en: "Manage local key auth, mappings, and client-facing entry points."
+  },
+  upstream: {
+    zh: "维护上游供应商、模型池和视觉兜底通道。",
+    en: "Maintain upstream providers, model pools, and fallback vision routing."
+  },
+  runtime: {
+    zh: "在线切换模型、覆盖默认值并实时启停 Key。",
+    en: "Switch models online, override defaults, and toggle keys in runtime."
+  },
+  logs: {
+    zh: "排查网关请求链路，查看请求体、响应体和错误。",
+    en: "Inspect request chains with payloads, responses, and errors."
+  },
+  calls: {
+    zh: "追踪真实模型调用，核对系统提示词与结果。",
+    en: "Trace actual model invocations with prompts and outputs."
+  },
+  usage: {
+    zh: "按 Key / 模型 / 时间段观察 Token 消耗趋势。",
+    en: "Track token consumption by key, model, and time buckets."
+  },
+  docs: {
+    zh: "查看网关与管理接口文档，复制即用示例。",
+    en: "Browse gateway/ops API docs and copy ready-to-run examples."
+  }
+};
+
+type ApiDocEndpoint = {
+  method: "GET" | "POST" | "PUT" | "DELETE";
+  path: string;
+  zh: string;
+  en: string;
+};
+
+const API_DOC_GATEWAY_ENDPOINTS: ApiDocEndpoint[] = [
+  {
+    method: "POST",
+    path: "/v1/chat/completions",
+    zh: "OpenAI Chat Completions 兼容（别名：/api/v1/chat/completions）",
+    en: "OpenAI Chat Completions compatible (alias: /api/v1/chat/completions)"
+  },
+  {
+    method: "POST",
+    path: "/v1/completions",
+    zh: "OpenAI Completions 兼容（别名：/api/v1/completions）",
+    en: "OpenAI Completions compatible (alias: /api/v1/completions)"
+  },
+  {
+    method: "POST",
+    path: "/v1/responses",
+    zh: "OpenAI Responses 兼容（别名：/api/v1/responses）",
+    en: "OpenAI Responses compatible (alias: /api/v1/responses)"
+  },
+  {
+    method: "POST",
+    path: "/v1/messages",
+    zh: "Anthropic Messages 兼容（别名：/api/v1/messages）",
+    en: "Anthropic Messages compatible (alias: /api/v1/messages)"
+  }
+];
+
+const API_DOC_MANAGEMENT_ENDPOINTS: ApiDocEndpoint[] = [
+  { method: "GET", path: "/api/health", zh: "健康检查", en: "Health check" },
+  { method: "GET", path: "/api/config", zh: "配置摘要", en: "Config summary" },
+  { method: "PUT", path: "/api/config", zh: "已废弃（返回 410）", en: "Deprecated (returns 410)" },
+  { method: "GET", path: "/api/keys", zh: "Key 列表", en: "List keys" },
+  { method: "POST", path: "/api/keys", zh: "创建 Key", en: "Create key" },
+  { method: "GET", path: "/api/keys/:id", zh: "查询 Key", en: "Get key" },
+  { method: "PUT", path: "/api/keys/:id", zh: "更新 Key", en: "Update key" },
+  { method: "DELETE", path: "/api/keys/:id", zh: "删除 Key", en: "Delete key" },
+  { method: "GET", path: "/api/upstreams", zh: "渠道列表", en: "List upstream channels" },
+  { method: "POST", path: "/api/upstreams", zh: "创建渠道", en: "Create upstream channel" },
+  { method: "GET", path: "/api/upstreams/:id", zh: "查询渠道", en: "Get upstream channel" },
+  { method: "PUT", path: "/api/upstreams/:id", zh: "更新渠道", en: "Update upstream channel" },
+  { method: "DELETE", path: "/api/upstreams/:id", zh: "删除渠道", en: "Delete upstream channel" },
+  { method: "POST", path: "/api/upstreams/test", zh: "测试上游连通", en: "Test upstream connectivity" },
+  { method: "POST", path: "/api/keys/test-upstream", zh: "按 Key 测试上游", en: "Test upstream by key" },
+  { method: "GET", path: "/api/keys/switch-model", zh: "查询运行时状态", en: "Get runtime switch status" },
+  { method: "POST", path: "/api/keys/switch-model", zh: "运行时切模/启停", en: "Switch runtime model or enable/disable key" },
+  { method: "GET", path: "/api/usage", zh: "用量报表", en: "Usage report" },
+  { method: "DELETE", path: "/api/usage", zh: "清空用量", en: "Clear usage events" },
+  { method: "GET", path: "/api/logs", zh: "访问日志", en: "API access logs" },
+  { method: "DELETE", path: "/api/logs", zh: "清空访问日志", en: "Clear API access logs" },
+  { method: "GET", path: "/api/call-logs", zh: "AI 调用日志", en: "AI call logs" },
+  { method: "DELETE", path: "/api/call-logs", zh: "清空 AI 调用日志", en: "Clear AI call logs" },
+  { method: "POST", path: "/api/secret-entry", zh: "提交入口暗号", en: "Submit entry secret" },
+  { method: "DELETE", path: "/api/secret-entry", zh: "清除入口暗号", en: "Clear entry secret cookie" }
+];
 
 type UpstreamModelConfig = {
   id: string;
@@ -651,13 +754,24 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     () => channels.find((item) => item.id === keyForm.upstreamChannelId) ?? null,
     [channels, keyForm.upstreamChannelId]
   );
-  const runtimeSwitchEndpoint = useMemo(() => {
-    const origin =
-      typeof window !== "undefined"
-        ? window.location.origin.replace(/\/+$/, "")
-        : "http://127.0.0.1:3000";
-    return `${origin}/api/keys/switch-model`;
+  const [gatewayOrigin, setGatewayOrigin] = useState(DEFAULT_GATEWAY_ORIGIN);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const origin = window.location.origin.replace(/\/+$/, "");
+    if (origin) {
+      setGatewayOrigin(origin);
+    }
   }, []);
+
+  const runtimeSwitchEndpoint = useMemo(() => {
+    return `${gatewayOrigin}/api/keys/switch-model`;
+  }, [gatewayOrigin]);
+  const gatewayV1Endpoint = useMemo(() => {
+    return `${gatewayOrigin}/v1`;
+  }, [gatewayOrigin]);
   const runtimeDocLocalKey = useMemo(() => {
     const candidate = (selectedKey?.localKey ?? keyForm.localKey).trim();
     return candidate || "<your_local_key>";
@@ -704,6 +818,44 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
 }`
     }),
     [locale, runtimeDocLocalKey, runtimeDocModel, runtimeSwitchEndpoint, selectedKey?.id]
+  );
+  const apiDocExamples = useMemo(
+    () => ({
+      chatCompletions: `curl -sS "${gatewayV1Endpoint}/chat/completions" \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer ${runtimeDocLocalKey}" \\
+  -d '{
+    "model": "${runtimeDocModel}",
+    "messages": [
+      {"role":"system","content":"You are concise."},
+      {"role":"user","content":"Say hello in one line."}
+    ]
+  }'`,
+      responses: `curl -sS "${gatewayV1Endpoint}/responses" \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer ${runtimeDocLocalKey}" \\
+  -d '{
+    "model": "${runtimeDocModel}",
+    "input": [
+      {
+        "role": "user",
+        "content": [{"type":"input_text","text":"hello"}]
+      }
+    ]
+  }'`,
+      anthropicMessages: `curl -sS "${gatewayV1Endpoint}/messages" \\
+  -H "Content-Type: application/json" \\
+  -H "x-api-key: ${runtimeDocLocalKey}" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -d '{
+    "model": "${runtimeDocModel}",
+    "max_tokens": 512,
+    "messages": [
+      {"role":"user","content":"用一句话介绍你自己"}
+    ]
+  }'`
+    }),
+    [gatewayV1Endpoint, runtimeDocLocalKey, runtimeDocModel]
   );
 
   const isNewKey = selectedKeyId === null;
@@ -1882,22 +2034,20 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       next === "runtime" ||
       next === "logs" ||
       next === "calls" ||
-      next === "usage"
+      next === "usage" ||
+      next === "docs"
     ) {
       router.push(`/console/${next}`);
     }
   }
 
-  function buildCcSwitchCodexDeepLink() {
+  function resolveCcSwitchProviderContext() {
     const localKey = keyForm.localKey.trim();
     if (!localKey) {
       throw new Error("本地 Key 为空，无法生成导入链接。");
     }
 
-    const origin =
-      typeof window !== "undefined"
-        ? window.location.origin.replace(/\/+$/, "")
-        : "http://127.0.0.1:3000";
+    const origin = gatewayOrigin;
     const endpoint = `${origin}/v1`;
     const modelProvider = selectedKey?.provider ?? selectedChannelForKey?.provider ?? "openai";
     const modelPool =
@@ -1916,7 +2066,20 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     const model =
       matchedProfile?.aliasModel?.trim() ||
       normalizeModelCode(modelProvider, matchedProfile?.model ?? preferredModel);
-    const providerKey = sanitizeTomlKey(keyForm.name || "gateway");
+    const providerName = (keyForm.name || "gateway").trim() || "gateway";
+
+    return {
+      localKey,
+      origin,
+      endpoint,
+      model,
+      providerName
+    };
+  }
+
+  function buildCcSwitchCodexDeepLink() {
+    const { localKey, origin, endpoint, model, providerName } = resolveCcSwitchProviderContext();
+    const providerKey = sanitizeTomlKey(providerName);
 
     const codexConfigToml = [
       `model_provider = "${providerKey}"`,
@@ -1941,7 +2104,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     const params = new URLSearchParams({
       resource: "provider",
       app: "codex",
-      name: `${keyForm.name} (Gateway)`,
+      name: `${providerName} (Gateway)`,
       homepage: origin,
       endpoint,
       apiKey: localKey,
@@ -1955,27 +2118,230 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     return `ccswitch://v1/import?${params.toString()}`;
   }
 
-  async function copyCcSwitchDeepLink() {
+  function buildCcSwitchClaudeDeepLink() {
+    const { localKey, origin, endpoint, model, providerName } = resolveCcSwitchProviderContext();
+    const anthropicBaseUrl = origin;
+    const inlineConfig = {
+      env: {
+        ANTHROPIC_AUTH_TOKEN: localKey,
+        ANTHROPIC_BASE_URL: anthropicBaseUrl,
+        ANTHROPIC_MODEL: model,
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: model,
+        ANTHROPIC_DEFAULT_SONNET_MODEL: model,
+        ANTHROPIC_DEFAULT_OPUS_MODEL: model,
+        CLAUDE_CODE_EFFORT_LEVEL: "high",
+        MAX_THINKING_TOKENS: "8192"
+      }
+    };
+    const params = new URLSearchParams({
+      resource: "provider",
+      app: "claude",
+      name: `${providerName} (Gateway)`,
+      homepage: origin,
+      endpoint: anthropicBaseUrl,
+      apiKey: localKey,
+      model,
+      haikuModel: model,
+      sonnetModel: model,
+      opusModel: model,
+      notes: "Imported from Codex Gateway Hub",
+      configFormat: "json",
+      config: toBase64Utf8(JSON.stringify(inlineConfig)),
+      enabled: "true"
+    });
+
+    return `ccswitch://v1/import?${params.toString()}`;
+  }
+
+  function buildCcSwitchClaudeThinkingPatch() {
+    const { model } = resolveCcSwitchProviderContext();
+    return JSON.stringify(
+      {
+        env: {
+          ANTHROPIC_REASONING_MODEL: model,
+          CLAUDE_CODE_EFFORT_LEVEL: "high",
+          MAX_THINKING_TOKENS: "8192"
+        }
+      },
+      null,
+      2
+    );
+  }
+
+  async function copyCcSwitchCodexDeepLink() {
     try {
       const link = buildCcSwitchCodexDeepLink();
-      await copyTextToClipboard(link, t("CC Switch 导入链接已复制。", "CC Switch import link copied."));
+      await copyTextToClipboard(link, t("Codex 导入链接已复制。", "Codex import link copied."));
     } catch (err) {
-      notifyError(err instanceof Error ? err.message : t("复制导入链接失败", "Failed to copy import link"));
+      notifyError(
+        err instanceof Error ? err.message : t("复制 Codex 导入链接失败", "Failed to copy Codex import link")
+      );
     }
   }
 
-  function openCcSwitchImport() {
+  function openCcSwitchCodexImport() {
     try {
       const link = buildCcSwitchCodexDeepLink();
       window.location.href = link;
-      notifyInfo(t("正在尝试唤起 CC Switch 导入。", "Trying to open CC Switch import."));
+      notifyInfo(t("正在尝试唤起 CC Switch Codex 导入。", "Trying to open CC Switch Codex import."));
     } catch (err) {
-      notifyError(err instanceof Error ? err.message : t("唤起 CC Switch 失败", "Failed to open CC Switch"));
+      notifyError(
+        err instanceof Error ? err.message : t("唤起 CC Switch Codex 失败", "Failed to open CC Switch Codex")
+      );
+    }
+  }
+
+  async function copyCcSwitchClaudeDeepLink() {
+    try {
+      const link = buildCcSwitchClaudeDeepLink();
+      await copyTextToClipboard(link, t("Claude Code 导入链接已复制。", "Claude Code import link copied."));
+    } catch (err) {
+      notifyError(
+        err instanceof Error
+          ? err.message
+          : t("复制 Claude Code 导入链接失败", "Failed to copy Claude Code import link")
+      );
+    }
+  }
+
+  async function copyCcSwitchClaudeThinkingPatch() {
+    try {
+      const patch = buildCcSwitchClaudeThinkingPatch();
+      await copyTextToClipboard(
+        patch,
+        t("Claude Thinking 补丁已复制。", "Claude thinking patch copied.")
+      );
+    } catch (err) {
+      notifyError(
+        err instanceof Error
+          ? err.message
+          : t("复制 Claude Thinking 补丁失败", "Failed to copy Claude thinking patch")
+      );
+    }
+  }
+
+  function openCcSwitchClaudeImport() {
+    try {
+      const link = buildCcSwitchClaudeDeepLink();
+      window.location.href = link;
+      notifyInfo(
+        t("正在尝试唤起 CC Switch Claude Code 导入。", "Trying to open CC Switch Claude Code import.")
+      );
+    } catch (err) {
+      notifyError(
+        err instanceof Error
+          ? err.message
+          : t("唤起 CC Switch Claude Code 失败", "Failed to open CC Switch Claude Code")
+      );
     }
   }
 
   const keySelectionValue = isNewKey ? "__new__" : String(selectedKeyId);
   const channelSelectionValue = isNewChannel ? "__new__" : String(selectedChannelId);
+  const routeModuleTitle = t(MODULE_LABEL[routeModule].zh, MODULE_LABEL[routeModule].en);
+  const routeModuleSummary = t(MODULE_SUMMARY[routeModule].zh, MODULE_SUMMARY[routeModule].en);
+  const workspaceHeroStats: WorkspaceHeroStat[] = [
+    {
+      id: "keys",
+      label: t("本地 Key", "Local Keys"),
+      value: `${enabledKeyCount}/${keys.length}`,
+      note: t("启用 / 总数", "Enabled / Total"),
+      tone: "accent"
+    },
+    {
+      id: "upstreams",
+      label: t("上游渠道", "Upstreams"),
+      value: `${enabledChannelCount}/${channels.length}`,
+      note: t("启用 / 总数", "Enabled / Total"),
+      tone: "success"
+    },
+    {
+      id: "calls",
+      label: t("最近匹配调用", "Matched Calls"),
+      value: formatNumber(aiCallStats.matched),
+      note: t("来自 AI 调用日志筛选结果", "From current AI call filters"),
+      tone: routeModule === "calls" ? "accent" : "default"
+    },
+    {
+      id: "tokens",
+      label: "Total Token",
+      value: formatCompactNumber(usageReport?.summary.totalTokens ?? 0),
+      note: usageRangeTagLabel,
+      tone: routeModule === "usage" ? "warning" : "default"
+    }
+  ];
+  const workspaceHeroActions: WorkspaceHeroAction[] = [
+    {
+      id: "refresh-core",
+      label: t("刷新核心配置", "Refresh Core Data"),
+      note: t("同步本地 Key 与上游渠道", "Sync local keys and upstream channels"),
+      onClick: () => void bootstrap(),
+      disabled: loading
+    }
+  ];
+
+  if (routeModule === "access" || routeModule === "runtime") {
+    workspaceHeroActions.push({
+      id: "new-key",
+      label: t("新建本地 Key", "Create Local Key"),
+      note: t("生成新的鉴权入口并配置映射", "Generate an auth entry with model mapping"),
+      onClick: createNewKeyDraft,
+      disabled: loading
+    });
+  }
+
+  if (routeModule === "upstream") {
+    workspaceHeroActions.push({
+      id: "new-upstream",
+      label: t("新建上游渠道", "Create Upstream"),
+      note: t("新增供应商配置与模型池", "Add provider settings and model pool"),
+      onClick: createNewChannelDraft,
+      disabled: loading
+    });
+  }
+
+  if (routeModule === "logs") {
+    workspaceHeroActions.push({
+      id: "refresh-logs",
+      label: t("刷新请求日志", "Refresh Request Logs"),
+      note: t("按当前筛选条件重新拉取", "Reload with current filters"),
+      onClick: () => void loadApiLogs(),
+      disabled: loadingLogs
+    });
+  }
+
+  if (routeModule === "calls") {
+    workspaceHeroActions.push({
+      id: "refresh-calls",
+      label: t("刷新调用日志", "Refresh AI Call Logs"),
+      note: t("核对真实模型与调用类型", "Check actual model routes and call types"),
+      onClick: () => void loadAiCallLogs(),
+      disabled: loadingAiCallLogs
+    });
+  }
+
+  if (routeModule === "usage") {
+    workspaceHeroActions.push({
+      id: "refresh-usage",
+      label: t("刷新用量报表", "Refresh Usage"),
+      note: t("按时间窗重新统计 Token", "Recalculate token usage by range"),
+      onClick: () => void loadUsageReport(),
+      disabled: loadingUsage
+    });
+  }
+
+  if (routeModule === "docs") {
+    workspaceHeroActions.push({
+      id: "copy-base-url",
+      label: t("复制网关地址", "Copy Gateway Base URL"),
+      note: gatewayV1Endpoint,
+      onClick: () =>
+        void copyTextToClipboard(
+          gatewayV1Endpoint,
+          t("网关 Base URL 已复制。", "Gateway base URL copied.")
+        )
+    });
+  }
 
   return (
     <div className="tc-console">
@@ -1983,7 +2349,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
         <Layout.Aside width="232px" className="tc-aside">
           <div className="tc-brand">
             <div className="tc-brand-title">{t("Codex 模型网关", "Codex Gateway Hub")}</div>
-            <div className="tc-brand-sub">{t("腾讯风格控制台", "Tencent Style Admin")}</div>
+            <div className="tc-brand-sub">{t("AI Gateway Workspace", "AI Gateway Workspace")}</div>
           </div>
 
           <Menu
@@ -2014,6 +2380,9 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
               <Menu.MenuItem value="usage" icon={<TimeIcon />}>
                 {t("用量报表", "Usage Report")}
               </Menu.MenuItem>
+              <Menu.MenuItem value="docs" icon={<ApiIcon />}>
+                {t("接口文档", "API Docs")}
+              </Menu.MenuItem>
             </Menu.SubMenu>
           </Menu>
 
@@ -2025,7 +2394,10 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
         <Layout className="tc-main">
           <Layout.Header className="tc-header" height="56px">
             <div className="tc-header-left">
-              <div className="tc-header-title">{t(MODULE_LABEL[routeModule].zh, MODULE_LABEL[routeModule].en)}</div>
+              <div className="tc-header-title-wrap">
+                <div className="tc-header-title">{routeModuleTitle}</div>
+                <div className="tc-header-subtitle">{routeModuleSummary}</div>
+              </div>
             </div>
             <div className="tc-header-right">
               <Select
@@ -2056,10 +2428,26 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
               <Tabs.TabPanel value="logs" label={t("请求日志", "Request Logs")} />
               <Tabs.TabPanel value="calls" label={t("AI 调用日志", "AI Call Logs")} />
               <Tabs.TabPanel value="usage" label={t("用量报表", "Usage Report")} />
+              <Tabs.TabPanel value="docs" label={t("接口文档", "API Docs")} />
             </Tabs>
           </div>
 
           <Layout.Content className="tc-content">
+            <div className="tc-overview-zone">
+              <WorkspaceHero
+                title={t("网关工作台", "Gateway Workspace")}
+                subtitle={routeModuleSummary}
+                stats={workspaceHeroStats}
+                actions={workspaceHeroActions}
+                rightSlot={
+                  <div className="tc-workspace-hero-tags">
+                    <Tag variant="light-outline">{routeModuleTitle}</Tag>
+                    <Tag variant="light-outline">wire_api={wireApi}</Tag>
+                  </div>
+                }
+              />
+            </div>
+
             <Card className="tc-panel" bordered>
               <div className="tc-toolbar">
                 {routeModule === "logs" ? (
@@ -2090,6 +2478,13 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                       {t("请求", "Requests")} {usageReport?.summary.requestCount ?? 0}
                     </Tag>
                     {loadingUsage ? <Tag theme="warning" variant="light-outline">{t("刷新中", "Refreshing")}</Tag> : null}
+                  </div>
+                ) : routeModule === "docs" ? (
+                  <div className="tc-toolbar-left">
+                    <span className="tc-label">{t("接口文档", "API Docs")}</span>
+                    <Tag variant="light-outline">{t("网关路由", "Gateway Routes")} {API_DOC_GATEWAY_ENDPOINTS.length}</Tag>
+                    <Tag variant="light-outline">{t("管理路由", "Management Routes")} {API_DOC_MANAGEMENT_ENDPOINTS.length}</Tag>
+                    <Tag variant="light-outline">{t("基础地址", "Base URL")} {gatewayV1Endpoint}</Tag>
                   </div>
                 ) : routeModule === "upstream" ? (
                   <div className="tc-toolbar-left">
@@ -2203,6 +2598,19 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                     >
                       {t("刷新报表", "Refresh Report")}
                     </Button>
+                  ) : routeModule === "docs" ? (
+                    <Button
+                      variant="outline"
+                      theme="default"
+                      onClick={() =>
+                        void copyTextToClipboard(
+                          gatewayV1Endpoint,
+                          t("网关 Base URL 已复制。", "Gateway base URL copied.")
+                        )
+                      }
+                    >
+                      {t("复制网关地址", "Copy Base URL")}
+                    </Button>
                   ) : null}
                 </div>
               </div>
@@ -2240,6 +2648,12 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                     <Tag variant="light-outline">
                       updated={formatCnDate(usageReport?.generatedAt ?? "")}
                     </Tag>
+                  </>
+                ) : routeModule === "docs" ? (
+                  <>
+                    <Tag variant="light-outline">gateway_base={gatewayV1Endpoint}</Tag>
+                    <Tag variant="light-outline">runtime_switch={runtimeSwitchEndpoint}</Tag>
+                    <Tag variant="light-outline">auth=Authorization Bearer / x-api-key</Tag>
                   </>
                 ) : routeModule === "upstream" ? (
                   <>
@@ -2496,23 +2910,53 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                     {t("保存入口统一在本页底部，仅保留一个", "Save action is unified at bottom with one button")}「
                     {isNewKey ? t("创建 Key", "Create Key") : t("保存 Key", "Save Key")}」。
                   </p>
+                  <p className="tc-tip">
+                    {t(
+                      "提示：CC Switch 当前 deep link 不会完整保留 Claude Thinking 变量。导入后可点“复制 Claude Thinking 补丁”，在 CC Switch 的 Claude 配置中补上。",
+                      "Tip: CC Switch deep link currently does not fully preserve Claude thinking variables. After import, copy the Claude thinking patch and apply it in CC Switch Claude config."
+                    )}
+                  </p>
 
                   <div className="tc-actions-row">
                     <Button
                       theme="primary"
                       variant="outline"
-                      onClick={openCcSwitchImport}
+                      onClick={openCcSwitchCodexImport}
                       disabled={loading || !keyForm.localKey.trim()}
                     >
                       {t("一键导入 CC Switch（Codex）", "One-click Import to CC Switch (Codex)")}
                     </Button>
                     <Button
+                      theme="primary"
                       variant="outline"
-                      theme="default"
-                      onClick={() => void copyCcSwitchDeepLink()}
+                      onClick={openCcSwitchClaudeImport}
                       disabled={loading || !keyForm.localKey.trim()}
                     >
-                      {t("复制 CC Switch 导入链接", "Copy CC Switch Import Link")}
+                      {t("一键导入 CC Switch（Claude Code）", "One-click Import to CC Switch (Claude Code)")}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      theme="default"
+                      onClick={() => void copyCcSwitchCodexDeepLink()}
+                      disabled={loading || !keyForm.localKey.trim()}
+                    >
+                      {t("复制 Codex 导入链接", "Copy Codex Import Link")}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      theme="default"
+                      onClick={() => void copyCcSwitchClaudeDeepLink()}
+                      disabled={loading || !keyForm.localKey.trim()}
+                    >
+                      {t("复制 Claude Code 导入链接", "Copy Claude Code Import Link")}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      theme="default"
+                      onClick={() => void copyCcSwitchClaudeThinkingPatch()}
+                      disabled={loading || !keyForm.localKey.trim()}
+                    >
+                      {t("复制 Claude Thinking 补丁", "Copy Claude Thinking Patch")}
                     </Button>
                   </div>
                 </section>
@@ -3573,6 +4017,143 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                       </div>
                     </>
                   )}
+                </section>
+              ) : null}
+
+              {routeModule === "docs" ? (
+                <section className="tc-section">
+                  <h3>{t("本端接口文档", "Gateway API Documentation")}</h3>
+                  <p className="tc-upstream-advice">
+                    {t(
+                      "以下文档与当前服务端实现保持一致，包含网关推理接口和管理接口。网关鉴权使用本地 Key（不是上游 API Key）。",
+                      "This section mirrors the current server implementation, including gateway inference APIs and management APIs. Gateway auth uses local keys (not upstream API keys)."
+                    )}
+                  </p>
+
+                  <div className="tc-meta-row">
+                    <Tag variant="light-outline">{t("网关基地址", "Gateway Base URL")}: {gatewayV1Endpoint}</Tag>
+                    <Tag variant="light-outline">{t("管理基地址", "Management Base URL")}: {gatewayOrigin}/api</Tag>
+                    <Tag variant="light-outline">POST /v1/messages: x-api-key / Authorization</Tag>
+                  </div>
+
+                  <div className="tc-usage-grid">
+                    <div className="tc-usage-block">
+                      <h4>{t("网关推理接口", "Gateway Inference Endpoints")}</h4>
+                      <div className="tc-usage-table-wrap">
+                        <table className="tc-usage-table">
+                          <thead>
+                            <tr>
+                              <th>{t("方法", "Method")}</th>
+                              <th>{t("路径", "Path")}</th>
+                              <th>{t("说明", "Description")}</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {API_DOC_GATEWAY_ENDPOINTS.map((item) => (
+                              <tr key={`${item.method}-${item.path}`}>
+                                <td><Tag variant="light-outline">{item.method}</Tag></td>
+                                <td><code>{item.path}</code></td>
+                                <td>{t(item.zh, item.en)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+
+                    <div className="tc-usage-block">
+                      <h4>{t("管理与运维接口", "Management and Ops Endpoints")}</h4>
+                      <div className="tc-usage-table-wrap">
+                        <table className="tc-usage-table">
+                          <thead>
+                            <tr>
+                              <th>{t("方法", "Method")}</th>
+                              <th>{t("路径", "Path")}</th>
+                              <th>{t("说明", "Description")}</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {API_DOC_MANAGEMENT_ENDPOINTS.map((item) => (
+                              <tr key={`${item.method}-${item.path}`}>
+                                <td><Tag variant="light-outline">{item.method}</Tag></td>
+                                <td><code>{item.path}</code></td>
+                                <td>{t(item.zh, item.en)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="tc-runtime-doc">
+                    <h4>{t("调用示例", "Quick Examples")}</h4>
+                    <p className="tc-upstream-advice">
+                      {t(
+                        "示例中的本地 Key 会优先使用当前选中的 Key；若未选择，则使用占位符。",
+                        "Examples prefer the currently selected local key; otherwise they use a placeholder."
+                      )}
+                    </p>
+
+                    <div className="tc-log-panels">
+                      <div className="tc-log-panel">
+                        <div className="tc-runtime-doc-head">
+                          <strong>POST /v1/chat/completions</strong>
+                          <Button
+                            size="small"
+                            variant="outline"
+                            onClick={() =>
+                              void copyTextToClipboard(
+                                apiDocExamples.chatCompletions,
+                                t("示例命令已复制。", "Example command copied.")
+                              )
+                            }
+                          >
+                            {t("复制命令", "Copy Command")}
+                          </Button>
+                        </div>
+                        <pre className="tc-json-fallback">{apiDocExamples.chatCompletions}</pre>
+                      </div>
+
+                      <div className="tc-log-panel">
+                        <div className="tc-runtime-doc-head">
+                          <strong>POST /v1/responses</strong>
+                          <Button
+                            size="small"
+                            variant="outline"
+                            onClick={() =>
+                              void copyTextToClipboard(
+                                apiDocExamples.responses,
+                                t("示例命令已复制。", "Example command copied.")
+                              )
+                            }
+                          >
+                            {t("复制命令", "Copy Command")}
+                          </Button>
+                        </div>
+                        <pre className="tc-json-fallback">{apiDocExamples.responses}</pre>
+                      </div>
+
+                      <div className="tc-log-panel">
+                        <div className="tc-runtime-doc-head">
+                          <strong>POST /v1/messages</strong>
+                          <Button
+                            size="small"
+                            variant="outline"
+                            onClick={() =>
+                              void copyTextToClipboard(
+                                apiDocExamples.anthropicMessages,
+                                t("示例命令已复制。", "Example command copied.")
+                              )
+                            }
+                          >
+                            {t("复制命令", "Copy Command")}
+                          </Button>
+                        </div>
+                        <pre className="tc-json-fallback">{apiDocExamples.anthropicMessages}</pre>
+                      </div>
+                    </div>
+                  </div>
                 </section>
               ) : null}
 

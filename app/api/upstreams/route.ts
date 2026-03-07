@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { withApiLog } from "@/lib/api-log";
+import { requireConsoleApiAuth } from "@/lib/console-api-auth";
 import { PROVIDERS } from "@/lib/providers";
 import { UPSTREAM_WIRE_APIS } from "@/lib/key-config";
 import {
@@ -14,6 +15,11 @@ export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
   return withApiLog(req, "GET /api/upstreams", async () => {
+    const authError = requireConsoleApiAuth(req);
+    if (authError) {
+      return authError;
+    }
+
     const channels = await prisma.upstreamChannel.findMany({
       include: {
         _count: {
@@ -35,6 +41,11 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   return withApiLog(req, "POST /api/upstreams", async () => {
+    const authError = requireConsoleApiAuth(req);
+    if (authError) {
+      return authError;
+    }
+
     const body = await req.json().catch(() => ({}));
     const parsed = createUpstreamChannelSchema.safeParse(body);
     if (!parsed.success) {

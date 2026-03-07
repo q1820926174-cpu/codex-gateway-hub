@@ -1,9 +1,10 @@
-export const PROVIDERS = ["openai", "openrouter", "xai", "deepseek", "glm", "doubao", "custom"] as const;
+export const PROVIDERS = ["openai", "anthropic", "openrouter", "xai", "deepseek", "glm", "doubao", "custom"] as const;
 
 export type ProviderName = (typeof PROVIDERS)[number];
 
 export const PROVIDER_DEFAULT_BASE_URL: Record<Exclude<ProviderName, "custom">, string> = {
   openai: "https://api.openai.com",
+  anthropic: "https://api.anthropic.com",
   openrouter: "https://openrouter.ai/api",
   xai: "https://api.x.ai",
   deepseek: "https://api.deepseek.com",

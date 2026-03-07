@@ -2,7 +2,7 @@ import { notFound } from "next/navigation";
 import { SettingsConsole, type EditorModule } from "@/components/settings-console";
 import { ensureEntryAccess } from "@/lib/entry-secret";
 
-const CONSOLE_MODULES = ["access", "upstream", "runtime", "logs", "calls", "usage"] as const;
+const CONSOLE_MODULES = ["access", "upstream", "runtime", "logs", "calls", "usage", "docs"] as const;
 
 function isConsoleModule(value: string): value is EditorModule {
   return (CONSOLE_MODULES as readonly string[]).includes(value);

@@ -2,11 +2,13 @@ import { NextResponse } from "next/server";
 import { Prisma, type UpstreamChannel } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { withApiLog } from "@/lib/api-log";
+import { requireConsoleApiAuth } from "@/lib/console-api-auth";
 import {
   ensureModelExistsInPool,
   gatewayKeyDto,
   normalizeKeyModelMappings,
   normalizeUpstreamModels,
+  normalizeUpstreamWireApiValue,
   pickModelFromPool,
   resolveUpstreamBaseUrl,
   serializeKeyModelMappings,
@@ -50,6 +52,11 @@ export async function GET(
   context: { params: Promise<{ id: string }> }
 ) {
   return withApiLog(req, "GET /api/keys/:id", async () => {
+    const authError = requireConsoleApiAuth(req);
+    if (authError) {
+      return authError;
+    }
+
     const { id: rawId } = await context.params;
     const id = parseId(rawId);
     if (id === null) {
@@ -73,6 +80,11 @@ export async function PUT(
   context: { params: Promise<{ id: string }> }
 ) {
   return withApiLog(req, "PUT /api/keys/:id", async () => {
+    const authError = requireConsoleApiAuth(req);
+    if (authError) {
+      return authError;
+    }
+
     const { id: rawId } = await context.params;
     const id = parseId(rawId);
     if (id === null) {
@@ -176,20 +188,18 @@ export async function PUT(
     targetModel: normalizeUpstreamModelCode(nextProvider, item.targetModel)
   }));
 
-  const fallbackWireApi =
-    (selectedChannel?.upstreamWireApi ?? payload.upstreamWireApi ?? existing.upstreamWireApi) === "chat_completions"
-      ? "chat_completions"
-      : "responses";
+  const fallbackWireApi = normalizeUpstreamWireApiValue(
+    selectedChannel?.upstreamWireApi ?? payload.upstreamWireApi ?? existing.upstreamWireApi
+  );
   const fallbackDefaultModel = selectedChannel?.defaultModel ?? payload.defaultModel?.trim() ?? existing.defaultModel;
   const fallbackVisionModel = nextVisionModel?.trim() || null;
   const existingPool = normalizeUpstreamModels(
     selectedChannel?.upstreamModelsJson ?? existing.upstreamModelsJson,
     {
       model: selectedChannel?.defaultModel ?? existing.defaultModel,
-      upstreamWireApi:
-        (selectedChannel?.upstreamWireApi ?? existing.upstreamWireApi) === "chat_completions"
-          ? "chat_completions"
-          : "responses",
+      upstreamWireApi: normalizeUpstreamWireApiValue(
+        selectedChannel?.upstreamWireApi ?? existing.upstreamWireApi
+      ),
       supportsVision: selectedChannel?.supportsVision ?? existing.supportsVision,
       visionModel: selectedChannel?.visionModel ?? existing.visionModel
     }
@@ -316,6 +326,11 @@ export async function DELETE(
   context: { params: Promise<{ id: string }> }
 ) {
   return withApiLog(req, "DELETE /api/keys/:id", async () => {
+    const authError = requireConsoleApiAuth(req);
+    if (authError) {
+      return authError;
+    }
+
     const { id: rawId } = await context.params;
     const id = parseId(rawId);
     if (id === null) {

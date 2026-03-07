@@ -7,6 +7,7 @@ import {
   SECRET_ENTRY_COOKIE,
   verifyEntrySecret
 } from "@/lib/entry-secret";
+import { checkRateLimit } from "@/lib/rate-limit";
 
 type SecretEntryPayload = {
   secret?: string;
@@ -14,6 +15,21 @@ type SecretEntryPayload = {
 };
 
 export async function POST(req: Request) {
+  const rateLimit = checkRateLimit(req, {
+    bucket: "/api/secret-entry",
+    limit: 20,
+    windowMs: 60_000
+  });
+  if (!rateLimit.allowed) {
+    return NextResponse.json(
+      {
+        error: "Rate limit exceeded",
+        retryAfterSeconds: rateLimit.retryAfterSeconds
+      },
+      { status: 429 }
+    );
+  }
+
   const payload = (await req.json().catch(() => ({}))) as SecretEntryPayload;
   const secret = typeof payload.secret === "string" ? payload.secret : "";
   const nextPath = normalizeEntryNextPath(payload.next);

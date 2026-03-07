@@ -5,7 +5,8 @@ import {
   pickModelFromPool,
   resolveUpstreamBaseUrl,
   serializeUpstreamModels,
-  UPSTREAM_WIRE_APIS
+  UPSTREAM_WIRE_APIS,
+  normalizeUpstreamWireApiValue
 } from "@/lib/key-config";
 import { PROVIDERS } from "@/lib/providers";
 
@@ -125,7 +126,7 @@ export function upstreamChannelDto<
 >(channel: T) {
   const upstreamModels = normalizeUpstreamModels(channel.upstreamModelsJson, {
     model: channel.defaultModel,
-    upstreamWireApi: channel.upstreamWireApi === "chat_completions" ? "chat_completions" : "responses",
+    upstreamWireApi: normalizeUpstreamWireApiValue(channel.upstreamWireApi),
     supportsVision: channel.supportsVision,
     visionModel: channel.visionModel
   });
