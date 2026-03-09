@@ -68,44 +68,40 @@ npm run dev
 cp .env.example .env
 ```
 
-2. 启动 SQLite（默认） / Start with SQLite (default)
+2. 按需修改数据库连接（默认 SQLite，可改外部 MySQL/PostgreSQL） / Configure database connection (SQLite by default, or external MySQL/PostgreSQL)
+
+- SQLite（默认） / SQLite (default):
+  - `DATABASE_PROVIDER=sqlite`
+  - `DATABASE_URL=file:../data/dev.db`
+- 外部 MySQL / External MySQL:
+  - `DATABASE_PROVIDER=mysql`
+  - `DATABASE_URL=mysql://<user>:<password>@<host>:3306/<database>`
+- 外部 PostgreSQL / External PostgreSQL:
+  - `DATABASE_PROVIDER=postgresql`
+  - `DATABASE_URL=postgresql://<user>:<password>@<host>:5432/<database>?schema=public`
+
+3. 启动网关容器 / Start gateway container
 
 ```bash
 docker compose up -d --build
 ```
 
-3. 启动 MySQL / Start with MySQL
-
-```bash
-docker compose -f docker-compose.mysql.yml up -d --build
-```
-
-4. 启动 PostgreSQL / Start with PostgreSQL
-
-```bash
-docker compose -f docker-compose.postgres.yml up -d --build
-```
-
-5. 查看网关日志 / View gateway logs
+4. 查看网关日志 / View gateway logs
 
 ```bash
 docker compose logs -f gateway
-docker compose -f docker-compose.mysql.yml logs -f gateway
-docker compose -f docker-compose.postgres.yml logs -f gateway
 ```
 
-6. 停止并移除容器 / Stop and remove containers
+5. 停止并移除容器 / Stop and remove containers
 
 ```bash
 docker compose down
-docker compose -f docker-compose.mysql.yml down
-docker compose -f docker-compose.postgres.yml down
 ```
 
 说明 / Notes:
 - 网关容器启动时会自动执行 Prisma 初始化（`npm run db:init`） / The gateway auto-runs Prisma initialization on startup.
 - SQLite 数据持久化到 `gateway_data`（容器内 `/app/data/dev.db`） / SQLite data is persisted to `gateway_data`.
-- MySQL 数据持久化到 `mysql_data`，PostgreSQL 数据持久化到 `postgres_data` / MySQL and PostgreSQL each use dedicated persistent volumes.
+- Compose 不再内置 MySQL/PostgreSQL 容器，若使用 MySQL/PostgreSQL 请提供外部数据库并通过环境变量传入连接串 / Compose no longer bundles MySQL/PostgreSQL containers. Use external DB and pass connection settings via environment variables.
 
 ## Environment / 环境变量
 

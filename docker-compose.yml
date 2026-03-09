@@ -5,16 +5,21 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        DATABASE_PROVIDER: sqlite
+        DATABASE_PROVIDER: ${DATABASE_PROVIDER:-sqlite}
+        DATABASE_URL: ${DATABASE_URL:-file:../data/dev.db}
     ports:
       - "3000:3000"
     environment:
       NODE_ENV: production
       HOSTNAME: 0.0.0.0
       PORT: 3000
-      DATABASE_PROVIDER: sqlite
-      DATABASE_URL: file:../data/dev.db
+      DATABASE_PROVIDER: ${DATABASE_PROVIDER:-sqlite}
+      DATABASE_URL: ${DATABASE_URL:-file:../data/dev.db}
       CONSOLE_ENTRY_SECRET: ${CONSOLE_ENTRY_SECRET:-}
+      CONSOLE_ENTRY_COOKIE_SECURE: ${CONSOLE_ENTRY_COOKIE_SECURE:-auto}
+      ANTHROPIC_VERSION: ${ANTHROPIC_VERSION:-2023-06-01}
+      GATEWAY_KEY_CACHE_TTL_MS: ${GATEWAY_KEY_CACHE_TTL_MS:-1500}
+      GATEWAY_KEY_CACHE_MAX: ${GATEWAY_KEY_CACHE_MAX:-2048}
     volumes:
       - gateway_data:/app/data
     restart: unless-stopped
