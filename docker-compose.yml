@@ -7,6 +7,12 @@ services:
       args:
         DATABASE_PROVIDER: ${DATABASE_PROVIDER:-sqlite}
         DATABASE_URL: ${DATABASE_URL:-file:../data/dev.db}
+        DOCKER_ACCELERATE_CN: ${DOCKER_ACCELERATE_CN:-0}
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
+        NPM_REGISTRY_CN: ${NPM_REGISTRY_CN:-https://registry.npmmirror.com/}
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
     ports:
       - "3000:3000"
     environment:
@@ -20,6 +26,9 @@ services:
       ANTHROPIC_VERSION: ${ANTHROPIC_VERSION:-2023-06-01}
       GATEWAY_KEY_CACHE_TTL_MS: ${GATEWAY_KEY_CACHE_TTL_MS:-1500}
       GATEWAY_KEY_CACHE_MAX: ${GATEWAY_KEY_CACHE_MAX:-2048}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
     volumes:
       - gateway_data:/app/data
     restart: unless-stopped

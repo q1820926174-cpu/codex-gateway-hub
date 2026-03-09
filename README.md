@@ -103,6 +103,33 @@ docker compose down
 - SQLite 数据持久化到 `gateway_data`（容器内 `/app/data/dev.db`） / SQLite data is persisted to `gateway_data`.
 - Compose 不再内置 MySQL/PostgreSQL 容器，若使用 MySQL/PostgreSQL 请提供外部数据库并通过环境变量传入连接串 / Compose no longer bundles MySQL/PostgreSQL containers. Use external DB and pass connection settings via environment variables.
 
+### China Acceleration Mode / 国内加速模式
+
+默认关闭，可在 `.env` 打开（构建时自动切换 npm 源为国内镜像） / Disabled by default. Enable in `.env` to switch npm registry to a CN mirror during build:
+
+```env
+DOCKER_ACCELERATE_CN="1"
+NPM_REGISTRY_CN="https://registry.npmmirror.com/"
+```
+
+可选代理（如果你本地有代理） / Optional proxy:
+
+```env
+HTTP_PROXY="http://127.0.0.1:7890"
+HTTPS_PROXY="http://127.0.0.1:7890"
+NO_PROXY="localhost,127.0.0.1"
+```
+
+重建镜像使配置生效 / Rebuild to apply:
+
+```bash
+docker compose build --no-cache gateway
+docker compose up -d
+```
+
+说明 / Note:
+- 该模式主要加速依赖安装；Docker 基础镜像下载速度取决于你宿主机 Docker daemon 的镜像加速器配置 / This mainly accelerates dependency installation; base image pull speed depends on Docker daemon mirror settings on the host.
+
 ## Environment / 环境变量
 
 ```env
@@ -113,6 +140,12 @@ CONSOLE_ENTRY_COOKIE_SECURE="auto"
 ANTHROPIC_VERSION="2023-06-01"
 GATEWAY_KEY_CACHE_TTL_MS="1500"
 GATEWAY_KEY_CACHE_MAX="2048"
+DOCKER_ACCELERATE_CN="0"
+NPM_REGISTRY="https://registry.npmjs.org/"
+NPM_REGISTRY_CN="https://registry.npmmirror.com/"
+HTTP_PROXY=""
+HTTPS_PROXY=""
+NO_PROXY="localhost,127.0.0.1"
 ```
 
 - `DATABASE_PROVIDER` 支持：`sqlite`、`mysql`、`postgresql` / Supported values: `sqlite`, `mysql`, `postgresql`.
@@ -125,6 +158,9 @@ GATEWAY_KEY_CACHE_MAX="2048"
 - `ANTHROPIC_VERSION` 用于 Anthropic 上游默认请求头，未显式传入时回落到该值 / `ANTHROPIC_VERSION` sets the default Anthropic upstream header when the client does not send one.
 - `GATEWAY_KEY_CACHE_TTL_MS` 与 `GATEWAY_KEY_CACHE_MAX` 用于高并发下本地 Key 缓存 / These two variables control local-key cache for high concurrency.
 - `GATEWAY_KEY_CACHE_TTL_MS=0` 可关闭缓存 / Set `GATEWAY_KEY_CACHE_TTL_MS=0` to disable cache.
+- `DOCKER_ACCELERATE_CN=1` 时，Docker 构建阶段 npm 将使用 `NPM_REGISTRY_CN` / When `DOCKER_ACCELERATE_CN=1`, Docker build uses `NPM_REGISTRY_CN` for npm install.
+- `NPM_REGISTRY` 为默认 npm 源，`NPM_REGISTRY_CN` 为加速模式 npm 源 / `NPM_REGISTRY` is default npm registry; `NPM_REGISTRY_CN` is used in acceleration mode.
+- `HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY` 会透传到构建与运行容器 / `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` are passed to both build and runtime containers.
 - 配置入口暗号后，访问 `/` 或 `/console/*` 会先跳转 `/secret-entry` / With entry-secret enabled, `/` and `/console/*` redirect to `/secret-entry`.
 
 ## SQLite To MySQL/PostgreSQL Migration / SQLite 迁移到 MySQL/PostgreSQL
