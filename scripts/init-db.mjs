@@ -541,6 +541,10 @@ async function seedDefaultData(prisma, provider) {
 
 async function main() {
   const reset = process.argv.includes("--reset");
+  const skipSeed =
+    process.argv.includes("--skip-seed") ||
+    process.env.DB_INIT_SKIP_SEED === "1" ||
+    process.env.DB_INIT_SKIP_SEED === "true";
   const provider = resolveDatabaseProvider();
   const databaseUrl = ensureDatabaseUrl(provider);
 
@@ -566,7 +570,9 @@ async function main() {
     await runStatements(prisma, statements.patch, true);
     await runStatements(prisma, statements.index, true);
 
-    await seedDefaultData(prisma, provider);
+    if (!skipSeed) {
+      await seedDefaultData(prisma, provider);
+    }
 
     process.stdout.write(
       `Initialized database with provider=${provider}, url=${process.env.DATABASE_URL}\n`

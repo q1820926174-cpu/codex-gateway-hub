@@ -23,6 +23,7 @@
     "build": "next build",
     "start": "next start",
     "db:init": "node --env-file-if-exists=.env scripts/init-db.mjs",
+    "db:migrate:from-sqlite": "node --env-file-if-exists=.env scripts/migrate-sqlite-to-db.mjs",
     "prisma:generate": "node --env-file-if-exists=.env scripts/prisma-generate.mjs",
     "prisma:migrate": "npm run prisma:generate && npm run db:init",
     "prisma:reset": "npm run prisma:generate && node --env-file-if-exists=.env scripts/init-db.mjs --reset"

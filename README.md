@@ -127,6 +127,33 @@ GATEWAY_KEY_CACHE_MAX="2048"
 - `GATEWAY_KEY_CACHE_TTL_MS=0` 可关闭缓存 / Set `GATEWAY_KEY_CACHE_TTL_MS=0` to disable cache.
 - 配置入口暗号后，访问 `/` 或 `/console/*` 会先跳转 `/secret-entry` / With entry-secret enabled, `/` and `/console/*` redirect to `/secret-entry`.
 
+## SQLite To MySQL/PostgreSQL Migration / SQLite 迁移到 MySQL/PostgreSQL
+
+从本地 SQLite 迁移数据到外部 MySQL/PostgreSQL（迁移 `UpstreamChannel`、`ProviderKey`、`TokenUsageEvent` 三张表） / Migrate local SQLite data to external MySQL/PostgreSQL (`UpstreamChannel`, `ProviderKey`, `TokenUsageEvent`).
+
+```bash
+npm run db:migrate:from-sqlite -- \
+  --target-provider=postgresql \
+  --target-url='postgresql://user:pass@127.0.0.1:5432/codex_gateway?schema=public'
+```
+
+```bash
+npm run db:migrate:from-sqlite -- \
+  --target-provider=mysql \
+  --target-url='mysql://user:pass@127.0.0.1:3306/codex_gateway'
+```
+
+可选参数 / Optional flags:
+- `--source-url=file:./dev.db`：指定源 SQLite 文件（默认 `file:./dev.db`） / specify source SQLite URL (default `file:./dev.db`).
+- `--overwrite-target`：清空目标数据库已有数据后再导入 / clear target data before import.
+- `--keep-export-file`：保留临时导出 JSON 文件 / keep temporary exported JSON file.
+- `--export-file=<path>`：指定导出文件路径 / set export file path.
+
+说明 / Notes:
+- 脚本会自动创建/补齐目标表结构，但不会写入默认演示数据 / Script initializes target schema without seeding demo data.
+- 若目标库已有数据且未加 `--overwrite-target`，脚本会中止 / Script aborts when target DB is non-empty unless `--overwrite-target` is provided.
+- 若 SQLite 中存在引用失效的 `TokenUsageEvent`（`keyId` 不存在于 `ProviderKey`），迁移时会自动跳过并打印告警 / Orphan `TokenUsageEvent` rows (missing `ProviderKey`) are skipped with a warning during migration.
+
 ## Console Routes / 控制台路由
 
 - `/secret-entry` - 入口暗号页 / Entry-secret unlock page
