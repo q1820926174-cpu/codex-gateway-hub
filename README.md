@@ -113,6 +113,7 @@ docker compose -f docker-compose.postgres.yml down
 DATABASE_PROVIDER="sqlite"
 DATABASE_URL="file:./dev.db"
 CONSOLE_ENTRY_SECRET=""
+CONSOLE_ENTRY_COOKIE_SECURE="auto"
 ANTHROPIC_VERSION="2023-06-01"
 GATEWAY_KEY_CACHE_TTL_MS="1500"
 GATEWAY_KEY_CACHE_MAX="2048"
@@ -124,6 +125,7 @@ GATEWAY_KEY_CACHE_MAX="2048"
 - PostgreSQL 连接串示例 / PostgreSQL URL example:  
   `DATABASE_URL="postgresql://codex:codex@127.0.0.1:5432/codex_gateway?schema=public"`
 - `CONSOLE_ENTRY_SECRET` 留空表示关闭入口暗号 / Empty `CONSOLE_ENTRY_SECRET` disables entry-secret protection.
+- `CONSOLE_ENTRY_COOKIE_SECURE` 支持 `auto`（默认）、`true`、`false`。`auto` 会按请求协议自动判断是否加 `Secure`（推荐） / `CONSOLE_ENTRY_COOKIE_SECURE` accepts `auto` (default), `true`, `false`. `auto` decides `Secure` by request protocol (recommended).
 - `ANTHROPIC_VERSION` 用于 Anthropic 上游默认请求头，未显式传入时回落到该值 / `ANTHROPIC_VERSION` sets the default Anthropic upstream header when the client does not send one.
 - `GATEWAY_KEY_CACHE_TTL_MS` 与 `GATEWAY_KEY_CACHE_MAX` 用于高并发下本地 Key 缓存 / These two variables control local-key cache for high concurrency.
 - `GATEWAY_KEY_CACHE_TTL_MS=0` 可关闭缓存 / Set `GATEWAY_KEY_CACHE_TTL_MS=0` to disable cache.
@@ -176,7 +178,8 @@ GATEWAY_KEY_CACHE_MAX="2048"
 
 - 所有网关兼容路由都使用本地 Key 鉴权，支持 `Authorization: Bearer <local_key>` 或 `x-api-key: <local_key>` / All gateway-compatible routes authenticate with the local key via either `Authorization: Bearer <local_key>` or `x-api-key: <local_key>`.
 - `POST /v1/messages` 与 `/api/v1/messages` 额外透传 `anthropic-version`、`anthropic-beta` 到 Anthropic 上游；如果客户端未传 `anthropic-version`，则默认使用 `ANTHROPIC_VERSION` 或 `2023-06-01` / `POST /v1/messages` and `/api/v1/messages` also forward `anthropic-version` and `anthropic-beta`; when omitted, `anthropic-version` defaults to `ANTHROPIC_VERSION` or `2023-06-01`.
-- `/v1/*`、`/api/v1/*` 以及 `/api/secret-entry` 默认启用轻量内存限流：单 IP 每分钟 120 次；超限返回 `429` 与 `retryAfterSeconds` / `/v1/*`, `/api/v1/*`, and `/api/secret-entry` use lightweight in-memory rate limiting by default: 120 requests per IP per minute, returning `429` with `retryAfterSeconds` when exceeded.
+- `/v1/*` 与 `/api/v1/*` 默认启用轻量内存限流：单 IP 每分钟 120 次；`/api/secret-entry` 为单 IP 每分钟 20 次；超限返回 `429` 与 `retryAfterSeconds` / `/v1/*` and `/api/v1/*` use lightweight in-memory rate limiting by default (120 req/min per IP); `/api/secret-entry` is 20 req/min per IP, returning `429` with `retryAfterSeconds` when exceeded.
+- `/api/secret-entry` 额外启用防爆破策略：单 IP 5 分钟内连续输错 6 次会锁定 15 分钟 / `/api/secret-entry` also enables brute-force protection: 6 consecutive failures within 5 minutes trigger a 15-minute lock per IP.
 
 ## Runtime Switch API / 运行时切换接口
 

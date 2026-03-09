@@ -6,6 +6,8 @@ import {
   normalizeEntryNextPath
 } from "@/lib/entry-secret";
 
+export const dynamic = "force-dynamic";
+
 export default async function SecretEntryPage(
   props: { searchParams: Promise<{ next?: string }> }
 ) {

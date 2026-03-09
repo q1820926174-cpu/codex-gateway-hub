@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 
 export const SECRET_ENTRY_COOKIE = "gateway_secret_entry";
 const DEFAULT_NEXT_PATH = "/console/access";
+const DEFAULT_ENTRY_COOKIE_MAX_AGE = 60 * 60 * 24 * 7;
 
 function sha256Hex(value: string) {
   return createHash("sha256").update(value).digest("hex");
@@ -63,11 +64,50 @@ export function normalizeEntryNextPath(rawNextPath: string | undefined | null) {
   return trimmed || DEFAULT_NEXT_PATH;
 }
 
-export function entryCookieOptions(maxAge = 60 * 60 * 24 * 7) {
+function parseBooleanEnv(value: string | undefined) {
+  const normalized = (value ?? "").trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+  return null;
+}
+
+export function resolveEntryCookieSecure(req?: Request) {
+  const overrideSecure = parseBooleanEnv(process.env.CONSOLE_ENTRY_COOKIE_SECURE);
+  if (typeof overrideSecure === "boolean") {
+    return overrideSecure;
+  }
+
+  if (req) {
+    const forwardedProto = req.headers.get("x-forwarded-proto");
+    const firstForwardedProto = forwardedProto?.split(",")[0]?.trim().toLowerCase() ?? "";
+    if (firstForwardedProto) {
+      return firstForwardedProto === "https";
+    }
+
+    try {
+      return new URL(req.url).protocol === "https:";
+    } catch {
+      return process.env.NODE_ENV === "production";
+    }
+  }
+
+  return process.env.NODE_ENV === "production";
+}
+
+export function entryCookieOptions(options?: { maxAge?: number; secure?: boolean }) {
+  const maxAge = options?.maxAge ?? DEFAULT_ENTRY_COOKIE_MAX_AGE;
+  const secure = typeof options?.secure === "boolean" ? options.secure : resolveEntryCookieSecure();
   return {
     httpOnly: true,
     sameSite: "lax" as const,
-    secure: process.env.NODE_ENV === "production",
+    secure,
     path: "/",
     maxAge
   };
