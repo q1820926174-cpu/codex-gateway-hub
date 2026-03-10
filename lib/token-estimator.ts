@@ -51,6 +51,10 @@ function estimateTextPartsTokenCount(
       total += 512;
       continue;
     }
+    if (type === "video_url" || type === "input_video") {
+      total += 1024;
+      continue;
+    }
 
     const text = "text" in part ? (part as { text?: unknown }).text : undefined;
     if (typeof text === "string") {

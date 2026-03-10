@@ -138,6 +138,9 @@ DATABASE_URL="file:./dev.db"
 CONSOLE_ENTRY_SECRET=""
 CONSOLE_ENTRY_COOKIE_SECURE="auto"
 ANTHROPIC_VERSION="2023-06-01"
+OPENAI_FILE_STORAGE_DIR="./data/openai-files"
+OPENAI_FILE_UPLOAD_MAX_BYTES="20971520"
+OPENAI_FILE_DATA_URL_MAX_BYTES="20971520"
 GATEWAY_KEY_CACHE_TTL_MS="1500"
 GATEWAY_KEY_CACHE_MAX="2048"
 DOCKER_ACCELERATE_CN="0"
@@ -156,6 +159,9 @@ NO_PROXY="localhost,127.0.0.1"
 - `CONSOLE_ENTRY_SECRET` 留空表示关闭入口暗号 / Empty `CONSOLE_ENTRY_SECRET` disables entry-secret protection.
 - `CONSOLE_ENTRY_COOKIE_SECURE` 支持 `auto`（默认）、`true`、`false`。`auto` 会按请求协议自动判断是否加 `Secure`（推荐） / `CONSOLE_ENTRY_COOKIE_SECURE` accepts `auto` (default), `true`, `false`. `auto` decides `Secure` by request protocol (recommended).
 - `ANTHROPIC_VERSION` 用于 Anthropic 上游默认请求头，未显式传入时回落到该值 / `ANTHROPIC_VERSION` sets the default Anthropic upstream header when the client does not send one.
+- `OPENAI_FILE_STORAGE_DIR` 为 `/v1/files` 的本地存储目录，Docker 默认可设为 `/app/data/openai-files` 以持久化 / `OPENAI_FILE_STORAGE_DIR` is local storage for `/v1/files`; for Docker, set `/app/data/openai-files` for persistence.
+- `OPENAI_FILE_UPLOAD_MAX_BYTES` 限制上传大小（默认 20MB） / `OPENAI_FILE_UPLOAD_MAX_BYTES` limits upload size (default 20MB).
+- `OPENAI_FILE_DATA_URL_MAX_BYTES` 限制 `file_id` 内联为 data URL 的大小（默认 20MB） / `OPENAI_FILE_DATA_URL_MAX_BYTES` limits `file_id` inlining to data URL (default 20MB).
 - `GATEWAY_KEY_CACHE_TTL_MS` 与 `GATEWAY_KEY_CACHE_MAX` 用于高并发下本地 Key 缓存 / These two variables control local-key cache for high concurrency.
 - `GATEWAY_KEY_CACHE_TTL_MS=0` 可关闭缓存 / Set `GATEWAY_KEY_CACHE_TTL_MS=0` to disable cache.
 - `DOCKER_ACCELERATE_CN=1` 时，Docker 构建阶段 npm 将使用 `NPM_REGISTRY_CN` / When `DOCKER_ACCELERATE_CN=1`, Docker build uses `NPM_REGISTRY_CN` for npm install.
@@ -207,6 +213,11 @@ npm run db:migrate:from-sqlite -- \
   - `POST /v1/completions`（别名：`/api/v1/completions`）
   - `POST /v1/responses`（别名：`/api/v1/responses`）
   - `POST /v1/messages`（别名：`/api/v1/messages`）
+  - `POST /v1/files`（别名：`/api/v1/files`，`multipart/form-data` 上传文件）
+  - `GET /v1/files`（别名：`/api/v1/files`，按当前本地 key 列表）
+  - `GET /v1/files/:id`（别名：`/api/v1/files/:id`）
+  - `DELETE /v1/files/:id`（别名：`/api/v1/files/:id`）
+  - `GET /v1/files/:id/content`（别名：`/api/v1/files/:id/content`）
 - Console/admin routes / 控制台与管理路由
 - `GET /api/health`
 - `GET /api/config`
@@ -334,6 +345,61 @@ curl http://127.0.0.1:3000/v1/responses \
     ]
   }'
 ```
+
+### Files Upload + `file_id` Vision
+
+```bash
+# 1) upload image file
+curl -sS http://127.0.0.1:3000/v1/files \
+  -H "Authorization: Bearer <your_local_key>" \
+  -F "purpose=vision" \
+  -F "file=@./example.png"
+```
+
+上传后返回 `id`（例如 `file-xxxxxxxx`），可在 `chat/completions` 或 `responses` 里用 `file_id` 引用，网关会自动转为可识别图片输入。
+
+```bash
+# 2) use file_id in chat/completions
+curl -sS http://127.0.0.1:3000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <your_local_key>" \
+  -d '{
+    "model": "gpt-4.1-mini",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {"type":"text","text":"Describe this image in one sentence."},
+          {"type":"image_file","image_file":{"file_id":"file-xxxxxxxx"}}
+        ]
+      }
+    ]
+  }'
+```
+
+```bash
+# 3) use video file_id in chat/completions
+curl -sS http://127.0.0.1:3000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <your_local_key>" \
+  -d '{
+    "model": "glm-5",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {"type":"text","text":"请一句话描述这个视频。"},
+          {"type":"video_file","video_file":{"file_id":"file-xxxxxxxx"}}
+        ]
+      }
+    ]
+  }'
+```
+
+说明 / Note:
+- 多图片可在同一次请求里放多个 `image_file.file_id` / Multi-image in one request is supported by passing multiple `image_file.file_id` parts.
+- 视频 `file_id` 会根据 MIME 自动映射到视频输入（`video_url` / `input_video`） / Video `file_id` is auto-mapped to video input by MIME (`video_url` / `input_video`).
+- 当视觉兜底通道为 `anthropic_messages` 且 provider 为 `doubao` 时，网关会自动启用兼容模式，改走 `chat/completions` 执行视频理解 / When fallback wire API is `anthropic_messages` with provider `doubao`, gateway auto-enables compatibility mode and uses `chat/completions` for video understanding.
 
 ### Anthropic Messages
 

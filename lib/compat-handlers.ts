@@ -11,7 +11,7 @@ import {
   type AnthropicMessagesRequest
 } from "@/lib/anthropic-compat";
 import {
-  collectImageInputs,
+  collectMediaInputs,
   extractLegacyChatCompletionText,
   extractResponseText,
   isStreamingRequest,
@@ -24,7 +24,7 @@ import {
   mapResponsesToLegacyChat,
   mapResponsesToLegacyCompletion,
   type ResponsesRequest,
-  replaceImagesWithCaptions
+  replaceMediaWithCaptions
 } from "@/lib/mapper";
 import {
   callAnthropicMessagesApi,
@@ -55,6 +55,7 @@ import {
 import { appendAiCallLogEntry } from "@/lib/ai-call-log-store";
 import { persistAiCallImage } from "@/lib/ai-call-image-store";
 import { readResponseContext, writeResponseContext } from "@/lib/response-context-store";
+import { OpenAiFileStoreError, resolveOpenAiFileIdToDataUrl } from "@/lib/openai-file-store";
 
 function pickRequestedModel(modelFromBody: string | undefined, key: ResolvedGatewayKey) {
   const overrideModel = key.activeModelOverride?.trim();
@@ -189,6 +190,10 @@ function extractTextFromUnknownContent(content: unknown) {
     const type = "type" in item ? (item as { type?: unknown }).type : undefined;
     if (type === "input_image" || type === "image_url") {
       parts.push("[image]");
+      continue;
+    }
+    if (type === "input_video" || type === "video_url") {
+      parts.push("[video]");
       continue;
     }
     const text = "text" in item ? (item as { text?: unknown }).text : undefined;
@@ -792,6 +797,372 @@ function normalizeLegacyMessages(messages: LegacyChatRequest["messages"] | undef
     }));
 }
 
+function normalizeOptionalString(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+
+function pickImageDetailFromPart(part: Record<string, unknown>) {
+  const directDetail = normalizeOptionalString(part.detail);
+  if (directDetail) {
+    return directDetail;
+  }
+
+  const imageUrl = part.image_url;
+  if (imageUrl && typeof imageUrl === "object") {
+    const nestedDetail = normalizeOptionalString((imageUrl as { detail?: unknown }).detail);
+    if (nestedDetail) {
+      return nestedDetail;
+    }
+  }
+
+  const videoUrl = part.video_url;
+  if (videoUrl && typeof videoUrl === "object") {
+    const nestedDetail = normalizeOptionalString((videoUrl as { detail?: unknown }).detail);
+    if (nestedDetail) {
+      return nestedDetail;
+    }
+  }
+
+  const imageFile = part.image_file;
+  if (imageFile && typeof imageFile === "object") {
+    const nestedDetail = normalizeOptionalString((imageFile as { detail?: unknown }).detail);
+    if (nestedDetail) {
+      return nestedDetail;
+    }
+  }
+
+  const videoFile = part.video_file;
+  if (videoFile && typeof videoFile === "object") {
+    const nestedDetail = normalizeOptionalString((videoFile as { detail?: unknown }).detail);
+    if (nestedDetail) {
+      return nestedDetail;
+    }
+  }
+
+  return "";
+}
+
+function pickFileIdFromPart(part: Record<string, unknown>) {
+  const direct = normalizeOptionalString(part.file_id);
+  if (direct) {
+    return direct;
+  }
+
+  const imageFile = part.image_file;
+  if (imageFile && typeof imageFile === "object") {
+    const nested = normalizeOptionalString((imageFile as { file_id?: unknown }).file_id);
+    if (nested) {
+      return nested;
+    }
+  }
+
+  const videoFile = part.video_file;
+  if (videoFile && typeof videoFile === "object") {
+    const nested = normalizeOptionalString((videoFile as { file_id?: unknown }).file_id);
+    if (nested) {
+      return nested;
+    }
+  }
+
+  const imageUrl = part.image_url;
+  if (imageUrl && typeof imageUrl === "object") {
+    const nested = normalizeOptionalString((imageUrl as { file_id?: unknown }).file_id);
+    if (nested) {
+      return nested;
+    }
+  }
+
+  const videoUrl = part.video_url;
+  if (videoUrl && typeof videoUrl === "object") {
+    const nested = normalizeOptionalString((videoUrl as { file_id?: unknown }).file_id);
+    if (nested) {
+      return nested;
+    }
+  }
+
+  return "";
+}
+
+type ResolvedFileInput = {
+  dataUrl: string;
+  mimeType: string;
+  mediaType: "image" | "video" | "other";
+};
+
+async function resolveFileIdWithCache(
+  fileId: string,
+  ownerKeyId: number,
+  cache: Map<string, ResolvedFileInput>
+) {
+  const key = fileId.trim();
+  const cached = cache.get(key);
+  if (cached) {
+    return cached;
+  }
+
+  const resolved = await resolveOpenAiFileIdToDataUrl(ownerKeyId, key);
+  cache.set(key, resolved);
+  return resolved;
+}
+
+type RewriteResult<T> =
+  | {
+      ok: true;
+      body: T;
+    }
+  | {
+      ok: false;
+      status: number;
+      body: {
+        error: string;
+      };
+    };
+
+function normalizeRewriteError(error: unknown): RewriteResult<never> {
+  if (error instanceof OpenAiFileStoreError) {
+    return {
+      ok: false,
+      status: error.status,
+      body: {
+        error: error.message
+      }
+    };
+  }
+
+  return {
+    ok: false,
+    status: 500,
+    body: {
+      error: error instanceof Error ? error.message : "Failed to resolve file_id media input."
+    }
+  };
+}
+
+async function rewriteLegacyChatBodyFileIds(
+  body: LegacyChatRequest,
+  ownerKeyId: number
+): Promise<RewriteResult<LegacyChatRequest>> {
+  const messages = normalizeLegacyMessages(body.messages);
+  if (!messages.length) {
+    return {
+      ok: true,
+      body
+    };
+  }
+
+  const cache = new Map<string, ResolvedFileInput>();
+  let changed = false;
+  const rewrittenMessages: LegacyChatMessage[] = [];
+
+  try {
+    for (const message of messages) {
+      if (!Array.isArray(message.content)) {
+        rewrittenMessages.push(message);
+        continue;
+      }
+
+      const nextParts: unknown[] = [];
+      let messageChanged = false;
+
+      for (const part of message.content) {
+        if (!part || typeof part !== "object") {
+          nextParts.push(deepCloneUnknown(part));
+          continue;
+        }
+
+        const partObj = part as Record<string, unknown>;
+        const type = normalizeOptionalString(partObj.type).toLowerCase();
+        const isMediaPart =
+          type === "image_file" ||
+          type === "input_image" ||
+          type === "image_url" ||
+          type === "video_file" ||
+          type === "input_video" ||
+          type === "video_url";
+        if (!isMediaPart) {
+          nextParts.push(deepCloneUnknown(part));
+          continue;
+        }
+
+        const fileId = pickFileIdFromPart(partObj);
+        if (!fileId) {
+          nextParts.push(deepCloneUnknown(part));
+          continue;
+        }
+
+        const detail = pickImageDetailFromPart(partObj);
+        const resolvedFile = await resolveFileIdWithCache(fileId, ownerKeyId, cache);
+        if (resolvedFile.mediaType === "other") {
+          throw new OpenAiFileStoreError(
+            400,
+            `Unsupported file media type for multimodal input: ${resolvedFile.mimeType}`
+          );
+        }
+
+        nextParts.push(
+          resolvedFile.mediaType === "video"
+            ? {
+                type: "video_url",
+                video_url: {
+                  url: resolvedFile.dataUrl,
+                  ...(detail ? { detail } : {})
+                }
+              }
+            : {
+                type: "image_url",
+                image_url: {
+                  url: resolvedFile.dataUrl,
+                  ...(detail ? { detail } : {})
+                }
+              }
+        );
+        messageChanged = true;
+      }
+
+      rewrittenMessages.push(
+        messageChanged
+          ? {
+              ...message,
+              content: nextParts
+            }
+          : message
+      );
+      changed = changed || messageChanged;
+    }
+  } catch (error) {
+    return normalizeRewriteError(error);
+  }
+
+  if (!changed) {
+    return {
+      ok: true,
+      body
+    };
+  }
+
+  return {
+    ok: true,
+    body: {
+      ...body,
+      messages: rewrittenMessages
+    }
+  };
+}
+
+async function rewriteResponsesBodyFileIds(
+  body: ResponsesRequest,
+  ownerKeyId: number
+): Promise<RewriteResult<ResponsesRequest>> {
+  const input = body.input;
+  if (!Array.isArray(input) && !(input && typeof input === "object")) {
+    return {
+      ok: true,
+      body
+    };
+  }
+
+  const entries = Array.isArray(input) ? input : [input];
+  const cache = new Map<string, ResolvedFileInput>();
+  let changed = false;
+  const rewrittenEntries: unknown[] = [];
+
+  try {
+    for (const entry of entries) {
+      if (!entry || typeof entry !== "object") {
+        rewrittenEntries.push(deepCloneUnknown(entry));
+        continue;
+      }
+
+      const content = "content" in entry ? (entry as { content?: unknown }).content : undefined;
+      if (!Array.isArray(content)) {
+        rewrittenEntries.push(deepCloneUnknown(entry));
+        continue;
+      }
+
+      let entryChanged = false;
+      const nextContent: unknown[] = [];
+
+      for (const part of content) {
+        if (!part || typeof part !== "object") {
+          nextContent.push(deepCloneUnknown(part));
+          continue;
+        }
+
+        const partObj = part as Record<string, unknown>;
+        const type = normalizeOptionalString(partObj.type).toLowerCase();
+        const isMediaPart =
+          type === "input_image" ||
+          type === "image_file" ||
+          type === "image_url" ||
+          type === "input_video" ||
+          type === "video_file" ||
+          type === "video_url";
+        if (!isMediaPart) {
+          nextContent.push(deepCloneUnknown(part));
+          continue;
+        }
+
+        const fileId = pickFileIdFromPart(partObj);
+        if (!fileId) {
+          nextContent.push(deepCloneUnknown(part));
+          continue;
+        }
+
+        const detail = pickImageDetailFromPart(partObj);
+        const resolvedFile = await resolveFileIdWithCache(fileId, ownerKeyId, cache);
+        if (resolvedFile.mediaType === "other") {
+          throw new OpenAiFileStoreError(
+            400,
+            `Unsupported file media type for multimodal input: ${resolvedFile.mimeType}`
+          );
+        }
+
+        nextContent.push(
+          resolvedFile.mediaType === "video"
+            ? {
+                type: "input_video",
+                video_url: resolvedFile.dataUrl,
+                ...(detail ? { detail } : {})
+              }
+            : {
+                type: "input_image",
+                image_url: resolvedFile.dataUrl,
+                ...(detail ? { detail } : {})
+              }
+        );
+        entryChanged = true;
+      }
+
+      rewrittenEntries.push(
+        entryChanged
+          ? {
+              ...(entry as Record<string, unknown>),
+              content: nextContent
+            }
+          : deepCloneUnknown(entry)
+      );
+      changed = changed || entryChanged;
+    }
+  } catch (error) {
+    return normalizeRewriteError(error);
+  }
+
+  if (!changed) {
+    return {
+      ok: true,
+      body
+    };
+  }
+
+  return {
+    ok: true,
+    body: {
+      ...body,
+      input: Array.isArray(input) ? rewrittenEntries : rewrittenEntries[0] ?? input
+    }
+  };
+}
+
 function mergeContinuationMessages(
   previousMessages: LegacyChatMessage[],
   incomingMessages: LegacyChatMessage[]
@@ -866,6 +1237,7 @@ function sanitizeLegacyContentForGenericUpstream(content: unknown, role: LegacyC
   const contentParts: Array<
     | { type: "text"; text: string }
     | { type: "image_url"; image_url: { url: string; detail?: string } }
+    | { type: "video_url"; video_url: { url: string; detail?: string } }
   > = [];
 
   for (const part of content) {
@@ -889,32 +1261,46 @@ function sanitizeLegacyContentForGenericUpstream(content: unknown, role: LegacyC
       continue;
     }
 
-    if (rawType !== "image_url") {
+    if (rawType !== "image_url" && rawType !== "input_image" && rawType !== "video_url" && rawType !== "input_video") {
       continue;
     }
 
-    const imageValue = "image_url" in part ? (part as { image_url?: unknown }).image_url : undefined;
+    const isVideo = rawType === "video_url" || rawType === "input_video";
+    const mediaValue = isVideo
+      ? ("video_url" in part ? (part as { video_url?: unknown }).video_url : undefined)
+      : ("image_url" in part ? (part as { image_url?: unknown }).image_url : undefined);
     const detailValue = "detail" in part ? (part as { detail?: unknown }).detail : undefined;
-    const imageUrl =
-      typeof imageValue === "string"
-        ? imageValue.trim()
-        : imageValue && typeof imageValue === "object" && typeof (imageValue as { url?: unknown }).url === "string"
-          ? (imageValue as { url: string }).url.trim()
+    const mediaUrl =
+      typeof mediaValue === "string"
+        ? mediaValue.trim()
+        : mediaValue && typeof mediaValue === "object" && typeof (mediaValue as { url?: unknown }).url === "string"
+          ? (mediaValue as { url: string }).url.trim()
           : "";
     const detail =
       typeof detailValue === "string"
         ? detailValue.trim()
-        : imageValue && typeof imageValue === "object" && typeof (imageValue as { detail?: unknown }).detail === "string"
-          ? ((imageValue as { detail: string }).detail).trim()
+        : mediaValue && typeof mediaValue === "object" && typeof (mediaValue as { detail?: unknown }).detail === "string"
+          ? ((mediaValue as { detail: string }).detail).trim()
           : "";
-    if (!imageUrl) {
+    if (!mediaUrl) {
+      continue;
+    }
+
+    if (isVideo) {
+      contentParts.push({
+        type: "video_url",
+        video_url: {
+          url: mediaUrl,
+          ...(detail ? { detail } : {})
+        }
+      });
       continue;
     }
 
     contentParts.push({
       type: "image_url",
       image_url: {
-        url: imageUrl,
+        url: mediaUrl,
         ...(detail ? { detail } : {})
       }
     });
@@ -2926,32 +3312,60 @@ function collectVisionFocusHints(
   return hints;
 }
 
+function parseDataUrlParts(dataUrl: string) {
+  const commaIndex = dataUrl.indexOf(",");
+  if (commaIndex <= 5) {
+    return null;
+  }
+  const meta = dataUrl.slice(5, commaIndex);
+  const mimeTypeRaw = meta.split(";")[0]?.trim().toLowerCase() || "";
+  const mimeType = mimeTypeRaw || "application/octet-stream";
+  const base64 = dataUrl.slice(commaIndex + 1);
+  return {
+    mimeType,
+    base64
+  };
+}
+
 function buildVisionCaptionPrompt(params: {
   messages: LegacyChatMessage[];
-  imageIndex: number;
-  imageTotal: number;
-  imageMessageIndex: number;
-  imageDetail?: string;
+  mediaIndex: number;
+  mediaTotal: number;
+  mediaMessageIndex: number;
+  mediaKind: "image" | "video";
+  mediaDetail?: string;
 }) {
-  const hints = collectVisionFocusHints(params.messages, params.imageMessageIndex);
+  const hints = collectVisionFocusHints(params.messages, params.mediaMessageIndex);
   const mergedHintText = hints.join("；");
   const truncatedHintText =
     mergedHintText.length > 600 ? `${mergedHintText.slice(0, 600)}...` : mergedHintText;
-  const detailHint = params.imageDetail ? `图片 detail 参数：${params.imageDetail}` : "";
+  const mediaLabel = params.mediaKind === "video" ? "视频" : "图片";
+  const detailHint = params.mediaDetail ? `${mediaLabel} detail 参数：${params.mediaDetail}` : "";
   const userHintBlock = truncatedHintText
     ? `用户重点要求/标注（务必优先覆盖）：${truncatedHintText}`
     : "用户未提供明确重点标注，请你给出完整细致描述。";
 
+  const detailSectionTitle =
+    params.mediaKind === "video" ? "【时间线与关键帧】" : "【全图详细描述】";
+  const detailSectionBody =
+    params.mediaKind === "video"
+      ? "按时间顺序总结关键片段：主要场景、人物/物体变化、动作事件、字幕/旁白、镜头转场和显著异常。"
+      : "从整体到局部描述场景、主体、位置关系、动作状态、颜色、数量、布局、异常点。";
+  const ocrSectionBody =
+    params.mediaKind === "video"
+      ? "逐条转写可见文字（字幕/OCR/UI 文本）与关键时间点；看不清要注明“无法辨认”。"
+      : "逐条转写可见文字（OCR）、UI 文本、表格/图表关键数值；看不清要注明“无法辨认”。";
+
   return [
-    "你是图片理解与 OCR 助手。请严格使用中文纯文本回答。",
-    `当前处理第 ${params.imageIndex + 1}/${params.imageTotal} 张图片。`,
+    `你是${mediaLabel}理解与 OCR 助手。请严格使用中文纯文本回答。`,
+    `当前处理第 ${params.mediaIndex + 1}/${params.mediaTotal} 个${mediaLabel}。`,
     detailHint,
     userHintBlock,
     "",
     "请按以下固定结构输出（必须包含 4 段）：",
     "【重点需求与标注】优先总结用户要求、标注区域、需要重点解释的部分；若无写“未提供特定重点”。",
-    "【全图详细描述】从整体到局部描述场景、主体、位置关系、动作状态、颜色、数量、布局、异常点。",
-    "【文字与数据提取】逐条转写可见文字（OCR）、UI 文本、表格/图表关键数值；看不清要注明“无法辨认”。",
+    `${detailSectionTitle}${detailSectionBody}`,
+    `【文字与数据提取】${ocrSectionBody}`,
     "【补充与不确定性】说明遮挡、模糊、歧义、推断边界，不要编造图片中不存在的信息。",
     "",
     "要求：描述必须详细，不能只给一句摘要。"
@@ -2960,13 +3374,13 @@ function buildVisionCaptionPrompt(params: {
     .join("\n");
 }
 
-async function describeImagesWithVisionModel(
+async function describeMediaWithVisionModel(
   chatBody: LegacyChatRequest,
   key: ResolvedGatewayKey,
   traceContext?: Pick<UsageTraceContext, "route" | "requestWireApi" | "requestedModel" | "clientModel">
 ) {
-  const images = collectImageInputs(chatBody.messages ?? []);
-  if (!images.length || key.supportsVision) {
+  const mediaInputs = collectMediaInputs(chatBody.messages ?? []);
+  if (!mediaInputs.length || key.supportsVision) {
     return { ok: true as const, body: chatBody };
   }
 
@@ -3011,18 +3425,49 @@ async function describeImagesWithVisionModel(
   }
 
   const captions: string[] = [];
-  for (const image of images) {
+  for (const media of mediaInputs) {
     const captionPrompt = buildVisionCaptionPrompt({
       messages: chatBody.messages ?? [],
-      imageIndex: captions.length,
-      imageTotal: images.length,
-      imageMessageIndex: image.messageIndex,
-      imageDetail: image.detail
+      mediaIndex: captions.length,
+      mediaTotal: mediaInputs.length,
+      mediaMessageIndex: media.messageIndex,
+      mediaKind: media.kind,
+      mediaDetail: media.detail
     });
-    const imageSnapshot = await persistAiCallImage(image.imageUrl);
+    const mediaSnapshot = await persistAiCallImage(media.mediaUrl);
+    const dataUrlParts = media.mediaUrl.startsWith("data:")
+      ? parseDataUrlParts(media.mediaUrl)
+      : null;
+    const normalizedVisionProvider = visionRuntimeKey.provider.trim().toLowerCase();
+    const useDoubaoVideoCompat =
+      media.kind === "video" &&
+      visionRuntimeKey.upstreamWireApi === "anthropic_messages" &&
+      normalizedVisionProvider === "doubao";
+
+    if (media.kind === "video" && visionRuntimeKey.upstreamWireApi === "anthropic_messages" && !useDoubaoVideoCompat) {
+      return {
+        ok: false as const,
+        status: 400,
+        body: {
+          error:
+            "Video fallback is not supported on anthropic_messages wire API. Configure a vision fallback channel using chat_completions or responses.",
+          debug: {
+            provider: visionRuntimeKey.provider,
+            upstreamWireApi: visionRuntimeKey.upstreamWireApi,
+            upstreamBaseUrl: visionRuntimeKey.upstreamBaseUrl,
+            sourceVisionChannelId: key.visionChannelId ?? null,
+            resolvedVisionModel: visionModelForCaption
+          }
+        }
+      };
+    }
+
+    const captionTransportWireApi = useDoubaoVideoCompat
+      ? "chat_completions"
+      : visionRuntimeKey.upstreamWireApi;
 
     const captionResp =
-      visionRuntimeKey.upstreamWireApi === "responses"
+      captionTransportWireApi === "responses"
         ? await callResponsesApi(
             {
               model: visionModelForCaption,
@@ -3034,11 +3479,17 @@ async function describeImagesWithVisionModel(
                       type: "input_text",
                       text: captionPrompt
                     },
-                    {
-                      type: "input_image",
-                      image_url: image.imageUrl,
-                      detail: image.detail
-                    }
+                    media.kind === "video"
+                      ? {
+                          type: "input_video",
+                          video_url: media.mediaUrl,
+                          ...(media.detail ? { detail: media.detail } : {})
+                        }
+                      : {
+                          type: "input_image",
+                          image_url: media.mediaUrl,
+                          detail: media.detail
+                        }
                   ]
                 }
               ],
@@ -3046,7 +3497,7 @@ async function describeImagesWithVisionModel(
             },
             visionRuntimeKey
           )
-        : visionRuntimeKey.upstreamWireApi === "anthropic_messages"
+        : captionTransportWireApi === "anthropic_messages"
           ? await callAnthropicMessagesApi(
               {
                 model: visionModelForCaption,
@@ -3058,22 +3509,39 @@ async function describeImagesWithVisionModel(
                         type: "text",
                         text: captionPrompt
                       },
-                      image.imageUrl.startsWith("data:")
-                        ? {
-                            type: "image",
-                            source: {
-                              type: "base64",
-                              media_type: image.imageUrl.slice(5, image.imageUrl.indexOf(';')),
-                              data: image.imageUrl.slice(image.imageUrl.indexOf(',') + 1)
+                      media.kind === "video"
+                        ? dataUrlParts
+                          ? {
+                              type: "video",
+                              source: {
+                                type: "base64",
+                                media_type: dataUrlParts.mimeType,
+                                data: dataUrlParts.base64
+                              }
                             }
-                          }
-                        : {
-                            type: "image",
-                            source: {
-                              type: "url",
-                              url: image.imageUrl
+                          : {
+                              type: "video",
+                              source: {
+                                type: "url",
+                                url: media.mediaUrl
+                              }
                             }
-                          }
+                        : dataUrlParts
+                          ? {
+                              type: "image",
+                              source: {
+                                type: "base64",
+                                media_type: dataUrlParts.mimeType,
+                                data: dataUrlParts.base64
+                              }
+                            }
+                          : {
+                              type: "image",
+                              source: {
+                                type: "url",
+                                url: media.mediaUrl
+                              }
+                            }
                     ]
                   }
                 ],
@@ -3092,46 +3560,56 @@ async function describeImagesWithVisionModel(
                         type: "text",
                         text: captionPrompt
                       },
-                      {
-                        type: "image_url",
-                        image_url: {
-                          url: image.imageUrl,
-                          detail: image.detail
-                        }
-                      }
+                      media.kind === "video"
+                        ? {
+                            type: "video_url",
+                            video_url: {
+                              url: media.mediaUrl,
+                              ...(media.detail ? { detail: media.detail } : {})
+                            }
+                          }
+                        : {
+                            type: "image_url",
+                            image_url: {
+                              url: media.mediaUrl,
+                              detail: media.detail
+                            }
+                          }
                     ]
                   }
                 ],
-                max_tokens: 1200
-              },
-              visionRuntimeKey
-            );
+              max_tokens: 1200
+            },
+            visionRuntimeKey
+          );
 
     if (!captionResp.ok) {
       return {
         ok: false as const,
         status: captionResp.status,
         body: {
-          error: "Vision fallback model failed while converting image to text.",
+          error: "Vision fallback model failed while converting media to text.",
           detail: captionResp.body,
           debug: {
             provider: visionRuntimeKey.provider,
             upstreamWireApi: visionRuntimeKey.upstreamWireApi,
+            transportWireApi: captionTransportWireApi,
             upstreamBaseUrl: visionRuntimeKey.upstreamBaseUrl,
             sourceVisionChannelId: key.visionChannelId ?? null,
-            resolvedVisionModel: visionModelForCaption
+            resolvedVisionModel: visionModelForCaption,
+            compatMode: useDoubaoVideoCompat ? "doubao_video_via_chat_completions" : null
           }
         }
       };
     }
 
     const caption =
-      visionRuntimeKey.upstreamWireApi === "responses"
+      captionTransportWireApi === "responses"
         ? extractResponseText(captionResp.body).trim()
-        : visionRuntimeKey.upstreamWireApi === "anthropic_messages"
+        : captionTransportWireApi === "anthropic_messages"
           ? extractAnthropicMessageText(captionResp.body).trim()
           : extractLegacyChatCompletionText(captionResp.body).trim();
-    const finalCaption = caption || "Image content provided.";
+    const finalCaption = caption || (media.kind === "video" ? "Video content provided." : "Image content provided.");
     captions.push(finalCaption);
     await appendAiCallLogEntry({
       id: crypto.randomUUID().slice(0, 12),
@@ -3139,16 +3617,16 @@ async function describeImagesWithVisionModel(
       keyName: key.name,
       route: traceContext?.route ?? "/vision-fallback",
       requestWireApi: traceContext?.requestWireApi ?? "responses",
-      upstreamWireApi: visionRuntimeKey.upstreamWireApi,
+      upstreamWireApi: captionTransportWireApi,
       requestedModel: traceContext?.requestedModel ?? key.defaultModel,
       clientModel: traceContext?.clientModel ?? traceContext?.requestedModel ?? key.defaultModel,
       upstreamModel: visionModelForCaption,
       callType: "vision_fallback",
       stream: false,
       systemPrompt: "",
-      userPrompt: clipLogText(`${captionPrompt}\n[image_input]`),
+      userPrompt: clipLogText(`${captionPrompt}\n[${media.kind}_input]`),
       assistantResponse: clipLogText(finalCaption),
-      images: [imageSnapshot],
+      images: [mediaSnapshot],
       createdAt: new Date().toISOString()
     });
   }
@@ -3157,7 +3635,7 @@ async function describeImagesWithVisionModel(
     ok: true as const,
     body: {
       ...chatBody,
-      messages: replaceImagesWithCaptions(chatBody.messages ?? [], captions)
+      messages: replaceMediaWithCaptions(chatBody.messages ?? [], captions)
     }
   };
 }
@@ -3173,7 +3651,7 @@ async function rewriteResponsesBodyForVisionFallback(
 
   const mapped = mapResponsesRequestToLegacyChat(body, key.defaultModel);
   const legacyMessages = normalizeLegacyMessages(mapped.messages as LegacyChatRequest["messages"]);
-  const rewritten = await describeImagesWithVisionModel(
+  const rewritten = await describeMediaWithVisionModel(
     {
       messages: legacyMessages
     },
@@ -3215,15 +3693,25 @@ export async function handleLegacyChatCompletions(
   req: Request,
   route = "/v1/chat/completions"
 ) {
-  const body = (await req.json().catch(() => ({}))) as Parameters<typeof mapLegacyChatToResponses>[0];
-  const promptSnapshot = extractPromptSnapshotFromLegacyMessages(
-    normalizeLegacyMessages(body.messages as LegacyChatRequest["messages"])
-  );
+  const rawBody = (await req.json().catch(() => ({}))) as Parameters<typeof mapLegacyChatToResponses>[0];
 
-  const resolved = await resolveGatewayKey(req.headers.get("authorization"));
+  const resolved = await resolveGatewayKey(
+    req.headers.get("authorization"),
+    req.headers.get("x-api-key")
+  );
   if (!resolved.ok) {
     return NextResponse.json(resolved.body, { status: resolved.status });
   }
+
+  const rewrittenForFileIds = await rewriteLegacyChatBodyFileIds(rawBody, resolved.key.id);
+  if (!rewrittenForFileIds.ok) {
+    return NextResponse.json(rewrittenForFileIds.body, { status: rewrittenForFileIds.status });
+  }
+
+  const body = rewrittenForFileIds.body;
+  const promptSnapshot = extractPromptSnapshotFromLegacyMessages(
+    normalizeLegacyMessages(body.messages as LegacyChatRequest["messages"])
+  );
 
   const requestedModel = pickRequestedModel(body.model, resolved.key);
   const mappedRequestedModel = mapRequestedModelForKey(requestedModel, resolved.key);
@@ -3240,7 +3728,7 @@ export async function handleLegacyChatCompletions(
   };
   const runtimeKey = modelResolved.runtimeKey;
 
-  const rewritten = await describeImagesWithVisionModel(body, runtimeKey, {
+  const rewritten = await describeMediaWithVisionModel(body, runtimeKey, {
     route,
     requestWireApi: "chat_completions",
     requestedModel,
@@ -3470,7 +3958,7 @@ export async function handleAnthropicMessages(
   };
   const runtimeKey = modelResolved.runtimeKey;
 
-  const rewritten = await describeImagesWithVisionModel(legacyBody, runtimeKey, {
+  const rewritten = await describeMediaWithVisionModel(legacyBody, runtimeKey, {
     route,
     requestWireApi: "anthropic_messages",
     requestedModel,
@@ -3695,7 +4183,10 @@ export async function handleLegacyCompletions(
   const body = (await req.json().catch(() => ({}))) as Parameters<typeof mapLegacyCompletionToResponses>[0];
   const promptSnapshot = extractPromptSnapshotFromLegacyCompletionBody(body);
 
-  const resolved = await resolveGatewayKey(req.headers.get("authorization"));
+  const resolved = await resolveGatewayKey(
+    req.headers.get("authorization"),
+    req.headers.get("x-api-key")
+  );
   if (!resolved.ok) {
     return NextResponse.json(resolved.body, { status: resolved.status });
   }
@@ -3898,13 +4389,23 @@ export async function handleLegacyCompletions(
 }
 
 export async function handleResponses(req: Request, route = "/v1/responses") {
-  const body = (await req.json().catch(() => ({}))) as ResponsesRequest;
-  const promptSnapshot = extractPromptSnapshotFromResponsesBody(body);
+  const rawBody = (await req.json().catch(() => ({}))) as ResponsesRequest;
 
-  const resolved = await resolveGatewayKey(req.headers.get("authorization"));
+  const resolved = await resolveGatewayKey(
+    req.headers.get("authorization"),
+    req.headers.get("x-api-key")
+  );
   if (!resolved.ok) {
     return NextResponse.json(resolved.body, { status: resolved.status });
   }
+
+  const rewrittenForFileIds = await rewriteResponsesBodyFileIds(rawBody, resolved.key.id);
+  if (!rewrittenForFileIds.ok) {
+    return NextResponse.json(rewrittenForFileIds.body, { status: rewrittenForFileIds.status });
+  }
+
+  const body = rewrittenForFileIds.body;
+  const promptSnapshot = extractPromptSnapshotFromResponsesBody(body);
 
   const requestedModel = pickRequestedModel(body.model, resolved.key);
   const mappedRequestedModel = mapRequestedModelForKey(requestedModel, resolved.key);
@@ -3963,7 +4464,7 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
       const previousMessages = readResponseContext(responseContextScope, body.previous_response_id);
       const incomingMessages = normalizeLegacyMessages(mapped.messages as LegacyChatRequest["messages"]);
       const mergedMessages = mergeContinuationMessages(previousMessages, incomingMessages);
-      const rewritten = await describeImagesWithVisionModel(
+      const rewritten = await describeMediaWithVisionModel(
         {
           messages: mergedMessages
         },
@@ -4021,7 +4522,7 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
     const previousMessages = readResponseContext(responseContextScope, body.previous_response_id);
     const incomingMessages = normalizeLegacyMessages(mapped.messages as LegacyChatRequest["messages"]);
     const mergedMessages = mergeContinuationMessages(previousMessages, incomingMessages);
-    const rewritten = await describeImagesWithVisionModel(
+    const rewritten = await describeMediaWithVisionModel(
       {
         messages: mergedMessages
       },
@@ -4118,7 +4619,7 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
     const previousMessages = readResponseContext(responseContextScope, body.previous_response_id);
     const incomingMessages = normalizeLegacyMessages(mapped.messages as LegacyChatRequest["messages"]);
     const mergedMessages = mergeContinuationMessages(previousMessages, incomingMessages);
-    const rewritten = await describeImagesWithVisionModel(
+    const rewritten = await describeMediaWithVisionModel(
       {
         messages: mergedMessages
       },
@@ -4173,7 +4674,7 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
   const previousMessages = readResponseContext(responseContextScope, body.previous_response_id);
   const incomingMessages = normalizeLegacyMessages(mapped.messages as LegacyChatRequest["messages"]);
   const mergedMessages = mergeContinuationMessages(previousMessages, incomingMessages);
-  const rewritten = await describeImagesWithVisionModel(
+  const rewritten = await describeMediaWithVisionModel(
     {
       messages: mergedMessages
     },

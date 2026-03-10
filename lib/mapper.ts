@@ -77,11 +77,21 @@ export type ResponsesRequest = {
 };
 
 type LegacyImagePart = {
-  type: "image_url";
+  type: "image_url" | "input_image";
   image_url?: {
     url?: string;
     detail?: string;
   } | string;
+  detail?: string;
+};
+
+type LegacyVideoPart = {
+  type: "video_url" | "input_video";
+  video_url?: {
+    url?: string;
+    detail?: string;
+  } | string;
+  url?: string;
   detail?: string;
 };
 
@@ -93,6 +103,11 @@ type ResponsesInputContent =
   | {
       type: "input_image";
       image_url: string;
+      detail?: string;
+    }
+  | {
+      type: "input_video";
+      video_url: string;
       detail?: string;
     };
 
@@ -108,6 +123,7 @@ type LegacyChatCompletionMessage = {
     | Array<
         | { type: "text"; text: string }
         | { type: "image_url"; image_url: { url: string; detail?: string } }
+        | { type: "video_url"; video_url: { url: string; detail?: string } }
       >;
   name?: string;
   tool_call_id?: string;
@@ -122,6 +138,11 @@ type ParsedPart =
   | {
       type: "image";
       imageUrl: string;
+      detail?: string;
+    }
+  | {
+      type: "video";
+      videoUrl: string;
       detail?: string;
     };
 
@@ -164,7 +185,7 @@ function parseLegacyContent(content: unknown): ParsedPart[] {
       continue;
     }
 
-    if (rawType === "image_url") {
+    if (rawType === "image_url" || rawType === "input_image") {
       const imagePart = item as LegacyImagePart;
       let imageUrl: string | undefined;
       let detail: string | undefined;
@@ -184,6 +205,36 @@ function parseLegacyContent(content: unknown): ParsedPart[] {
         parts.push({
           type: "image",
           imageUrl: imageUrl.trim(),
+          detail: typeof detail === "string" && detail.trim() ? detail.trim() : undefined
+        });
+      }
+      continue;
+    }
+
+    if (rawType === "video_url" || rawType === "input_video") {
+      const videoPart = item as LegacyVideoPart;
+      let videoUrl: string | undefined;
+      let detail: string | undefined;
+
+      if (typeof videoPart.video_url === "string") {
+        videoUrl = videoPart.video_url;
+      } else if (videoPart.video_url && typeof videoPart.video_url === "object") {
+        videoUrl = videoPart.video_url.url;
+        detail = videoPart.video_url.detail;
+      }
+
+      if (!videoUrl && typeof videoPart.url === "string") {
+        videoUrl = videoPart.url;
+      }
+
+      if (!detail && typeof videoPart.detail === "string") {
+        detail = videoPart.detail;
+      }
+
+      if (typeof videoUrl === "string" && videoUrl.trim()) {
+        parts.push({
+          type: "video",
+          videoUrl: videoUrl.trim(),
           detail: typeof detail === "string" && detail.trim() ? detail.trim() : undefined
         });
       }
@@ -226,11 +277,19 @@ function buildInputFromMessages(messages: LegacyChatMessage[], allowVisionInput:
       }
 
       if (allowVisionInput) {
-        mappedContent.push({
-          type: "input_image",
-          image_url: part.imageUrl,
-          detail: part.detail
-        });
+        if (part.type === "image") {
+          mappedContent.push({
+            type: "input_image",
+            image_url: part.imageUrl,
+            detail: part.detail
+          });
+        } else {
+          mappedContent.push({
+            type: "input_video",
+            video_url: part.videoUrl,
+            detail: part.detail
+          });
+        }
       }
     }
 
@@ -423,6 +482,7 @@ function normalizeResponsesInputToLegacyMessages(input: unknown): LegacyChatComp
     const legacyParts: Array<
       | { type: "text"; text: string }
       | { type: "image_url"; image_url: { url: string; detail?: string } }
+      | { type: "video_url"; video_url: { url: string; detail?: string } }
     > = [];
 
     for (const part of content) {
@@ -437,14 +497,52 @@ function normalizeResponsesInputToLegacyMessages(input: unknown): LegacyChatComp
         }
         continue;
       }
-      if (type === "input_image") {
-        const imageUrl = "image_url" in part ? (part as { image_url?: unknown }).image_url : undefined;
-        const detail = "detail" in part ? (part as { detail?: unknown }).detail : undefined;
-        if (typeof imageUrl === "string" && imageUrl.trim()) {
+      if (type === "input_image" || type === "image_url") {
+        const imageValue = "image_url" in part ? (part as { image_url?: unknown }).image_url : undefined;
+        const detailValue = "detail" in part ? (part as { detail?: unknown }).detail : undefined;
+        const imageUrl =
+          typeof imageValue === "string"
+            ? imageValue.trim()
+            : imageValue && typeof imageValue === "object" && typeof (imageValue as { url?: unknown }).url === "string"
+              ? (imageValue as { url: string }).url.trim()
+              : "";
+        const detail =
+          typeof detailValue === "string"
+            ? detailValue
+            : imageValue && typeof imageValue === "object" && typeof (imageValue as { detail?: unknown }).detail === "string"
+              ? ((imageValue as { detail: string }).detail)
+              : undefined;
+        if (imageUrl) {
           legacyParts.push({
             type: "image_url",
             image_url: {
-              url: imageUrl.trim(),
+              url: imageUrl,
+              detail: typeof detail === "string" ? detail : undefined
+            }
+          });
+        }
+        continue;
+      }
+      if (type === "input_video" || type === "video_url") {
+        const videoValue = "video_url" in part ? (part as { video_url?: unknown }).video_url : undefined;
+        const detailValue = "detail" in part ? (part as { detail?: unknown }).detail : undefined;
+        const videoUrl =
+          typeof videoValue === "string"
+            ? videoValue.trim()
+            : videoValue && typeof videoValue === "object" && typeof (videoValue as { url?: unknown }).url === "string"
+              ? (videoValue as { url: string }).url.trim()
+              : "";
+        const detail =
+          typeof detailValue === "string"
+            ? detailValue
+            : videoValue && typeof videoValue === "object" && typeof (videoValue as { detail?: unknown }).detail === "string"
+              ? ((videoValue as { detail: string }).detail)
+              : undefined;
+        if (videoUrl) {
+          legacyParts.push({
+            type: "video_url",
+            video_url: {
+              url: videoUrl,
               detail: typeof detail === "string" ? detail : undefined
             }
           });
@@ -631,27 +729,47 @@ export function extractResponseText(responseJson: unknown): string {
   return getResponseText(responseJson);
 }
 
-export function collectImageInputs(messages: LegacyChatMessage[]) {
-  const images: Array<{ messageIndex: number; imageIndexInMessage: number; imageUrl: string; detail?: string }> = [];
+export type LegacyMediaInput = {
+  kind: "image" | "video";
+  messageIndex: number;
+  mediaIndexInMessage: number;
+  mediaUrl: string;
+  detail?: string;
+};
+
+export function collectMediaInputs(messages: LegacyChatMessage[]) {
+  const mediaInputs: LegacyMediaInput[] = [];
   messages.forEach((message, messageIndex) => {
     const parts = parseLegacyContent(message.content);
-    let imageIndexInMessage = 0;
+    let mediaIndexInMessage = 0;
     for (const part of parts) {
       if (part.type === "image") {
-        images.push({
+        mediaInputs.push({
+          kind: "image",
           messageIndex,
-          imageIndexInMessage,
-          imageUrl: part.imageUrl,
+          mediaIndexInMessage,
+          mediaUrl: part.imageUrl,
           detail: part.detail
         });
-        imageIndexInMessage += 1;
+        mediaIndexInMessage += 1;
+        continue;
+      }
+      if (part.type === "video") {
+        mediaInputs.push({
+          kind: "video",
+          messageIndex,
+          mediaIndexInMessage,
+          mediaUrl: part.videoUrl,
+          detail: part.detail
+        });
+        mediaIndexInMessage += 1;
       }
     }
   });
-  return images;
+  return mediaInputs;
 }
 
-export function replaceImagesWithCaptions(
+export function replaceMediaWithCaptions(
   messages: LegacyChatMessage[],
   captions: string[]
 ): LegacyChatMessage[] {
@@ -669,9 +787,15 @@ export function replaceImagesWithCaptions(
         continue;
       }
 
-      const caption = captions[captionCursor] ?? "Image provided.";
+      const caption =
+        captions[captionCursor] ??
+        (part.type === "video" ? "Video content provided." : "Image content provided.");
       captionCursor += 1;
-      textBlocks.push(`[Image description] ${caption}`);
+      textBlocks.push(
+        part.type === "video"
+          ? `[Video description] ${caption}`
+          : `[Image description] ${caption}`
+      );
     }
 
     return {
