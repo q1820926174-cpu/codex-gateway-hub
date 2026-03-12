@@ -25,6 +25,7 @@ const upstreamModelSchema = z
     name: z.string().min(1).max(80),
     aliasModel: z.string().min(1).max(256).nullable().optional(),
     model: z.string().min(1).max(256),
+    contextWindow: z.number().int().min(256).max(20_000_000).nullable().optional(),
     upstreamWireApi: z.enum(UPSTREAM_WIRE_APIS).default("responses"),
     supportsVision: z.boolean().default(true),
     visionChannelId: z.number().int().positive().nullable().optional(),
@@ -55,6 +56,7 @@ export type UpstreamModelConfig = {
   name: string;
   aliasModel: string | null;
   model: string;
+  contextWindow: number | null;
   upstreamWireApi: UpstreamWireApi;
   supportsVision: boolean;
   visionChannelId: number | null;
@@ -122,6 +124,7 @@ function fallbackModel(fallback: UpstreamModelFallback): UpstreamModelConfig {
     name: "默认模型",
     aliasModel: null,
     model: fallback.model.trim(),
+    contextWindow: null,
     upstreamWireApi: fallback.upstreamWireApi,
     supportsVision: useSupportsVision,
     visionChannelId: null,
@@ -146,6 +149,7 @@ export function normalizeUpstreamModels(
       name: item.name.trim(),
       aliasModel: item.aliasModel?.trim() || null,
       model: item.model.trim(),
+      contextWindow: typeof item.contextWindow === "number" ? item.contextWindow : null,
       upstreamWireApi: item.upstreamWireApi,
       supportsVision: item.supportsVision,
       visionChannelId: item.visionChannelId ?? null,
@@ -200,6 +204,7 @@ export function ensureModelExistsInPool(
       name: targetModel,
       aliasModel: null,
       model: targetModel,
+      contextWindow: null,
       upstreamWireApi: fallback.upstreamWireApi,
       supportsVision: useSupportsVision,
       visionChannelId: null,

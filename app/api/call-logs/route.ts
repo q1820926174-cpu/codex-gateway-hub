@@ -35,6 +35,16 @@ function resolveCallType(value: string | null): AiCallType | null {
   return null;
 }
 
+function resolveBoolean(value: string | null) {
+  if (value === "true" || value === "1") {
+    return true;
+  }
+  if (value === "false" || value === "0") {
+    return false;
+  }
+  return null;
+}
+
 export async function GET(req: Request) {
   const authError = requireConsoleApiAuth(req);
   if (authError) {
@@ -45,16 +55,35 @@ export async function GET(req: Request) {
   const limit = resolveLimit(url.searchParams.get("limit"));
   const keyId = resolveKeyId(url.searchParams.get("keyId"));
   const model = url.searchParams.get("model")?.trim() || null;
+  const requestedModel = url.searchParams.get("requestedModel")?.trim() || null;
+  const clientModel = url.searchParams.get("clientModel")?.trim() || null;
+  const route = url.searchParams.get("route")?.trim() || null;
+  const requestWireApi = url.searchParams.get("requestWireApi")?.trim() || null;
+  const upstreamWireApi = url.searchParams.get("upstreamWireApi")?.trim() || null;
+  const stream = resolveBoolean(url.searchParams.get("stream"));
+  const keyword = url.searchParams.get("keyword")?.trim() || null;
+  const from = url.searchParams.get("from")?.trim() || null;
+  const to = url.searchParams.get("to")?.trim() || null;
   const callType = resolveCallType(url.searchParams.get("callType"));
-  const { items, models, stats } = await readAiCallLogEntries({
+  const { items, models, filterOptions, stats } = await readAiCallLogEntries({
     limit,
     keyId,
     model,
+    requestedModel,
+    clientModel,
+    route,
+    requestWireApi,
+    upstreamWireApi,
+    stream,
+    keyword,
+    from,
+    to,
     callType
   });
   return NextResponse.json({
     items,
     models,
+    filterOptions,
     stats
   });
 }

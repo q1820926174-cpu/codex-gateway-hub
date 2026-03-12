@@ -35,6 +35,15 @@ type ReadAiCallLogQuery = {
   limit: number;
   keyId?: number | null;
   model?: string | null;
+  requestedModel?: string | null;
+  clientModel?: string | null;
+  route?: string | null;
+  requestWireApi?: string | null;
+  upstreamWireApi?: string | null;
+  stream?: boolean | null;
+  keyword?: string | null;
+  from?: string | null;
+  to?: string | null;
   callType?: AiCallType | null;
 };
 
@@ -44,6 +53,24 @@ type ReadAiCallLogStats = {
   visionFallback: number;
   visionByModel: Array<{ model: string; count: number }>;
   visionByKey: Array<{ keyId: number; keyName: string; count: number }>;
+};
+
+type ReadAiCallLogFilterOptions = {
+  upstreamModels: string[];
+  requestedModels: string[];
+  clientModels: string[];
+  routes: string[];
+  requestWireApis: string[];
+  upstreamWireApis: string[];
+};
+
+const EMPTY_FILTER_OPTIONS: ReadAiCallLogFilterOptions = {
+  upstreamModels: [],
+  requestedModels: [],
+  clientModels: [],
+  routes: [],
+  requestWireApis: [],
+  upstreamWireApis: []
 };
 
 function resolveLogFilePath() {
@@ -97,6 +124,19 @@ function normalizeCallType(value: unknown): AiCallType {
   return value === "vision_fallback" ? "vision_fallback" : "main";
 }
 
+function parseTimestampFilter(value: string | null | undefined) {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const normalized = trimmed.includes("T") ? trimmed : trimmed.replace(" ", "T");
+  const parsed = Date.parse(normalized);
+  if (Number.isFinite(parsed)) {
+    return parsed;
+  }
+  return null;
+}
+
 export async function appendAiCallLogEntry(entry: AiCallLogEntry) {
   try {
     await enqueueAppend(async () => {
@@ -119,6 +159,7 @@ export async function readAiCallLogEntries(query: ReadAiCallLogQuery) {
       return {
         items: [],
         models: [],
+        filterOptions: EMPTY_FILTER_OPTIONS,
         stats: {
           matched: 0,
           main: 0,
@@ -132,8 +173,22 @@ export async function readAiCallLogEntries(query: ReadAiCallLogQuery) {
     const lines = raw.split("\n").filter(Boolean);
     const items: AiCallLogEntry[] = [];
     const modelSet = new Set<string>();
+    const requestedModelSet = new Set<string>();
+    const clientModelSet = new Set<string>();
+    const routeSet = new Set<string>();
+    const requestWireApiSet = new Set<string>();
+    const upstreamWireApiSet = new Set<string>();
     const keyId = query.keyId && query.keyId > 0 ? query.keyId : null;
     const modelFilter = trimForFilter(query.model);
+    const requestedModelFilter = trimForFilter(query.requestedModel);
+    const clientModelFilter = trimForFilter(query.clientModel);
+    const routeFilter = trimForFilter(query.route);
+    const requestWireApiFilter = trimForFilter(query.requestWireApi);
+    const upstreamWireApiFilter = trimForFilter(query.upstreamWireApi);
+    const keywordFilter = trimForFilter(query.keyword);
+    const streamFilter = typeof query.stream === "boolean" ? query.stream : null;
+    const fromTs = parseTimestampFilter(query.from);
+    const toTs = parseTimestampFilter(query.to);
     const callTypeFilter = query.callType ?? null;
     const visionByModelCount = new Map<string, number>();
     const visionByKeyCount = new Map<string, { keyId: number; keyName: string; count: number }>();
@@ -157,11 +212,78 @@ export async function readAiCallLogEntries(query: ReadAiCallLogQuery) {
       if (parsed.upstreamModel?.trim()) {
         modelSet.add(parsed.upstreamModel.trim());
       }
+      if (parsed.requestedModel?.trim()) {
+        requestedModelSet.add(parsed.requestedModel.trim());
+      }
+      if (parsed.clientModel?.trim()) {
+        clientModelSet.add(parsed.clientModel.trim());
+      }
+      if (parsed.route?.trim()) {
+        routeSet.add(parsed.route.trim());
+      }
+      if (parsed.requestWireApi?.trim()) {
+        requestWireApiSet.add(parsed.requestWireApi.trim());
+      }
+      if (parsed.upstreamWireApi?.trim()) {
+        upstreamWireApiSet.add(parsed.upstreamWireApi.trim());
+      }
+
       if (keyId !== null && parsed.keyId !== keyId) {
         continue;
       }
       if (modelFilter && trimForFilter(parsed.upstreamModel) !== modelFilter) {
         continue;
+      }
+      if (requestedModelFilter && trimForFilter(parsed.requestedModel) !== requestedModelFilter) {
+        continue;
+      }
+      if (clientModelFilter && trimForFilter(parsed.clientModel) !== clientModelFilter) {
+        continue;
+      }
+      if (routeFilter && trimForFilter(parsed.route) !== routeFilter) {
+        continue;
+      }
+      if (requestWireApiFilter && trimForFilter(parsed.requestWireApi) !== requestWireApiFilter) {
+        continue;
+      }
+      if (upstreamWireApiFilter && trimForFilter(parsed.upstreamWireApi) !== upstreamWireApiFilter) {
+        continue;
+      }
+      if (streamFilter !== null && parsed.stream !== streamFilter) {
+        continue;
+      }
+      if (fromTs !== null || toTs !== null) {
+        const createdTs = parseTimestampFilter(parsed.createdAt);
+        if (createdTs === null) {
+          continue;
+        }
+        if (fromTs !== null && createdTs < fromTs) {
+          continue;
+        }
+        if (toTs !== null && createdTs > toTs) {
+          continue;
+        }
+      }
+      if (keywordFilter) {
+        const haystack = [
+          parsed.id,
+          parsed.keyName,
+          parsed.route,
+          parsed.requestWireApi,
+          parsed.upstreamWireApi,
+          parsed.requestedModel,
+          parsed.clientModel,
+          parsed.upstreamModel,
+          parsed.systemPrompt,
+          parsed.userPrompt,
+          parsed.assistantResponse
+        ]
+          .filter(Boolean)
+          .join("\n")
+          .toLowerCase();
+        if (!haystack.includes(keywordFilter)) {
+          continue;
+        }
       }
       if (callTypeFilter && parsed.callType !== callTypeFilter) {
         continue;
@@ -201,6 +323,14 @@ export async function readAiCallLogEntries(query: ReadAiCallLogQuery) {
     return {
       items,
       models: Array.from(modelSet).sort((a, b) => a.localeCompare(b)),
+      filterOptions: {
+        upstreamModels: Array.from(modelSet).sort((a, b) => a.localeCompare(b)),
+        requestedModels: Array.from(requestedModelSet).sort((a, b) => a.localeCompare(b)),
+        clientModels: Array.from(clientModelSet).sort((a, b) => a.localeCompare(b)),
+        routes: Array.from(routeSet).sort((a, b) => a.localeCompare(b)),
+        requestWireApis: Array.from(requestWireApiSet).sort((a, b) => a.localeCompare(b)),
+        upstreamWireApis: Array.from(upstreamWireApiSet).sort((a, b) => a.localeCompare(b))
+      } satisfies ReadAiCallLogFilterOptions,
       stats: {
         matched,
         main,
@@ -213,6 +343,7 @@ export async function readAiCallLogEntries(query: ReadAiCallLogQuery) {
     return {
       items: [],
       models: [],
+      filterOptions: EMPTY_FILTER_OPTIONS,
       stats: {
         matched: 0,
         main: 0,

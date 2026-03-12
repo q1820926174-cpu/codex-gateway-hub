@@ -742,14 +742,40 @@ body {
   margin-bottom: 10px;
 }
 
+.tc-log-toolbar-detail {
+  border: 1px dashed #dbe4f2;
+  border-radius: 10px;
+  background: #f8fafc;
+  padding: 10px;
+  margin-bottom: 12px;
+}
+
 .tc-log-toolbar-group {
   display: flex;
   align-items: flex-end;
   gap: 8px;
 }
 
+.tc-log-range-buttons {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.tc-log-field-wide {
+  flex: 1 1 280px;
+  min-width: 220px;
+}
+
+.tc-log-field-wide .tc-field {
+  width: 100%;
+}
+
 .tc-log-toolbar-actions {
   margin-left: auto;
+  display: flex;
+  gap: 8px;
 }
 
 .tc-log-toolbar .tc-switchline,

@@ -82,6 +82,11 @@ const NUMBER_FORMATTER = new Intl.NumberFormat("zh-CN");
 const OPENAI_GREEN = "#10a37f";
 const OPENAI_SLATE = "#334155";
 const OPENAI_SOFT = "#94a3b8";
+const AI_CALL_RANGE_OPTIONS = [
+  { label: "15m", minutes: 15 },
+  { label: "1h", minutes: 60 },
+  { label: "24h", minutes: 1440 }
+] as const;
 const USAGE_RANGE_OPTIONS = [
   { label: "1h", minutes: 60 },
   { label: "24h", minutes: 1440 },
@@ -110,6 +115,14 @@ const EMPTY_AI_CALL_STATS: AiCallLogStats = {
   visionFallback: 0,
   visionByModel: [],
   visionByKey: []
+};
+const EMPTY_AI_CALL_FILTER_OPTIONS: AiCallLogFilterOptions = {
+  upstreamModels: [],
+  requestedModels: [],
+  clientModels: [],
+  routes: [],
+  requestWireApis: [],
+  upstreamWireApis: []
 };
 
 const LOCALE_OPTIONS: Array<{ label: string; value: LocaleCode }> = [
@@ -230,6 +243,7 @@ type UpstreamModelConfig = {
   name: string;
   aliasModel: string | null;
   model: string;
+  contextWindow: number | null;
   upstreamWireApi: UpstreamWireApi;
   supportsVision: boolean;
   visionChannelId: number | null;
@@ -348,6 +362,15 @@ type AiCallLogStats = {
   visionByKey: Array<{ keyId: number; keyName: string; count: number }>;
 };
 
+type AiCallLogFilterOptions = {
+  upstreamModels: string[];
+  requestedModels: string[];
+  clientModels: string[];
+  routes: string[];
+  requestWireApis: string[];
+  upstreamWireApis: string[];
+};
+
 type UsageSummaryRow = {
   keyId: number;
   keyName: string;
@@ -416,6 +439,7 @@ type CodingPreset = {
   provider: ProviderName;
   upstreamBaseUrl: string;
   defaultModel: string;
+  contextWindow: number | null;
   upstreamWireApi: UpstreamWireApi;
   supportsVision: boolean;
   visionModel: string | null;
@@ -428,6 +452,7 @@ const CODING_PRESETS: CodingPreset[] = [
     provider: "glm",
     upstreamBaseUrl: "https://open.bigmodel.cn/api/coding/paas/v4",
     defaultModel: "glm-5",
+    contextWindow: 128000,
     upstreamWireApi: "chat_completions",
     supportsVision: true,
     visionModel: null
@@ -438,6 +463,7 @@ const CODING_PRESETS: CodingPreset[] = [
     provider: "doubao",
     upstreamBaseUrl: "https://ark.cn-beijing.volces.com/api/coding/v3",
     defaultModel: "doubao-seed-2.0-code",
+    contextWindow: 128000,
     upstreamWireApi: "chat_completions",
     supportsVision: true,
     visionModel: null
@@ -476,6 +502,7 @@ function createUpstreamModelDraft(
     name: overrides.name ?? "默认模型",
     aliasModel: overrides.aliasModel ?? null,
     model: overrides.model ?? "gpt-4.1-mini",
+    contextWindow: typeof overrides.contextWindow === "number" ? overrides.contextWindow : null,
     upstreamWireApi: overrides.upstreamWireApi ?? "responses",
     supportsVision: overrides.supportsVision ?? true,
     visionChannelId: overrides.visionChannelId ?? null,
@@ -567,12 +594,14 @@ function toChannelForm(channel: UpstreamChannel): ChannelFormState {
         ? channel.upstreamModels.map((item) => ({
             ...item,
             aliasModel: item.aliasModel ?? null,
+            contextWindow: typeof item.contextWindow === "number" ? item.contextWindow : null,
             visionChannelId: item.visionChannelId ?? null
           }))
         : [
             createUpstreamModelDraft({
               aliasModel: null,
               model: channel.defaultModel,
+              contextWindow: null,
               upstreamWireApi: channel.upstreamWireApi,
               supportsVision: channel.supportsVision,
               visionChannelId: null,
@@ -652,6 +681,138 @@ function normalizeSelectValue(value: unknown): string {
   return String(value ?? "");
 }
 
+function normalizeStringArray(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => String(item ?? "").trim())
+    .filter(Boolean);
+}
+
+function normalizeAiCallFilterOptions(value: unknown): AiCallLogFilterOptions {
+  if (!value || typeof value !== "object") {
+    return EMPTY_AI_CALL_FILTER_OPTIONS;
+  }
+  const source = value as Partial<AiCallLogFilterOptions>;
+  return {
+    upstreamModels: normalizeStringArray(source.upstreamModels),
+    requestedModels: normalizeStringArray(source.requestedModels),
+    clientModels: normalizeStringArray(source.clientModels),
+    routes: normalizeStringArray(source.routes),
+    requestWireApis: normalizeStringArray(source.requestWireApis),
+    upstreamWireApis: normalizeStringArray(source.upstreamWireApis)
+  };
+}
+
+function formatDateTimeInput(value: Date) {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const day = String(value.getDate()).padStart(2, "0");
+  const hour = String(value.getHours()).padStart(2, "0");
+  const minute = String(value.getMinutes()).padStart(2, "0");
+  const second = String(value.getSeconds()).padStart(2, "0");
+  return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
+}
+
+function buildRecentDateRange(minutes: number): [string, string] {
+  const end = new Date();
+  const start = new Date(end.getTime() - Math.max(1, minutes) * 60_000);
+  return [formatDateTimeInput(start), formatDateTimeInput(end)];
+}
+
+function resolveThinkingTokens(contextWindow: number | null) {
+  if (!contextWindow || !Number.isFinite(contextWindow) || contextWindow <= 0) {
+    return 8192;
+  }
+  return Math.max(2048, Math.min(8192, Math.floor(contextWindow * 0.1)));
+}
+
+function resolveCodexTokenBudgets(contextWindow: number | null) {
+  if (!contextWindow || !Number.isFinite(contextWindow) || contextWindow <= 0) {
+    return {
+      autoCompactTokenLimit: null
+    };
+  }
+
+  // Keep compaction slightly below full window to avoid hard context overflow.
+  const autoCompactTokenLimit = Math.max(4096, Math.floor(contextWindow * 0.85));
+
+  return {
+    autoCompactTokenLimit
+  };
+}
+
+function resolveClaudeMaxOutputTokens(contextWindow: number | null) {
+  if (!contextWindow || !Number.isFinite(contextWindow) || contextWindow <= 0) {
+    return 8192;
+  }
+  // Claude docs example: 1m window -> 32000 max output tokens.
+  return Math.max(4096, Math.min(32000, Math.floor(contextWindow * 0.032)));
+}
+
+function formatContextWindowSuffix(contextWindow: number) {
+  if (!Number.isFinite(contextWindow) || contextWindow <= 0) {
+    return "";
+  }
+  if (contextWindow % 1_000_000 === 0) {
+    return `${Math.floor(contextWindow / 1_000_000)}m`;
+  }
+  if (contextWindow % 1_000 === 0) {
+    return `${Math.floor(contextWindow / 1_000)}k`;
+  }
+  return String(Math.floor(contextWindow));
+}
+
+function formatClaudeModelWithContext(model: string, contextWindow: number | null) {
+  const normalizedModel = model.trim();
+  if (!normalizedModel || !contextWindow || !Number.isFinite(contextWindow) || contextWindow <= 0) {
+    return normalizedModel;
+  }
+  const suffix = formatContextWindowSuffix(contextWindow);
+  if (!suffix) {
+    return normalizedModel;
+  }
+  return `${normalizedModel}[${suffix}]`;
+}
+
+function inferContextWindowFromModel(model: string, provider: ProviderName) {
+  const normalized = model.trim().toLowerCase().replace(/\[[^\]]+\]$/, "");
+  if (!normalized) {
+    return null;
+  }
+
+  // GLM coding presets usually expose 128k context.
+  if (provider === "glm") {
+    if (
+      normalized === "glm-5" ||
+      normalized.startsWith("glm-5-") ||
+      normalized.startsWith("glm-4.5")
+    ) {
+      return 128000;
+    }
+  }
+
+  // Doubao coding presets commonly expose 128k context.
+  if (provider === "doubao") {
+    if (normalized.includes("doubao-seed") || normalized.includes("seed-2.0-code")) {
+      return 128000;
+    }
+  }
+
+  // Codex/GPT-5 family commonly uses large windows.
+  if (normalized.startsWith("gpt-5")) {
+    return 272000;
+  }
+
+  // Claude family default context is typically 200k.
+  if (normalized.startsWith("claude-")) {
+    return 200000;
+  }
+
+  return null;
+}
+
 function toBase64Utf8(input: string) {
   const bytes = new TextEncoder().encode(input);
   let binary = "";
@@ -720,9 +881,20 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   const [autoRefreshAiCallLogs, setAutoRefreshAiCallLogs] = useState(true);
   const [aiCallLogLimit, setAiCallLogLimit] = useState(100);
   const [aiCallKeyFilter, setAiCallKeyFilter] = useState<number | null>(null);
+  const [aiCallDateRange, setAiCallDateRange] = useState<string[]>([]);
+  const [aiCallKeywordFilter, setAiCallKeywordFilter] = useState("");
+  const [aiCallRouteFilter, setAiCallRouteFilter] = useState("");
+  const [aiCallRequestWireFilter, setAiCallRequestWireFilter] = useState("");
+  const [aiCallUpstreamWireFilter, setAiCallUpstreamWireFilter] = useState("");
   const [aiCallModelFilter, setAiCallModelFilter] = useState("");
+  const [aiCallRequestedModelFilter, setAiCallRequestedModelFilter] = useState("");
+  const [aiCallClientModelFilter, setAiCallClientModelFilter] = useState("");
+  const [aiCallStreamFilter, setAiCallStreamFilter] = useState<"" | "stream" | "non_stream">("");
   const [aiCallTypeFilter, setAiCallTypeFilter] = useState<"" | "main" | "vision_fallback">("");
   const [aiCallModelOptions, setAiCallModelOptions] = useState<string[]>([]);
+  const [aiCallFilterOptions, setAiCallFilterOptions] = useState<AiCallLogFilterOptions>(
+    EMPTY_AI_CALL_FILTER_OPTIONS
+  );
   const [aiCallStats, setAiCallStats] = useState<AiCallLogStats>(EMPTY_AI_CALL_STATS);
   const [previewImage, setPreviewImage] = useState<{ url: string; title: string } | null>(null);
   const [usageReport, setUsageReport] = useState<UsageReport | null>(null);
@@ -919,16 +1091,19 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     [keys, t]
   );
 
-  const aiCallModelSelectOptions = useMemo(
-    () => [
+  const aiCallModelSelectOptions = useMemo(() => {
+    const source =
+      aiCallFilterOptions.upstreamModels.length > 0
+        ? aiCallFilterOptions.upstreamModels
+        : aiCallModelOptions;
+    return [
       { label: t("全部模型", "All Models"), value: "__all__" },
-      ...aiCallModelOptions.map((model) => ({
+      ...source.map((model) => ({
         label: model,
         value: model
       }))
-    ],
-    [aiCallModelOptions, t]
-  );
+    ];
+  }, [aiCallFilterOptions.upstreamModels, aiCallModelOptions, t]);
 
   const aiCallTypeOptions = useMemo(
     () => [
@@ -939,12 +1114,79 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     [t]
   );
 
+  const aiCallRouteOptions = useMemo(
+    () => [
+      { label: t("全部路由", "All Routes"), value: "__all__" },
+      ...aiCallFilterOptions.routes.map((item) => ({
+        label: item,
+        value: item
+      }))
+    ],
+    [aiCallFilterOptions.routes, t]
+  );
+
+  const aiCallRequestWireOptions = useMemo(
+    () => [
+      { label: t("全部请求协议", "All Request APIs"), value: "__all__" },
+      ...aiCallFilterOptions.requestWireApis.map((item) => ({
+        label: item,
+        value: item
+      }))
+    ],
+    [aiCallFilterOptions.requestWireApis, t]
+  );
+
+  const aiCallUpstreamWireOptions = useMemo(
+    () => [
+      { label: t("全部上游协议", "All Upstream APIs"), value: "__all__" },
+      ...aiCallFilterOptions.upstreamWireApis.map((item) => ({
+        label: item,
+        value: item
+      }))
+    ],
+    [aiCallFilterOptions.upstreamWireApis, t]
+  );
+
+  const aiCallRequestedModelOptions = useMemo(
+    () => [
+      { label: t("全部请求模型", "All Requested Models"), value: "__all__" },
+      ...aiCallFilterOptions.requestedModels.map((item) => ({
+        label: item,
+        value: item
+      }))
+    ],
+    [aiCallFilterOptions.requestedModels, t]
+  );
+
+  const aiCallClientModelOptions = useMemo(
+    () => [
+      { label: t("全部客户端模型", "All Client Models"), value: "__all__" },
+      ...aiCallFilterOptions.clientModels.map((item) => ({
+        label: item,
+        value: item
+      }))
+    ],
+    [aiCallFilterOptions.clientModels, t]
+  );
+
+  const aiCallStreamOptions = useMemo(
+    () => [
+      { label: t("全部流式", "All Stream Modes"), value: "__all__" },
+      { label: t("仅 stream", "Stream Only"), value: "stream" },
+      { label: t("仅非 stream", "Non-stream Only"), value: "non_stream" }
+    ],
+    [t]
+  );
+
   const resolvedUsageBucketMinutes = useMemo(
     () => resolveUsageBucketMinutes(usageMinutes, usageBucketMode),
     [usageMinutes, usageBucketMode]
   );
 
   const usagePrimaryMetricMeta = useMemo(() => USAGE_METRIC_META[usageMetric], [usageMetric]);
+  const hasCustomAiCallDateRange = Boolean(
+    aiCallDateRange[0]?.trim() && aiCallDateRange[1]?.trim()
+  );
   const hasCustomUsageDateRange = Boolean(
     usageDateRange[0]?.trim() && usageDateRange[1]?.trim()
   );
@@ -1205,8 +1447,8 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     () =>
       channelForm.upstreamModels.map((item) => ({
         label: item.aliasModel
-          ? `${item.name} · ${item.aliasModel} -> ${item.model}`
-          : `${item.name} · ${item.model}`,
+          ? `${item.name} · ${item.aliasModel} -> ${item.model}${item.contextWindow ? ` · ctx=${formatNumber(item.contextWindow)}` : ""}`
+          : `${item.name} · ${item.model}${item.contextWindow ? ` · ctx=${formatNumber(item.contextWindow)}` : ""}`,
         value: item.model
       })),
     [channelForm.upstreamModels]
@@ -1220,8 +1462,8 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       .filter((item) => item.enabled)
       .map((item) => ({
         label: item.aliasModel
-          ? `${item.name} · ${item.aliasModel} -> ${item.model}`
-          : `${item.name} · ${item.model}`,
+          ? `${item.name} · ${item.aliasModel} -> ${item.model}${item.contextWindow ? ` · ctx=${formatNumber(item.contextWindow)}` : ""}`
+          : `${item.name} · ${item.model}${item.contextWindow ? ` · ctx=${formatNumber(item.contextWindow)}` : ""}`,
         value: item.model
       }));
   }, [selectedChannelForKey]);
@@ -1247,10 +1489,28 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       .filter((item) => item.enabled)
       .map((item) => ({
         label: item.aliasModel
-          ? `${item.name} · ${item.aliasModel} -> ${item.model}`
-          : `${item.name} · ${item.model}`,
+          ? `${item.name} · ${item.aliasModel} -> ${item.model}${item.contextWindow ? ` · ctx=${formatNumber(item.contextWindow)}` : ""}`
+          : `${item.name} · ${item.model}${item.contextWindow ? ` · ctx=${formatNumber(item.contextWindow)}` : ""}`,
         value: item.model
       }));
+  }
+
+  function applyAiCallQuickRange(minutes: number) {
+    setAiCallDateRange(buildRecentDateRange(minutes));
+  }
+
+  function resetAiCallFilters() {
+    setAiCallKeyFilter(null);
+    setAiCallDateRange([]);
+    setAiCallKeywordFilter("");
+    setAiCallRouteFilter("");
+    setAiCallRequestWireFilter("");
+    setAiCallUpstreamWireFilter("");
+    setAiCallModelFilter("");
+    setAiCallRequestedModelFilter("");
+    setAiCallClientModelFilter("");
+    setAiCallStreamFilter("");
+    setAiCallTypeFilter("");
   }
 
   useEffect(() => {
@@ -1299,7 +1559,16 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     autoRefreshAiCallLogs,
     aiCallLogLimit,
     aiCallKeyFilter,
+    aiCallDateRange[0],
+    aiCallDateRange[1],
+    aiCallKeywordFilter,
+    aiCallRouteFilter,
+    aiCallRequestWireFilter,
+    aiCallUpstreamWireFilter,
     aiCallModelFilter,
+    aiCallRequestedModelFilter,
+    aiCallClientModelFilter,
+    aiCallStreamFilter,
     aiCallTypeFilter
   ]);
 
@@ -1473,8 +1742,35 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       if (aiCallKeyFilter) {
         params.set("keyId", String(aiCallKeyFilter));
       }
+      if (aiCallDateRange[0]?.trim() && aiCallDateRange[1]?.trim()) {
+        params.set("from", aiCallDateRange[0].trim());
+        params.set("to", aiCallDateRange[1].trim());
+      }
+      if (aiCallKeywordFilter.trim()) {
+        params.set("keyword", aiCallKeywordFilter.trim());
+      }
+      if (aiCallRouteFilter.trim()) {
+        params.set("route", aiCallRouteFilter.trim());
+      }
+      if (aiCallRequestWireFilter.trim()) {
+        params.set("requestWireApi", aiCallRequestWireFilter.trim());
+      }
+      if (aiCallUpstreamWireFilter.trim()) {
+        params.set("upstreamWireApi", aiCallUpstreamWireFilter.trim());
+      }
       if (aiCallModelFilter.trim()) {
         params.set("model", aiCallModelFilter.trim());
+      }
+      if (aiCallRequestedModelFilter.trim()) {
+        params.set("requestedModel", aiCallRequestedModelFilter.trim());
+      }
+      if (aiCallClientModelFilter.trim()) {
+        params.set("clientModel", aiCallClientModelFilter.trim());
+      }
+      if (aiCallStreamFilter === "stream") {
+        params.set("stream", "true");
+      } else if (aiCallStreamFilter === "non_stream") {
+        params.set("stream", "false");
       }
       if (aiCallTypeFilter) {
         params.set("callType", aiCallTypeFilter);
@@ -1487,10 +1783,17 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       const body = (await response.json()) as {
         items?: AiCallLogEntry[];
         models?: string[];
+        filterOptions?: AiCallLogFilterOptions;
         stats?: AiCallLogStats;
       };
+      const normalizedFilterOptions = normalizeAiCallFilterOptions(body.filterOptions);
       setAiCallLogs(Array.isArray(body.items) ? body.items : []);
-      setAiCallModelOptions(Array.isArray(body.models) ? body.models : []);
+      setAiCallModelOptions(
+        Array.isArray(body.models)
+          ? body.models
+          : normalizedFilterOptions.upstreamModels
+      );
+      setAiCallFilterOptions(normalizedFilterOptions);
       setAiCallStats(body.stats ?? EMPTY_AI_CALL_STATS);
     } catch (err) {
       if (!silent) {
@@ -1513,6 +1816,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       }
       setAiCallLogs([]);
       setAiCallModelOptions([]);
+      setAiCallFilterOptions(EMPTY_AI_CALL_FILTER_OPTIONS);
       setAiCallStats(EMPTY_AI_CALL_STATS);
       notifySuccess("AI 调用日志已清空。");
     } catch (err) {
@@ -1641,6 +1945,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
           createUpstreamModelDraft({
             name: "主模型",
             model: preset.defaultModel,
+            contextWindow: preset.contextWindow,
             upstreamWireApi: preset.upstreamWireApi,
             supportsVision: preset.supportsVision,
             visionModel: preset.visionModel
@@ -1648,7 +1953,11 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
         ]
       })
     );
-    notifyInfo(`已应用：${preset.label}`);
+    notifyInfo(
+      preset.contextWindow
+        ? `已应用：${preset.label}（上下文 ${formatNumber(preset.contextWindow)}）`
+        : `已应用：${preset.label}`
+    );
   }
 
   function addUpstreamModel() {
@@ -1827,6 +2136,10 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
         name: item.name.trim(),
         aliasModel: item.aliasModel?.trim() || null,
         model: normalizeModelCode(channelForm.provider, item.model),
+        contextWindow:
+          typeof item.contextWindow === "number" && Number.isFinite(item.contextWindow)
+            ? Math.floor(item.contextWindow)
+            : null,
         visionChannelId: item.visionChannelId ?? null,
         visionModel: item.visionModel?.trim() || null
       }));
@@ -1839,6 +2152,9 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
         }
         if (!item.model) {
           throw new Error("模型 ID 不能为空。");
+        }
+        if (item.contextWindow !== null && (!Number.isInteger(item.contextWindow) || item.contextWindow < 256)) {
+          throw new Error(`模型「${item.name}」的上下文长度必须是 >= 256 的整数。`);
         }
         if (!item.supportsVision && !item.visionModel) {
           throw new Error(`模型「${item.name}」未开启视觉时必须设置视觉模型。`);
@@ -2066,6 +2382,15 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     const model =
       matchedProfile?.aliasModel?.trim() ||
       normalizeModelCode(modelProvider, matchedProfile?.model ?? preferredModel);
+    const manualContextWindow =
+      typeof matchedProfile?.contextWindow === "number" && Number.isFinite(matchedProfile.contextWindow)
+        ? matchedProfile.contextWindow
+        : null;
+    const contextWindow = manualContextWindow ?? inferContextWindowFromModel(model, modelProvider);
+    const maxThinkingTokens = resolveThinkingTokens(contextWindow);
+    const { autoCompactTokenLimit } = resolveCodexTokenBudgets(contextWindow);
+    const claudeMaxOutputTokens = resolveClaudeMaxOutputTokens(contextWindow);
+    const claudeModel = formatClaudeModelWithContext(model, contextWindow);
     const providerName = (keyForm.name || "gateway").trim() || "gateway";
 
     return {
@@ -2073,17 +2398,76 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       origin,
       endpoint,
       model,
+      claudeModel,
+      contextWindow,
+      maxThinkingTokens,
+      claudeMaxOutputTokens,
+      autoCompactTokenLimit,
       providerName
     };
   }
 
   function buildCcSwitchCodexDeepLink() {
-    const { localKey, origin, endpoint, model, providerName } = resolveCcSwitchProviderContext();
-    const providerKey = sanitizeTomlKey(providerName);
+    const {
+      localKey,
+      origin,
+      endpoint,
+      model,
+      providerName,
+      contextWindow,
+      autoCompactTokenLimit
+    } = resolveCcSwitchProviderContext();
+    const codexConfigToml = buildCcSwitchCodexConfigToml();
 
-    const codexConfigToml = [
+    const inlineConfig = buildCcSwitchCodexInlineConfig();
+    const params = new URLSearchParams({
+      resource: "provider",
+      app: "codex",
+      name: `${providerName} (Gateway)`,
+      homepage: origin,
+      endpoint,
+      apiKey: localKey,
+      model,
+      notes: contextWindow
+        ? `Imported from Codex Gateway Hub · context_window=${contextWindow} · compact_limit=${autoCompactTokenLimit ?? "-"}`
+        : "Imported from Codex Gateway Hub",
+      configFormat: "json",
+      config: toBase64Utf8(JSON.stringify(inlineConfig)),
+      enabled: "true"
+    });
+
+    return `ccswitch://v1/import?${params.toString()}`;
+  }
+
+  function buildCcSwitchCodexInlineConfig() {
+    const authJson = buildCcSwitchCodexAuthJson();
+    return {
+      auth: authJson,
+      config: buildCcSwitchCodexConfigToml()
+    };
+  }
+
+  function buildCcSwitchCodexAuthJson() {
+    const { localKey } = resolveCcSwitchProviderContext();
+    return {
+      OPENAI_API_KEY: localKey
+    };
+  }
+
+  function buildCcSwitchCodexConfigToml() {
+    const {
+      endpoint,
+      model,
+      providerName,
+      contextWindow,
+      autoCompactTokenLimit
+    } = resolveCcSwitchProviderContext();
+    const providerKey = sanitizeTomlKey(providerName);
+    return [
       `model_provider = "${providerKey}"`,
       `model = "${model}"`,
+      ...(contextWindow ? [`model_context_window = ${contextWindow}`] : []),
+      ...(autoCompactTokenLimit ? [`model_auto_compact_token_limit = ${autoCompactTokenLimit}`] : []),
       'model_reasoning_effort = "high"',
       "disable_response_storage = true",
       "",
@@ -2094,45 +2478,57 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       "requires_openai_auth = true",
       ""
     ].join("\n");
-
-    const inlineConfig = {
-      auth: {
-        OPENAI_API_KEY: localKey
-      },
-      config: codexConfigToml
-    };
-    const params = new URLSearchParams({
-      resource: "provider",
-      app: "codex",
-      name: `${providerName} (Gateway)`,
-      homepage: origin,
-      endpoint,
-      apiKey: localKey,
-      model,
-      notes: "Imported from Codex Gateway Hub",
-      configFormat: "json",
-      config: toBase64Utf8(JSON.stringify(inlineConfig)),
-      enabled: "true"
-    });
-
-    return `ccswitch://v1/import?${params.toString()}`;
   }
 
-  function buildCcSwitchClaudeDeepLink() {
-    const { localKey, origin, endpoint, model, providerName } = resolveCcSwitchProviderContext();
+  function buildCcSwitchCodexContextPatch() {
+    const { contextWindow, autoCompactTokenLimit } = resolveCcSwitchProviderContext();
+    return [
+      "# Codex context tuning patch (generated by Codex Gateway Hub)",
+      "# Paste into CC Switch -> Codex provider config.toml",
+      contextWindow ? `model_context_window = ${contextWindow}` : "# model_context_window = <set based on model>",
+      autoCompactTokenLimit
+        ? `model_auto_compact_token_limit = ${autoCompactTokenLimit}`
+        : "# model_auto_compact_token_limit = <optional>"
+    ].join("\n");
+  }
+
+  function buildCcSwitchClaudeInlineConfig() {
+    const {
+      localKey,
+      origin,
+      claudeModel,
+      contextWindow,
+      maxThinkingTokens,
+      claudeMaxOutputTokens
+    } = resolveCcSwitchProviderContext();
     const anthropicBaseUrl = origin;
-    const inlineConfig = {
+    return {
       env: {
         ANTHROPIC_AUTH_TOKEN: localKey,
         ANTHROPIC_BASE_URL: anthropicBaseUrl,
-        ANTHROPIC_MODEL: model,
-        ANTHROPIC_DEFAULT_HAIKU_MODEL: model,
-        ANTHROPIC_DEFAULT_SONNET_MODEL: model,
-        ANTHROPIC_DEFAULT_OPUS_MODEL: model,
+        ANTHROPIC_MODEL: claudeModel,
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: claudeModel,
+        ANTHROPIC_DEFAULT_SONNET_MODEL: claudeModel,
+        ANTHROPIC_DEFAULT_OPUS_MODEL: claudeModel,
+        CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(claudeMaxOutputTokens),
         CLAUDE_CODE_EFFORT_LEVEL: "high",
-        MAX_THINKING_TOKENS: "8192"
+        MAX_THINKING_TOKENS: String(maxThinkingTokens),
+        GATEWAY_MODEL_CONTEXT_WINDOW: contextWindow ? String(contextWindow) : ""
       }
     };
+  }
+
+  function buildCcSwitchClaudeDeepLink() {
+    const {
+      localKey,
+      origin,
+      claudeModel,
+      providerName,
+      contextWindow,
+      claudeMaxOutputTokens
+    } = resolveCcSwitchProviderContext();
+    const anthropicBaseUrl = origin;
+    const inlineConfig = buildCcSwitchClaudeInlineConfig();
     const params = new URLSearchParams({
       resource: "provider",
       app: "claude",
@@ -2140,11 +2536,13 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       homepage: origin,
       endpoint: anthropicBaseUrl,
       apiKey: localKey,
-      model,
-      haikuModel: model,
-      sonnetModel: model,
-      opusModel: model,
-      notes: "Imported from Codex Gateway Hub",
+      model: claudeModel,
+      haikuModel: claudeModel,
+      sonnetModel: claudeModel,
+      opusModel: claudeModel,
+      notes: contextWindow
+        ? `Imported from Codex Gateway Hub · context_window=${contextWindow} · max_output=${claudeMaxOutputTokens}`
+        : "Imported from Codex Gateway Hub",
       configFormat: "json",
       config: toBase64Utf8(JSON.stringify(inlineConfig)),
       enabled: "true"
@@ -2154,13 +2552,24 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   }
 
   function buildCcSwitchClaudeThinkingPatch() {
-    const { model } = resolveCcSwitchProviderContext();
+    const {
+      claudeModel,
+      contextWindow,
+      maxThinkingTokens,
+      claudeMaxOutputTokens
+    } = resolveCcSwitchProviderContext();
     return JSON.stringify(
       {
         env: {
-          ANTHROPIC_REASONING_MODEL: model,
+          ANTHROPIC_MODEL: claudeModel,
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: claudeModel,
+          ANTHROPIC_DEFAULT_SONNET_MODEL: claudeModel,
+          ANTHROPIC_DEFAULT_OPUS_MODEL: claudeModel,
+          ANTHROPIC_REASONING_MODEL: claudeModel,
+          CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(claudeMaxOutputTokens),
           CLAUDE_CODE_EFFORT_LEVEL: "high",
-          MAX_THINKING_TOKENS: "8192"
+          MAX_THINKING_TOKENS: String(maxThinkingTokens),
+          GATEWAY_MODEL_CONTEXT_WINDOW: contextWindow ? String(contextWindow) : ""
         }
       },
       null,
@@ -2179,9 +2588,74 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     }
   }
 
-  function openCcSwitchCodexImport() {
+  async function copyCcSwitchCodexAuthJson() {
+    try {
+      const authJson = JSON.stringify(buildCcSwitchCodexAuthJson(), null, 2);
+      await copyTextToClipboard(
+        authJson,
+        t("Codex auth.json（含密钥）已复制。", "Codex auth.json (with key) copied.")
+      );
+    } catch (err) {
+      notifyError(
+        err instanceof Error
+          ? err.message
+          : t("复制 Codex auth.json 失败", "Failed to copy Codex auth.json")
+      );
+    }
+  }
+
+  async function copyCcSwitchCodexConfigToml() {
+    try {
+      const toml = buildCcSwitchCodexConfigToml();
+      await copyTextToClipboard(
+        toml,
+        t("Codex config.toml 已复制。", "Codex config.toml copied.")
+      );
+    } catch (err) {
+      notifyError(
+        err instanceof Error
+          ? err.message
+          : t("复制 Codex config.toml 失败", "Failed to copy Codex config.toml")
+      );
+    }
+  }
+
+  async function copyCcSwitchCodexContextPatch() {
+    try {
+      const patch = buildCcSwitchCodexContextPatch();
+      await copyTextToClipboard(
+        patch,
+        t("Codex 上下文补丁已复制。", "Codex context patch copied.")
+      );
+    } catch (err) {
+      notifyError(
+        err instanceof Error
+          ? err.message
+          : t("复制 Codex 上下文补丁失败", "Failed to copy Codex context patch")
+      );
+    }
+  }
+
+  async function openCcSwitchCodexImport() {
     try {
       const link = buildCcSwitchCodexDeepLink();
+      try {
+        const patch = buildCcSwitchCodexContextPatch();
+        await navigator.clipboard.writeText(patch);
+        notifyInfo(
+          t(
+            "已同步复制 Codex 上下文补丁。导入后可直接粘贴到 CC Switch 的 Codex 配置。",
+            "Codex context patch copied. Paste it into CC Switch Codex config after import."
+          )
+        );
+      } catch {
+        notifyInfo(
+          t(
+            "无法自动复制 Codex 上下文补丁，请手动点击“复制 Codex 上下文补丁”。",
+            "Could not auto-copy Codex context patch. Click 'Copy Codex Context Patch' manually."
+          )
+        );
+      }
       window.location.href = link;
       notifyInfo(t("正在尝试唤起 CC Switch Codex 导入。", "Trying to open CC Switch Codex import."));
     } catch (err) {
@@ -2204,25 +2678,58 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     }
   }
 
-  async function copyCcSwitchClaudeThinkingPatch() {
+  async function copyCcSwitchClaudeConfigJson() {
     try {
-      const patch = buildCcSwitchClaudeThinkingPatch();
+      const configJson = JSON.stringify(buildCcSwitchClaudeInlineConfig(), null, 2);
       await copyTextToClipboard(
-        patch,
-        t("Claude Thinking 补丁已复制。", "Claude thinking patch copied.")
+        configJson,
+        t("Claude Code 配置（含密钥）已复制。", "Claude Code config (with key) copied.")
       );
     } catch (err) {
       notifyError(
         err instanceof Error
           ? err.message
-          : t("复制 Claude Thinking 补丁失败", "Failed to copy Claude thinking patch")
+          : t("复制 Claude Code 配置失败", "Failed to copy Claude Code config")
       );
     }
   }
 
-  function openCcSwitchClaudeImport() {
+  async function copyCcSwitchClaudeThinkingPatch() {
+    try {
+      const patch = buildCcSwitchClaudeThinkingPatch();
+      await copyTextToClipboard(
+        patch,
+        t("Claude 上下文/Thinking 补丁已复制。", "Claude context/thinking patch copied.")
+      );
+    } catch (err) {
+      notifyError(
+        err instanceof Error
+          ? err.message
+          : t("复制 Claude 上下文/Thinking 补丁失败", "Failed to copy Claude context/thinking patch")
+      );
+    }
+  }
+
+  async function openCcSwitchClaudeImport() {
     try {
       const link = buildCcSwitchClaudeDeepLink();
+      try {
+        const patch = buildCcSwitchClaudeThinkingPatch();
+        await navigator.clipboard.writeText(patch);
+        notifyInfo(
+          t(
+            "已同步复制 Claude 上下文/Thinking 补丁。导入后可直接粘贴到 CC Switch 的 Claude 配置。",
+            "Claude context/thinking patch copied. Paste it into CC Switch Claude config after import."
+          )
+        );
+      } catch {
+        notifyInfo(
+          t(
+            "无法自动复制 Claude 补丁，请手动点击“复制 Claude 上下文/Thinking 补丁”。",
+            "Could not auto-copy Claude patch. Click 'Copy Claude Context/Thinking Patch' manually."
+          )
+        );
+      }
       window.location.href = link;
       notifyInfo(
         t("正在尝试唤起 CC Switch Claude Code 导入。", "Trying to open CC Switch Claude Code import.")
@@ -2238,6 +2745,34 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
 
   const keySelectionValue = isNewKey ? "__new__" : String(selectedKeyId);
   const channelSelectionValue = isNewChannel ? "__new__" : String(selectedChannelId);
+  const codexAuthJsonPreview = (() => {
+    try {
+      const authJson = buildCcSwitchCodexAuthJson();
+      return JSON.stringify(
+        {
+          OPENAI_API_KEY: authJson.OPENAI_API_KEY
+        },
+        null,
+        2
+      );
+    } catch {
+      return "";
+    }
+  })();
+  const codexConfigTomlPreview = (() => {
+    try {
+      return buildCcSwitchCodexConfigToml();
+    } catch {
+      return "";
+    }
+  })();
+  const claudeConfigPreview = (() => {
+    try {
+      return JSON.stringify(buildCcSwitchClaudeInlineConfig(), null, 2);
+    } catch {
+      return "";
+    }
+  })();
   const routeModuleTitle = t(MODULE_LABEL[routeModule].zh, MODULE_LABEL[routeModule].en);
   const routeModuleSummary = t(MODULE_SUMMARY[routeModule].zh, MODULE_SUMMARY[routeModule].en);
   const workspaceHeroStats: WorkspaceHeroStat[] = [
@@ -2912,10 +3447,68 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                   </p>
                   <p className="tc-tip">
                     {t(
-                      "提示：CC Switch 当前 deep link 不会完整保留 Claude Thinking 变量。导入后可点“复制 Claude Thinking 补丁”，在 CC Switch 的 Claude 配置中补上。",
-                      "Tip: CC Switch deep link currently does not fully preserve Claude thinking variables. After import, copy the Claude thinking patch and apply it in CC Switch Claude config."
+                      "提示：CC Switch 当前 deep link 在 Codex/Claude 场景都可能丢失部分高级变量（例如 Codex 上下文窗口、Claude 上下文窗口/Thinking 变量）。导入后可点对应“补丁复制”按钮粘贴到 CC Switch 配置中。",
+                      "Tip: CC Switch deep link may drop advanced variables for Codex/Claude (for example Codex context window and Claude context-window/thinking variables). After import, use the patch-copy buttons and paste into CC Switch config."
                     )}
                   </p>
+
+                  <div className="tc-runtime-doc">
+                    <div className="tc-runtime-doc-head">
+                      <h4>{t("Codex auth.json 预览", "Codex auth.json Preview")}</h4>
+                      <Button
+                        variant="outline"
+                        theme="default"
+                        onClick={() => void copyCcSwitchCodexAuthJson()}
+                        disabled={loading || !keyForm.localKey.trim()}
+                      >
+                        {t("一键复制 auth.json（含密钥）", "Copy auth.json (with key)")}
+                      </Button>
+                    </div>
+                    <pre className="tc-json-fallback">
+                      {codexAuthJsonPreview || t("请先填写本地 Key 后查看配置预览。", "Fill local key to preview config.")}
+                    </pre>
+                    <p className="tc-upstream-advice">
+                      {t(
+                        "说明：这里对应 CC Switch 的 auth.json；预览与复制都会显示完整真实密钥。",
+                        "Note: This maps to CC Switch auth.json. Both preview and copy include the full real key."
+                      )}
+                    </p>
+                    <div className="tc-runtime-doc-head">
+                      <h4>{t("Codex config.toml 预览", "Codex config.toml Preview")}</h4>
+                      <Button
+                        variant="outline"
+                        theme="default"
+                        onClick={() => void copyCcSwitchCodexConfigToml()}
+                        disabled={loading || !keyForm.localKey.trim()}
+                      >
+                        {t("一键复制 config.toml", "Copy config.toml")}
+                      </Button>
+                    </div>
+                    <pre className="tc-json-fallback">
+                      {codexConfigTomlPreview || t("请先填写本地 Key 后查看配置预览。", "Fill local key to preview config.")}
+                    </pre>
+
+                    <div className="tc-runtime-doc-head">
+                      <h4>{t("Claude Code 配置预览（JSON）", "Claude Code Config Preview (JSON)")}</h4>
+                      <Button
+                        variant="outline"
+                        theme="default"
+                        onClick={() => void copyCcSwitchClaudeConfigJson()}
+                        disabled={loading || !keyForm.localKey.trim()}
+                      >
+                        {t("一键复制 Claude 配置（含密钥）", "Copy Claude Config (with key)")}
+                      </Button>
+                    </div>
+                    <pre className="tc-json-fallback">
+                      {claudeConfigPreview || t("请先填写本地 Key 后查看配置预览。", "Fill local key to preview config.")}
+                    </pre>
+                    <p className="tc-upstream-advice">
+                      {t(
+                        "说明：这里对应 CC Switch 的 Claude env 配置；预览与复制都会显示完整真实密钥。",
+                        "Note: This maps to CC Switch Claude env config. Both preview and copy include the full real key."
+                      )}
+                    </p>
+                  </div>
 
                   <div className="tc-actions-row">
                     <Button
@@ -2945,6 +3538,14 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                     <Button
                       variant="outline"
                       theme="default"
+                      onClick={() => void copyCcSwitchCodexContextPatch()}
+                      disabled={loading || !keyForm.localKey.trim()}
+                    >
+                      {t("复制 Codex 上下文补丁", "Copy Codex Context Patch")}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      theme="default"
                       onClick={() => void copyCcSwitchClaudeDeepLink()}
                       disabled={loading || !keyForm.localKey.trim()}
                     >
@@ -2956,7 +3557,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                       onClick={() => void copyCcSwitchClaudeThinkingPatch()}
                       disabled={loading || !keyForm.localKey.trim()}
                     >
-                      {t("复制 Claude Thinking 补丁", "Copy Claude Thinking Patch")}
+                      {t("复制 Claude 上下文/Thinking 补丁", "Copy Claude Context/Thinking Patch")}
                     </Button>
                   </div>
                 </section>
@@ -3169,6 +3770,35 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                                   model: value
                                 }))
                               }
+                              clearable
+                            />
+                          </label>
+
+                          <label className="tc-field">
+                            <span>{t("上下文长度（Token）", "Context Window (tokens)")}</span>
+                            <Input
+                              type="number"
+                              value={item.contextWindow ? String(item.contextWindow) : ""}
+                              onChange={(value) => {
+                                const normalized = value.trim();
+                                updateUpstreamModel(item.id, (prev) => {
+                                  if (!normalized) {
+                                    return {
+                                      ...prev,
+                                      contextWindow: null
+                                    };
+                                  }
+                                  const next = Number(normalized);
+                                  if (!Number.isFinite(next)) {
+                                    return prev;
+                                  }
+                                  return {
+                                    ...prev,
+                                    contextWindow: Math.floor(next)
+                                  };
+                                });
+                              }}
+                              placeholder={t("如：128000（可选）", "e.g. 128000 (optional)")}
                               clearable
                             />
                           </label>
@@ -3422,8 +4052,8 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                   <h3>{t("AI 调用日志", "AI Call Logs")}</h3>
                   <p className="tc-upstream-advice">
                     {t(
-                      "展示系统提示词、用户提问、模型回答，以及真实上游模型（实际调用模型）信息。支持按 Key / 模型 / 调用类型筛选，并可单独统计跨模型辅助视觉调用。",
-                      "Shows system prompt, user question, assistant response, and real upstream model (actually used). Supports filtering by key/model/call type, including cross-model vision fallback stats."
+                      "展示系统提示词、用户提问、模型回答，以及真实上游模型（实际调用模型）信息。支持 Key、时间范围、关键词、请求路由/协议、请求模型、客户端模型、真实模型、流式模式、调用类型等组合筛选，并可单独统计跨模型辅助视觉调用。",
+                      "Shows system prompt, user question, assistant response, and the real upstream model. Supports combined filters by key, time range, keyword, route/APIs, requested/client/upstream model, stream mode, and call type, plus dedicated vision-fallback stats."
                     )}
                   </p>
 
@@ -3513,7 +4143,157 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                         />
                       </label>
                     </div>
+                  </div>
+
+                  <div className="tc-log-toolbar tc-log-toolbar-detail">
+                    <div className="tc-log-toolbar-group">
+                      <label className="tc-field">
+                        <span>{t("时间范围", "Time Range")}</span>
+                        <DateRangePicker
+                          enableTimePicker
+                          clearable
+                          valueType="YYYY-MM-DD HH:mm:ss"
+                          format="YYYY-MM-DD HH:mm:ss"
+                          value={aiCallDateRange}
+                          placeholder={[t("开始时间", "Start time"), t("结束时间", "End time")]}
+                          style={{ width: 340 }}
+                          onChange={(value) => {
+                            if (!Array.isArray(value)) {
+                              setAiCallDateRange([]);
+                              return;
+                            }
+                            const next = value.map((item) => String(item ?? "").trim());
+                            if (next.length === 2 && next[0] && next[1]) {
+                              setAiCallDateRange([next[0], next[1]]);
+                              return;
+                            }
+                            setAiCallDateRange([]);
+                          }}
+                        />
+                      </label>
+                    </div>
+                    <div className="tc-log-toolbar-group tc-log-range-buttons">
+                      {AI_CALL_RANGE_OPTIONS.map((item) => (
+                        <Button
+                          key={`call-range-${item.minutes}`}
+                          size="small"
+                          variant="outline"
+                          onClick={() => applyAiCallQuickRange(item.minutes)}
+                        >
+                          {item.label}
+                        </Button>
+                      ))}
+                      {hasCustomAiCallDateRange ? (
+                        <Button size="small" variant="outline" onClick={() => setAiCallDateRange([])}>
+                          {t("清除时间", "Clear Time")}
+                        </Button>
+                      ) : null}
+                    </div>
+                    <div className="tc-log-toolbar-group tc-log-field-wide">
+                      <label className="tc-field">
+                        <span>{t("关键词", "Keyword")}</span>
+                        <Input
+                          value={aiCallKeywordFilter}
+                          onChange={(value) => setAiCallKeywordFilter(value)}
+                          placeholder={t("搜索提示词、回答、模型、Key", "Search prompts, response, models, key")}
+                          clearable
+                        />
+                      </label>
+                    </div>
+                    <div className="tc-log-toolbar-group">
+                      <label className="tc-field">
+                        <span>{t("路由", "Route")}</span>
+                        <Select
+                          value={aiCallRouteFilter || "__all__"}
+                          options={aiCallRouteOptions}
+                          style={{ width: 180 }}
+                          onChange={(value) => {
+                            const next = normalizeSelectValue(value);
+                            setAiCallRouteFilter(next === "__all__" ? "" : next);
+                          }}
+                        />
+                      </label>
+                    </div>
+                    <div className="tc-log-toolbar-group">
+                      <label className="tc-field">
+                        <span>{t("请求协议", "Request API")}</span>
+                        <Select
+                          value={aiCallRequestWireFilter || "__all__"}
+                          options={aiCallRequestWireOptions}
+                          style={{ width: 190 }}
+                          onChange={(value) => {
+                            const next = normalizeSelectValue(value);
+                            setAiCallRequestWireFilter(next === "__all__" ? "" : next);
+                          }}
+                        />
+                      </label>
+                    </div>
+                    <div className="tc-log-toolbar-group">
+                      <label className="tc-field">
+                        <span>{t("上游协议", "Upstream API")}</span>
+                        <Select
+                          value={aiCallUpstreamWireFilter || "__all__"}
+                          options={aiCallUpstreamWireOptions}
+                          style={{ width: 190 }}
+                          onChange={(value) => {
+                            const next = normalizeSelectValue(value);
+                            setAiCallUpstreamWireFilter(next === "__all__" ? "" : next);
+                          }}
+                        />
+                      </label>
+                    </div>
+                    <div className="tc-log-toolbar-group">
+                      <label className="tc-field">
+                        <span>{t("请求模型", "Requested Model")}</span>
+                        <Select
+                          value={aiCallRequestedModelFilter || "__all__"}
+                          options={aiCallRequestedModelOptions}
+                          style={{ width: 220 }}
+                          onChange={(value) => {
+                            const next = normalizeSelectValue(value);
+                            setAiCallRequestedModelFilter(next === "__all__" ? "" : next);
+                          }}
+                        />
+                      </label>
+                    </div>
+                    <div className="tc-log-toolbar-group">
+                      <label className="tc-field">
+                        <span>{t("客户端模型", "Client Model")}</span>
+                        <Select
+                          value={aiCallClientModelFilter || "__all__"}
+                          options={aiCallClientModelOptions}
+                          style={{ width: 220 }}
+                          onChange={(value) => {
+                            const next = normalizeSelectValue(value);
+                            setAiCallClientModelFilter(next === "__all__" ? "" : next);
+                          }}
+                        />
+                      </label>
+                    </div>
+                    <div className="tc-log-toolbar-group">
+                      <label className="tc-field">
+                        <span>{t("流式模式", "Stream Mode")}</span>
+                        <Select
+                          value={aiCallStreamFilter || "__all__"}
+                          options={aiCallStreamOptions}
+                          style={{ width: 170 }}
+                          onChange={(value) => {
+                            const next = normalizeSelectValue(value);
+                            if (next === "__all__") {
+                              setAiCallStreamFilter("");
+                              return;
+                            }
+                            if (next === "stream" || next === "non_stream") {
+                              setAiCallStreamFilter(next);
+                            }
+                          }}
+                        />
+                      </label>
+                    </div>
                     <div className="tc-log-toolbar-group tc-log-toolbar-actions">
+                      <Button variant="outline" onClick={resetAiCallFilters}>
+                        {t("重置筛选", "Reset Filters")}
+                      </Button>
                       <Button
                         variant="outline"
                         theme="danger"
@@ -3541,6 +4321,18 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                         视觉 Key {item.keyName} · {item.count}
                       </Tag>
                     ))}
+                    {hasCustomAiCallDateRange ? (
+                      <Tag theme="primary" variant="light-outline">
+                        {t("范围", "Range")}={aiCallDateRange[0]} ~ {aiCallDateRange[1]}
+                      </Tag>
+                    ) : null}
+                    {aiCallKeywordFilter.trim() ? (
+                      <Tag theme="primary" variant="light-outline">
+                        {t("关键词", "Keyword")}=
+                        {aiCallKeywordFilter.trim().slice(0, 24)}
+                        {aiCallKeywordFilter.trim().length > 24 ? "..." : ""}
+                      </Tag>
+                    ) : null}
                   </div>
 
                   {aiCallLogs.length === 0 ? (
