@@ -143,6 +143,7 @@ OPENAI_FILE_UPLOAD_MAX_BYTES="20971520"
 OPENAI_FILE_DATA_URL_MAX_BYTES="20971520"
 GATEWAY_KEY_CACHE_TTL_MS="1500"
 GATEWAY_KEY_CACHE_MAX="2048"
+GATEWAY_STREAM_TIMEOUT_MS="600000"
 DOCKER_ACCELERATE_CN="0"
 NPM_REGISTRY="https://registry.npmjs.org/"
 NPM_REGISTRY_CN="https://registry.npmmirror.com/"
@@ -164,6 +165,7 @@ NO_PROXY="localhost,127.0.0.1"
 - `OPENAI_FILE_DATA_URL_MAX_BYTES` 限制 `file_id` 内联为 data URL 的大小（默认 20MB） / `OPENAI_FILE_DATA_URL_MAX_BYTES` limits `file_id` inlining to data URL (default 20MB).
 - `GATEWAY_KEY_CACHE_TTL_MS` 与 `GATEWAY_KEY_CACHE_MAX` 用于高并发下本地 Key 缓存 / These two variables control local-key cache for high concurrency.
 - `GATEWAY_KEY_CACHE_TTL_MS=0` 可关闭缓存 / Set `GATEWAY_KEY_CACHE_TTL_MS=0` to disable cache.
+- `GATEWAY_STREAM_TIMEOUT_MS` 控制流式上游请求超时（默认 `600000` 毫秒）；`0` 表示不设置流式超时 / `GATEWAY_STREAM_TIMEOUT_MS` controls stream upstream timeout (default `600000` ms); set `0` to disable stream timeout.
 - `DOCKER_ACCELERATE_CN=1` 时，Docker 构建阶段 npm 将使用 `NPM_REGISTRY_CN` / When `DOCKER_ACCELERATE_CN=1`, Docker build uses `NPM_REGISTRY_CN` for npm install.
 - `NPM_REGISTRY` 为默认 npm 源，`NPM_REGISTRY_CN` 为加速模式 npm 源 / `NPM_REGISTRY` is default npm registry; `NPM_REGISTRY_CN` is used in acceleration mode.
 - `HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY` 会透传到构建与运行容器 / `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` are passed to both build and runtime containers.

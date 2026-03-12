@@ -126,6 +126,12 @@ const GATEWAY_KEY_CACHE_MAX = parsePositiveIntEnv(
   0,
   20_000
 );
+const GATEWAY_STREAM_TIMEOUT_MS = parsePositiveIntEnv(
+  process.env.GATEWAY_STREAM_TIMEOUT_MS,
+  600_000,
+  0,
+  3_600_000
+);
 const gatewayKeyCache = new Map<string, GatewayKeyCacheEntry>();
 
 function isGatewayKeyCacheEnabled() {
@@ -320,7 +326,7 @@ export async function callResponsesApi(payload: unknown, key: ResolvedGatewayKey
     method: "POST",
     headers: buildOpenAiStyleHeaders(key.upstreamApiKey!.trim()),
     body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(key.timeoutMs)
+    signal: buildUpstreamRequestSignal(key, false)
   });
 
   if (!response.ok) {
@@ -347,8 +353,6 @@ function buildStreamProxyHeaders(upstreamResponse: Response) {
   const allowedHeaders = [
     "content-type",
     "cache-control",
-    "connection",
-    "transfer-encoding",
     "x-request-id",
     "request-id",
     "x-correlation-id",
@@ -370,6 +374,19 @@ function buildStreamProxyHeaders(upstreamResponse: Response) {
   return headers;
 }
 
+function buildUpstreamRequestSignal(key: ResolvedGatewayKey, stream: boolean) {
+  if (!stream) {
+    return AbortSignal.timeout(key.timeoutMs);
+  }
+  if (GATEWAY_STREAM_TIMEOUT_MS <= 0) {
+    return undefined;
+  }
+  // Stream responses can run for minutes; avoid cutting off valid output
+  // due to shorter per-key timeout values used for non-stream JSON calls.
+  const streamTimeoutMs = Math.max(key.timeoutMs, GATEWAY_STREAM_TIMEOUT_MS);
+  return AbortSignal.timeout(streamTimeoutMs);
+}
+
 async function callStreamEndpoint(
   resource: "responses" | "chat/completions" | "completions" | "messages",
   payload: unknown,
@@ -380,7 +397,7 @@ async function callStreamEndpoint(
     method: "POST",
     headers,
     body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(key.timeoutMs)
+    signal: buildUpstreamRequestSignal(key, true)
   });
 
   return new Response(upstreamResponse.body, {
@@ -412,7 +429,7 @@ async function callJsonEndpoint(path: string, payload: unknown, key: ResolvedGat
       method: "POST",
       headers: buildOpenAiStyleHeaders(key.upstreamApiKey!.trim()),
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(key.timeoutMs)
+      signal: buildUpstreamRequestSignal(key, false)
     }
   );
 
@@ -458,7 +475,7 @@ export async function callAnthropicMessagesApi(
     method: "POST",
     headers: buildAnthropicHeaders(key.upstreamApiKey!.trim(), headerOverrides),
     body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(key.timeoutMs)
+    signal: buildUpstreamRequestSignal(key, false)
   });
 
   const contentType = response.headers.get("content-type") ?? "";
