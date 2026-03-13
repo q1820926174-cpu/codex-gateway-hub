@@ -10,6 +10,11 @@ import {
   type WorkspaceHeroAction,
   type WorkspaceHeroStat
 } from "@/components/console/workspace-hero";
+import {
+  createCodexExportBundle,
+  type CodexApplyPatchToolType,
+  type CodexExportBundle
+} from "@/lib/codex-export";
 import { JsonViewer } from "@/components/json-viewer";
 import { useLocale, type LocaleCode } from "@/components/locale-provider";
 import {
@@ -44,6 +49,8 @@ type ProviderName = (typeof PROVIDERS)[number];
 
 const UPSTREAM_WIRE_APIS = ["responses", "chat_completions", "anthropic_messages"] as const;
 type UpstreamWireApi = (typeof UPSTREAM_WIRE_APIS)[number];
+const GLM_CODEX_THINKING_THRESHOLDS = ["off", "low", "medium", "high"] as const;
+type GlmCodexThinkingThreshold = (typeof GLM_CODEX_THINKING_THRESHOLDS)[number];
 
 const PROVIDER_DEFAULT_BASE_URL: Record<Exclude<ProviderName, "custom">, string> = {
   openai: "https://api.openai.com",
@@ -245,6 +252,7 @@ type UpstreamModelConfig = {
   model: string;
   contextWindow: number | null;
   upstreamWireApi: UpstreamWireApi;
+  glmCodexThinkingThreshold: GlmCodexThinkingThreshold;
   supportsVision: boolean;
   visionChannelId: number | null;
   visionModel: string | null;
@@ -342,6 +350,7 @@ type AiCallLogEntry = {
   stream: boolean;
   systemPrompt: string;
   userPrompt: string;
+  conversationTranscript?: string;
   assistantResponse: string;
   images?: Array<{
     sourceType: "data_url" | "remote_url" | "unsupported";
@@ -504,6 +513,12 @@ function createUpstreamModelDraft(
     model: overrides.model ?? "gpt-4.1-mini",
     contextWindow: typeof overrides.contextWindow === "number" ? overrides.contextWindow : null,
     upstreamWireApi: overrides.upstreamWireApi ?? "responses",
+    glmCodexThinkingThreshold:
+      overrides.glmCodexThinkingThreshold === "off" ||
+      overrides.glmCodexThinkingThreshold === "medium" ||
+      overrides.glmCodexThinkingThreshold === "high"
+        ? overrides.glmCodexThinkingThreshold
+        : "low",
     supportsVision: overrides.supportsVision ?? true,
     visionChannelId: overrides.visionChannelId ?? null,
     visionModel: overrides.visionModel ?? null,
@@ -511,10 +526,29 @@ function createUpstreamModelDraft(
   };
 }
 
-function createEmptyKeyFormState(): KeyFormState {
+function normalizeGlmCodexThinkingThreshold(
+  value: string | null | undefined
+): GlmCodexThinkingThreshold {
+  if (value === "off") {
+    return "off";
+  }
+  if (value === "medium") {
+    return "medium";
+  }
+  if (value === "high") {
+    return "high";
+  }
+  return "low";
+}
+
+function shouldShowGlmThinkingThreshold(provider: ProviderName, model: string) {
+  return provider === "glm" || model.trim().toLowerCase().startsWith("glm-");
+}
+
+function createEmptyKeyFormState(localKey = ""): KeyFormState {
   return {
     name: "new-local-key",
-    localKey: generateLocalKey(),
+    localKey,
     upstreamChannelId: null,
     modelMappings: [],
     dynamicModelSwitch: false,
@@ -595,6 +629,9 @@ function toChannelForm(channel: UpstreamChannel): ChannelFormState {
             ...item,
             aliasModel: item.aliasModel ?? null,
             contextWindow: typeof item.contextWindow === "number" ? item.contextWindow : null,
+            glmCodexThinkingThreshold: normalizeGlmCodexThinkingThreshold(
+              item.glmCodexThinkingThreshold
+            ),
             visionChannelId: item.visionChannelId ?? null
           }))
         : [
@@ -603,6 +640,7 @@ function toChannelForm(channel: UpstreamChannel): ChannelFormState {
               model: channel.defaultModel,
               contextWindow: null,
               upstreamWireApi: channel.upstreamWireApi,
+              glmCodexThinkingThreshold: "low",
               supportsVision: channel.supportsVision,
               visionChannelId: null,
               visionModel: channel.visionModel
@@ -856,6 +894,15 @@ function MarkdownLogBlock({ value }: { value: string }) {
 export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   const router = useRouter();
   const { locale, setLocale, t } = useLocale();
+  const formatGlmThinkingThresholdLabel = (threshold: GlmCodexThinkingThreshold) => {
+    if (threshold === "off") {
+      return t("关闭自动开启", "Never auto-enable");
+    }
+    if (threshold === "high") {
+      return "high";
+    }
+    return `${threshold}+`;
+  };
   const routeModule = module;
 
   const [keys, setKeys] = useState<GatewayKey[]>([]);
@@ -870,6 +917,8 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
 
   const [runtimeModel, setRuntimeModel] = useState("");
   const [syncDefaultModel, setSyncDefaultModel] = useState(false);
+  const [nativeCodexApplyPatchToolType, setNativeCodexApplyPatchToolType] =
+    useState<CodexApplyPatchToolType>("function");
   const [testPrompt, setTestPrompt] = useState("请只回复：upstream_test_ok");
   const [testingModelId, setTestingModelId] = useState<string | null>(null);
   const [apiLogs, setApiLogs] = useState<ApiLogEntry[]>([]);
@@ -926,6 +975,22 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     () => channels.find((item) => item.id === keyForm.upstreamChannelId) ?? null,
     [channels, keyForm.upstreamChannelId]
   );
+  const findBoundChannelModelProfile = (targetModel: string) => {
+    const normalizedTargetModel = targetModel.trim().toLowerCase();
+    if (!normalizedTargetModel || !selectedChannelForKey) {
+      return null;
+    }
+
+    return (
+      selectedChannelForKey.upstreamModels.find(
+        (item) => item.model.trim().toLowerCase() === normalizedTargetModel
+      ) ??
+      selectedChannelForKey.upstreamModels.find(
+        (item) => (item.aliasModel?.trim().toLowerCase() ?? "") === normalizedTargetModel
+      ) ??
+      null
+    );
+  };
   const [gatewayOrigin, setGatewayOrigin] = useState(DEFAULT_GATEWAY_ORIGIN);
 
   useEffect(() => {
@@ -944,6 +1009,79 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   const gatewayV1Endpoint = useMemo(() => {
     return `${gatewayOrigin}/v1`;
   }, [gatewayOrigin]);
+  const nativeCodexExportBundle = useMemo(() => {
+    const localKey = keyForm.localKey.trim();
+    if (!localKey) {
+      return null;
+    }
+
+    const provider = selectedKey?.provider ?? selectedChannelForKey?.provider ?? "openai";
+    const providerName = (keyForm.name || "gateway").trim() || "gateway";
+    const modelPool =
+      selectedChannelForKey?.upstreamModels?.length
+        ? selectedChannelForKey.upstreamModels
+        : selectedKey?.upstreamModels ?? [];
+    const preferredModel =
+      selectedKey?.activeModelOverride?.trim() ||
+      selectedKey?.defaultModel ||
+      selectedChannelForKey?.defaultModel ||
+      "gpt-4.1-mini";
+
+    return createCodexExportBundle({
+      localKey,
+      provider,
+      providerName,
+      gatewayEndpoint: gatewayV1Endpoint,
+      preferredModel,
+      modelPool: modelPool.map((item) => ({
+        model: item.model,
+        aliasModel: item.aliasModel,
+        contextWindow: item.contextWindow,
+        enabled: item.enabled
+      })),
+      applyPatchToolType: nativeCodexApplyPatchToolType
+    });
+  }, [
+    gatewayV1Endpoint,
+    keyForm.localKey,
+    keyForm.name,
+    nativeCodexApplyPatchToolType,
+    selectedChannelForKey,
+    selectedKey
+  ]);
+  const nativeCodexSelectedModelProfile = useMemo(() => {
+    const modelPool =
+      selectedChannelForKey?.upstreamModels?.length
+        ? selectedChannelForKey.upstreamModels
+        : selectedKey?.upstreamModels ?? [];
+    if (!modelPool.length) {
+      return null;
+    }
+
+    const preferredModel =
+      selectedKey?.activeModelOverride?.trim() ||
+      selectedKey?.defaultModel ||
+      selectedChannelForKey?.defaultModel ||
+      "";
+    const normalizedPreferred = preferredModel.trim().toLowerCase();
+    const isMatched = (item: UpstreamModelConfig) =>
+      item.model.trim().toLowerCase() === normalizedPreferred ||
+      (item.aliasModel?.trim().toLowerCase() ?? "") === normalizedPreferred;
+
+    return (
+      modelPool.find((item) => isMatched(item) && item.enabled) ??
+      modelPool.find((item) => isMatched(item)) ??
+      modelPool.find((item) => item.enabled) ??
+      modelPool[0] ??
+      null
+    );
+  }, [
+    selectedChannelForKey?.defaultModel,
+    selectedChannelForKey?.upstreamModels,
+    selectedKey?.activeModelOverride,
+    selectedKey?.defaultModel,
+    selectedKey?.upstreamModels
+  ]);
   const runtimeDocLocalKey = useMemo(() => {
     const candidate = (selectedKey?.localKey ?? keyForm.localKey).trim();
     return candidate || "<your_local_key>";
@@ -1655,7 +1793,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
 
     if (data.items.length === 0) {
       setSelectedKeyId(null);
-      setKeyForm(createEmptyKeyFormState());
+      setKeyForm(createEmptyKeyFormState(generateLocalKey()));
       return;
     }
 
@@ -1897,7 +2035,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
 
   function createNewKeyDraft() {
     setSelectedKeyId(null);
-    setKeyForm(createEmptyKeyFormState());
+    setKeyForm(createEmptyKeyFormState(generateLocalKey()));
   }
 
   function openExistingKeyById(id: number) {
@@ -1947,6 +2085,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
             model: preset.defaultModel,
             contextWindow: preset.contextWindow,
             upstreamWireApi: preset.upstreamWireApi,
+            glmCodexThinkingThreshold: "low",
             supportsVision: preset.supportsVision,
             visionModel: preset.visionModel
           })
@@ -1968,7 +2107,8 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
           ...prev.upstreamModels,
           createUpstreamModelDraft({
             name: `模型 ${prev.upstreamModels.length + 1}`,
-            upstreamWireApi: "responses"
+            upstreamWireApi: "responses",
+            glmCodexThinkingThreshold: "low"
           })
         ]
       })
@@ -2140,6 +2280,9 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
           typeof item.contextWindow === "number" && Number.isFinite(item.contextWindow)
             ? Math.floor(item.contextWindow)
             : null,
+        glmCodexThinkingThreshold: normalizeGlmCodexThinkingThreshold(
+          item.glmCodexThinkingThreshold
+        ),
         visionChannelId: item.visionChannelId ?? null,
         visionModel: item.visionModel?.trim() || null
       }));
@@ -2207,6 +2350,67 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       notifySuccess(isNewChannel ? "上游渠道创建成功。" : "上游渠道已更新。");
     } catch (err) {
       notifyError(err instanceof Error ? err.message : "保存失败");
+    } finally {
+      setSavingChannel(false);
+    }
+  }
+
+  async function updateBoundChannelGlmThinkingThreshold(
+    targetModel: string,
+    threshold: GlmCodexThinkingThreshold
+  ) {
+    if (!selectedChannelForKey) {
+      notifyError(t("请先绑定上游渠道。", "Bind an upstream channel first."));
+      return;
+    }
+
+    const matchedProfile = findBoundChannelModelProfile(targetModel);
+    if (!matchedProfile) {
+      notifyError(
+        t(
+          "当前映射指向的内部模型不在绑定渠道模型池中，无法设置 GLM 深度思考阈值。",
+          "The mapped internal model is not in the bound channel model pool, so its GLM thinking threshold cannot be updated."
+        )
+      );
+      return;
+    }
+
+    setSavingChannel(true);
+    try {
+      const upstreamModels = selectedChannelForKey.upstreamModels.map((item) =>
+        item.id === matchedProfile.id
+          ? {
+              ...item,
+              glmCodexThinkingThreshold: normalizeGlmCodexThinkingThreshold(threshold)
+            }
+          : item
+      );
+
+      const response = await fetch(`/api/upstreams/${selectedChannelForKey.id}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          upstreamModels
+        })
+      });
+      const body = (await response.json().catch(() => ({}))) as UpstreamChannel & { error?: string };
+      if (!response.ok) {
+        throw new Error(body.error ?? `保存失败 (${response.status})`);
+      }
+
+      await Promise.all([loadChannels(), loadKeys()]);
+      if (selectedChannelId === body.id) {
+        setSelectedChannelId(body.id);
+        setChannelForm(toChannelForm(body));
+      }
+      notifySuccess(
+        t(
+          `已更新 ${matchedProfile.model} 的 GLM 深度思考阈值。`,
+          `Updated GLM thinking threshold for ${matchedProfile.model}.`
+        )
+      );
+    } catch (err) {
+      notifyError(err instanceof Error ? err.message : t("保存失败", "Failed to save"));
     } finally {
       setSavingChannel(false);
     }
@@ -2337,6 +2541,19 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     } catch {
       notifyError(t("复制失败，请检查浏览器权限。", "Copy failed. Please check browser permissions."));
     }
+  }
+
+  async function copyNativeCodexBundleFile(
+    fileKey: keyof CodexExportBundle["files"],
+    successMessage: string,
+    failureMessage: string
+  ) {
+    const file = nativeCodexExportBundle?.files[fileKey];
+    if (!file) {
+      notifyError(failureMessage);
+      return;
+    }
+    await copyTextToClipboard(file.content, successMessage);
   }
 
   async function copyLocalKey() {
@@ -2773,6 +2990,10 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       return "";
     }
   })();
+  const nativeCodexEmptyState = t(
+    "请先填写本地 Key 后查看原生 Codex 配置预览。",
+    "Fill local key to preview native Codex config."
+  );
   const routeModuleTitle = t(MODULE_LABEL[routeModule].zh, MODULE_LABEL[routeModule].en);
   const routeModuleSummary = t(MODULE_SUMMARY[routeModule].zh, MODULE_SUMMARY[routeModule].en);
   const workspaceHeroStats: WorkspaceHeroStat[] = [
@@ -3354,64 +3575,123 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
 
                   {keyForm.modelMappings.length > 0 ? (
                     <div className="tc-model-list">
-                      {keyForm.modelMappings.map((item, index) => (
-                        <div key={item.id} className="tc-model-item">
-                          <div className="tc-model-head">
-                            <strong>映射 #{index + 1}</strong>
-                            <div className="tc-model-actions">
-                              <span>{t("启用", "Enabled")}</span>
-                              <Switch
-                                value={item.enabled}
-                                onChange={(value) =>
-                                  updateKeyModelMapping(item.id, (prev) => ({
-                                    ...prev,
-                                    enabled: Boolean(value)
-                                  }))
-                                }
-                              />
-                              <Button
-                                variant="outline"
-                                theme="danger"
-                                onClick={() => removeKeyModelMapping(item.id)}
-                              >
-                                {t("删除", "Delete")}
-                              </Button>
+                      {keyForm.modelMappings.map((item, index) => {
+                        const targetProfile = findBoundChannelModelProfile(item.targetModel);
+                        const showGlmThinkingControl = shouldShowGlmThinkingThreshold(
+                          selectedChannelForKey?.provider ?? "openai",
+                          targetProfile?.model ?? item.targetModel
+                        );
+
+                        return (
+                          <div key={item.id} className="tc-model-item">
+                            <div className="tc-model-head">
+                              <strong>映射 #{index + 1}</strong>
+                              <div className="tc-model-actions">
+                                <span>{t("启用", "Enabled")}</span>
+                                <Switch
+                                  value={item.enabled}
+                                  onChange={(value) =>
+                                    updateKeyModelMapping(item.id, (prev) => ({
+                                      ...prev,
+                                      enabled: Boolean(value)
+                                    }))
+                                  }
+                                />
+                                <Button
+                                  variant="outline"
+                                  theme="danger"
+                                  onClick={() => removeKeyModelMapping(item.id)}
+                                >
+                                  {t("删除", "Delete")}
+                                </Button>
+                              </div>
+                            </div>
+
+                            <div className="tc-form-grid">
+                              <label className="tc-field">
+                                <span>{t("客户端模型名", "Client Model Name")}</span>
+                                <Input
+                                  value={item.clientModel}
+                                  onChange={(value) =>
+                                    updateKeyModelMapping(item.id, (prev) => ({
+                                      ...prev,
+                                      clientModel: value
+                                    }))
+                                  }
+                                  placeholder={t("如：gpt-5.3-codex", "e.g. gpt-5.3-codex")}
+                                  clearable
+                                />
+                              </label>
+
+                              <label className="tc-field">
+                                <span>{t("内部模型名", "Internal Model Name")}</span>
+                                <Input
+                                  value={item.targetModel}
+                                  onChange={(value) =>
+                                    updateKeyModelMapping(item.id, (prev) => ({
+                                      ...prev,
+                                      targetModel: value
+                                    }))
+                                  }
+                                  placeholder={t("如：glm-5 / gpt-4.1-mini", "e.g. glm-5 / gpt-4.1-mini")}
+                                  clearable
+                                />
+                              </label>
+
+                              {showGlmThinkingControl ? (
+                                <label className="tc-field">
+                                  <span>
+                                    {t(
+                                      "GLM 深度思考触发阈值",
+                                      "GLM Deep Thinking Threshold"
+                                    )}
+                                  </span>
+                                  <Select
+                                    value={targetProfile?.glmCodexThinkingThreshold ?? "low"}
+                                    options={GLM_CODEX_THINKING_THRESHOLDS.map((threshold) => ({
+                                      value: threshold,
+                                      label: formatGlmThinkingThresholdLabel(threshold)
+                                    }))}
+                                    onChange={(value) =>
+                                      void updateBoundChannelGlmThinkingThreshold(
+                                        item.targetModel,
+                                        normalizeGlmCodexThinkingThreshold(
+                                          normalizeSelectValue(value)
+                                        )
+                                      )
+                                    }
+                                    disabled={
+                                      loading ||
+                                      savingKey ||
+                                      savingChannel ||
+                                      !selectedChannelForKey ||
+                                      !targetProfile
+                                    }
+                                  />
+                                </label>
+                              ) : null}
+
+                              {showGlmThinkingControl && targetProfile ? (
+                                <p className="tc-upstream-advice tc-field-wide">
+                                  {t(
+                                    `当前映射会继承绑定渠道「${selectedChannelForKey?.name ?? ""}」中内部模型 ${targetProfile.model} 的思考阈值设置。达到该力度时，Codex 的 reasoning_effort 才会自动映射为 GLM thinking.enabled。`,
+                                    `This mapping inherits the thinking threshold from internal model ${targetProfile.model} in bound channel ${selectedChannelForKey?.name ?? ""}. Codex reasoning_effort only auto-maps to GLM thinking.enabled once the threshold is reached.`
+                                  )}
+                                </p>
+                              ) : null}
+
+                              {showGlmThinkingControl && !targetProfile ? (
+                                <p className="tc-tip err tc-field-wide">
+                                  {t(
+                                    "这是一个 GLM 目标模型，但当前绑定渠道的模型池里还没有找到同名内部模型，所以暂时无法设置思考阈值。请先在上游渠道模型池中添加或修正该模型。",
+                                    "This is a GLM target model, but no matching internal model was found in the bound channel model pool yet, so the thinking threshold cannot be configured here. Add or fix the model in the upstream channel pool first."
+                                  )}
+                                </p>
+                              ) : null}
                             </div>
                           </div>
-
-                          <div className="tc-form-grid">
-                            <label className="tc-field">
-                              <span>{t("客户端模型名", "Client Model Name")}</span>
-                              <Input
-                                value={item.clientModel}
-                                onChange={(value) =>
-                                  updateKeyModelMapping(item.id, (prev) => ({
-                                    ...prev,
-                                    clientModel: value
-                                  }))
-                                }
-                                placeholder={t("如：gpt-5.3-codex", "e.g. gpt-5.3-codex")}
-                                clearable
-                              />
-                            </label>
-
-                            <label className="tc-field">
-                              <span>{t("内部模型名", "Internal Model Name")}</span>
-                              <Input
-                                value={item.targetModel}
-                                onChange={(value) =>
-                                  updateKeyModelMapping(item.id, (prev) => ({
-                                    ...prev,
-                                    targetModel: value
-                                  }))
-                                }
-                                placeholder={t("如：glm-5 / gpt-4.1-mini", "e.g. glm-5 / gpt-4.1-mini")}
-                                clearable
-                              />
-                            </label>
-                          </div>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   ) : (
                     <p className="tc-upstream-advice">
@@ -3487,6 +3767,207 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                     <pre className="tc-json-fallback">
                       {codexConfigTomlPreview || t("请先填写本地 Key 后查看配置预览。", "Fill local key to preview config.")}
                     </pre>
+
+                    <div className="tc-runtime-doc-head">
+                      <h4>{t("原生 Codex CLI 导出", "Native Codex CLI Export")}</h4>
+                      <Tag theme="primary" variant="light-outline">
+                        {t("推荐", "Recommended")}
+                      </Tag>
+                    </div>
+                    <Tabs
+                      value={nativeCodexApplyPatchToolType}
+                      size="medium"
+                      theme="card"
+                      onChange={(value) =>
+                        setNativeCodexApplyPatchToolType(
+                          normalizeSelectValue(value) as CodexApplyPatchToolType
+                        )
+                      }
+                    >
+                      <Tabs.TabPanel
+                        value="function"
+                        label={t("Function（推荐）", "Function (Recommended)")}
+                      />
+                      <Tabs.TabPanel value="freeform" label="Freeform" />
+                    </Tabs>
+                    <p className="tc-upstream-advice">
+                      {t(
+                        "说明：CC Switch 导入仍是旧流程。原生 Codex 要让第三方模型稳定支持 apply_patch，还需要同时配置 `model_catalog_json` 与 `model_instructions_file`；`AGENTS.md` 为可选工作区补充。",
+                        "Note: CC Switch import remains the legacy flow. Native Codex needs both `model_catalog_json` and `model_instructions_file` for stable third-party apply_patch support; `AGENTS.md` is an optional workspace supplement."
+                      )}
+                    </p>
+                    {nativeCodexExportBundle ? (
+                      <div className="tc-meta-row">
+                        <Tag theme="primary" variant="light-outline">
+                          {t("当前模型", "Selected Model")}: {nativeCodexExportBundle.selectedModel}
+                        </Tag>
+                        <Tag variant="light-outline">
+                          {t("导出模型数", "Exported Models")}: {nativeCodexExportBundle.exportedModels.length}
+                        </Tag>
+                        <Tag variant="light-outline">
+                          apply_patch: {nativeCodexExportBundle.applyPatchToolType}
+                        </Tag>
+                        {nativeCodexSelectedModelProfile &&
+                        shouldShowGlmThinkingThreshold(
+                          selectedKey?.provider ?? selectedChannelForKey?.provider ?? "openai",
+                          nativeCodexSelectedModelProfile.model
+                        ) ? (
+                          <Tag variant="light-outline">
+                            {t("GLM 深度思考", "GLM Deep Thinking")}:{" "}
+                            {formatGlmThinkingThresholdLabel(
+                              nativeCodexSelectedModelProfile.glmCodexThinkingThreshold
+                            )}
+                          </Tag>
+                        ) : null}
+                      </div>
+                    ) : null}
+                    {selectedKeyId !== null ? (
+                      <p className="tc-upstream-advice">
+                        {t(
+                          "已保存 Key 也可通过 `/api/keys/:id/codex-export` 获取相同导出结果。",
+                          "Saved keys can also fetch the same bundle from `/api/keys/:id/codex-export`."
+                        )}
+                      </p>
+                    ) : null}
+
+                    <div className="tc-runtime-doc-head">
+                      <h4>{t("~/.codex/.env 片段", "~/.codex/.env Snippet")}</h4>
+                      <Button
+                        variant="outline"
+                        theme="default"
+                        onClick={() =>
+                          void copyNativeCodexBundleFile(
+                            "envSnippet",
+                            t("原生 Codex .env 片段已复制。", "Native Codex .env snippet copied."),
+                            t("复制原生 Codex .env 片段失败", "Failed to copy native Codex .env snippet")
+                          )
+                        }
+                        disabled={loading || !nativeCodexExportBundle}
+                      >
+                        {t("复制 .env 片段", "Copy .env Snippet")}
+                      </Button>
+                    </div>
+                    <pre className="tc-json-fallback">
+                      {nativeCodexExportBundle?.files.envSnippet.content || nativeCodexEmptyState}
+                    </pre>
+                    <p className="tc-upstream-advice">
+                      {t("建议路径", "Suggested path")}:{" "}
+                      {nativeCodexExportBundle?.files.envSnippet.targetPath ?? "~/.codex/.env"}
+                    </p>
+
+                    <div className="tc-runtime-doc-head">
+                      <h4>{t("原生 Codex config.toml 片段", "Native Codex config.toml Snippet")}</h4>
+                      <Button
+                        variant="outline"
+                        theme="default"
+                        onClick={() =>
+                          void copyNativeCodexBundleFile(
+                            "configTomlSnippet",
+                            t("原生 Codex config.toml 片段已复制。", "Native Codex config.toml snippet copied."),
+                            t(
+                              "复制原生 Codex config.toml 片段失败",
+                              "Failed to copy native Codex config.toml snippet"
+                            )
+                          )
+                        }
+                        disabled={loading || !nativeCodexExportBundle}
+                      >
+                        {t("复制原生 config.toml", "Copy Native config.toml")}
+                      </Button>
+                    </div>
+                    <pre className="tc-json-fallback">
+                      {nativeCodexExportBundle?.files.configTomlSnippet.content || nativeCodexEmptyState}
+                    </pre>
+                    <p className="tc-upstream-advice">
+                      {t("建议路径", "Suggested path")}:{" "}
+                      {nativeCodexExportBundle?.files.configTomlSnippet.targetPath ?? "~/.codex/config.toml"}
+                    </p>
+
+                    <div className="tc-runtime-doc-head">
+                      <h4>{t("原生 Codex model_catalog_json", "Native Codex model_catalog_json")}</h4>
+                      <Button
+                        variant="outline"
+                        theme="default"
+                        onClick={() =>
+                          void copyNativeCodexBundleFile(
+                            "modelCatalogJson",
+                            t(
+                              "原生 Codex model_catalog_json 已复制。",
+                              "Native Codex model_catalog_json copied."
+                            ),
+                            t(
+                              "复制原生 Codex model_catalog_json 失败",
+                              "Failed to copy native Codex model_catalog_json"
+                            )
+                          )
+                        }
+                        disabled={loading || !nativeCodexExportBundle}
+                      >
+                        {t("复制 model_catalog_json", "Copy model_catalog_json")}
+                      </Button>
+                    </div>
+                    <pre className="tc-json-fallback">
+                      {nativeCodexExportBundle?.files.modelCatalogJson.content || nativeCodexEmptyState}
+                    </pre>
+                    <p className="tc-upstream-advice">
+                      {t("建议路径", "Suggested path")}:{" "}
+                      {nativeCodexExportBundle?.files.modelCatalogJson.targetPath ??
+                        "~/.codex/codex-gateway-hub/export.catalog.json"}
+                    </p>
+
+                    <div className="tc-runtime-doc-head">
+                      <h4>{t("原生 Codex instructions", "Native Codex instructions")}</h4>
+                      <Button
+                        variant="outline"
+                        theme="default"
+                        onClick={() =>
+                          void copyNativeCodexBundleFile(
+                            "modelInstructionsMd",
+                            t("原生 Codex instructions 已复制。", "Native Codex instructions copied."),
+                            t(
+                              "复制原生 Codex instructions 失败",
+                              "Failed to copy native Codex instructions"
+                            )
+                          )
+                        }
+                        disabled={loading || !nativeCodexExportBundle}
+                      >
+                        {t("复制 instructions", "Copy instructions")}
+                      </Button>
+                    </div>
+                    <pre className="tc-json-fallback">
+                      {nativeCodexExportBundle?.files.modelInstructionsMd.content || nativeCodexEmptyState}
+                    </pre>
+                    <p className="tc-upstream-advice">
+                      {t("建议路径", "Suggested path")}:{" "}
+                      {nativeCodexExportBundle?.files.modelInstructionsMd.targetPath ??
+                        "~/.codex/codex-gateway-hub/export.instructions.md"}
+                    </p>
+
+                    <div className="tc-runtime-doc-head">
+                      <h4>{t("可选 AGENTS.md", "Optional AGENTS.md")}</h4>
+                      <Button
+                        variant="outline"
+                        theme="default"
+                        onClick={() =>
+                          void copyNativeCodexBundleFile(
+                            "agentsMd",
+                            t("原生 Codex AGENTS.md 已复制。", "Native Codex AGENTS.md copied."),
+                            t("复制原生 Codex AGENTS.md 失败", "Failed to copy native Codex AGENTS.md")
+                          )
+                        }
+                        disabled={loading || !nativeCodexExportBundle}
+                      >
+                        {t("复制 AGENTS.md", "Copy AGENTS.md")}
+                      </Button>
+                    </div>
+                    <pre className="tc-json-fallback">
+                      {nativeCodexExportBundle?.files.agentsMd.content || nativeCodexEmptyState}
+                    </pre>
+                    <p className="tc-upstream-advice">
+                      {t("建议路径", "Suggested path")}:{" "}
+                      {nativeCodexExportBundle?.files.agentsMd.targetPath ?? "./AGENTS.md"}
+                    </p>
 
                     <div className="tc-runtime-doc-head">
                       <h4>{t("Claude Code 配置预览（JSON）", "Claude Code Config Preview (JSON)")}</h4>
@@ -3820,6 +4301,35 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                             />
                           </label>
 
+                          {shouldShowGlmThinkingThreshold(
+                            channelForm.provider,
+                            item.model
+                          ) ? (
+                            <label className="tc-field">
+                              <span>
+                                {t(
+                                  "GLM 深度思考触发阈值",
+                                  "GLM Deep Thinking Threshold"
+                                )}
+                              </span>
+                              <Select
+                                value={item.glmCodexThinkingThreshold}
+                                options={GLM_CODEX_THINKING_THRESHOLDS.map((threshold) => ({
+                                  value: threshold,
+                                  label: formatGlmThinkingThresholdLabel(threshold)
+                                }))}
+                                onChange={(value) =>
+                                  updateUpstreamModel(item.id, (prev) => ({
+                                    ...prev,
+                                    glmCodexThinkingThreshold: normalizeGlmCodexThinkingThreshold(
+                                      normalizeSelectValue(value)
+                                    )
+                                  }))
+                                }
+                              />
+                            </label>
+                          ) : null}
+
                           <label className="tc-switchline">
                             <span>{t("启用模型", "Model Enabled")}</span>
                             <Switch
@@ -3832,6 +4342,18 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                               }
                             />
                           </label>
+
+                          {shouldShowGlmThinkingThreshold(
+                            channelForm.provider,
+                            item.model
+                          ) ? (
+                            <p className="tc-upstream-advice tc-field-wide">
+                              {t(
+                                "当 Codex 通过本模型请求 `reasoning_effort` 时，达到这里设置的力度才会自动映射为 GLM 的 `thinking.enabled`。`off` 表示永不自动开启；如果客户端显式发送 `thinking.type`，仍以客户端为准。",
+                                "When Codex sends `reasoning_effort` through this model, GLM `thinking.enabled` will only be auto-enabled once the request reaches this threshold. `off` disables auto-enable; explicit client `thinking.type` still wins."
+                              )}
+                            </p>
+                          ) : null}
 
                           <label className="tc-switchline">
                             <span>{t("主模型支持视觉", "Main Model Supports Vision")}</span>
@@ -4373,6 +4895,14 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                               <span className="tc-log-id">log#{item.id}</span>
                             </div>
                           </div>
+                          {item.conversationTranscript?.trim() ? (
+                            <div className="tc-log-panels">
+                              <div className="tc-log-panel tc-log-panel-full">
+                                <strong>完整上下文</strong>
+                                <MarkdownLogBlock value={item.conversationTranscript} />
+                              </div>
+                            </div>
+                          ) : null}
                           <div className="tc-log-panels">
                             <div className="tc-log-panel">
                               <strong>系统提示词</strong>

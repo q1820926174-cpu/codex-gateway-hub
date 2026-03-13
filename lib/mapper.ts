@@ -3,6 +3,7 @@ type LegacyRole = "system" | "user" | "assistant" | "tool";
 export type LegacyChatMessage = {
   role: LegacyRole;
   content: unknown;
+  reasoning_content?: unknown;
   name?: string;
   tool_call_id?: string;
   tool_calls?: unknown;
@@ -368,6 +369,73 @@ export function mapLegacyCompletionToResponses(body: LegacyCompletionRequest, de
   };
 }
 
+function stringifyResponsesToolOutput(output: unknown): string {
+  return typeof output === "string" ? output : output == null ? "" : JSON.stringify(output);
+}
+
+function stringifyResponsesCustomToolArguments(input: unknown): string {
+  return JSON.stringify({
+    input:
+      typeof input === "string" ? input : input == null ? "" : JSON.stringify(input)
+  });
+}
+
+function extractResponsesCustomToolInput(input: unknown, allowFallback = true): string | null {
+  if (typeof input === "string") {
+    try {
+      const parsed = JSON.parse(input);
+      if (parsed && typeof parsed === "object" && "input" in parsed) {
+        const nestedInput = (parsed as { input?: unknown }).input;
+        return typeof nestedInput === "string"
+          ? nestedInput
+          : nestedInput == null
+            ? ""
+            : JSON.stringify(nestedInput);
+      }
+    } catch {
+      if (!allowFallback) {
+        return null;
+      }
+    }
+    return input;
+  }
+  if (input && typeof input === "object" && "input" in input) {
+    const nestedInput = (input as { input?: unknown }).input;
+    return typeof nestedInput === "string"
+      ? nestedInput
+      : nestedInput == null
+        ? ""
+        : JSON.stringify(nestedInput);
+  }
+  if (!allowFallback) {
+    return null;
+  }
+  return input == null ? "" : JSON.stringify(input);
+}
+
+function buildResponsesCustomToolDescription(
+  description: string | undefined,
+  format: unknown
+): string | undefined {
+  const parts: string[] = [];
+  if (typeof description === "string" && description.trim()) {
+    parts.push(description.trim());
+  }
+  if (format && typeof format === "object") {
+    const type = "type" in format ? (format as { type?: unknown }).type : undefined;
+    const syntax = "syntax" in format ? (format as { syntax?: unknown }).syntax : undefined;
+    const definition = "definition" in format ? (format as { definition?: unknown }).definition : undefined;
+    if (type === "grammar" && typeof definition === "string" && definition.trim()) {
+      parts.push(
+        `Return a JSON object with field "input" containing the raw tool payload that matches the${typeof syntax === "string" && syntax.trim() ? ` ${syntax.trim()}` : ""} grammar:\n${definition.trim()}`
+      );
+    } else if (typeof type === "string" && type.trim()) {
+      parts.push(`Return a JSON object with field "input" containing the raw ${type.trim()} tool payload.`);
+    }
+  }
+  return parts.length ? parts.join("\n\n") : undefined;
+}
+
 function normalizeResponsesInputToLegacyMessages(input: unknown): LegacyChatCompletionMessage[] {
   if (typeof input === "string") {
     return [{ role: "user", content: input }];
@@ -395,22 +463,20 @@ function normalizeResponsesInputToLegacyMessages(input: unknown): LegacyChatComp
       continue;
     }
     const explicitType = "type" in entry ? (entry as { type?: unknown }).type : undefined;
-    if (explicitType === "function_call_output") {
+    if (explicitType === "function_call_output" || explicitType === "custom_tool_call_output") {
       const callId = "call_id" in entry ? (entry as { call_id?: unknown }).call_id : undefined;
       if (typeof callId !== "string" || !callId.trim()) {
         continue;
       }
       const output = "output" in entry ? (entry as { output?: unknown }).output : "";
-      const outputText =
-        typeof output === "string" ? output : output == null ? "" : JSON.stringify(output);
       messages.push({
         role: "tool",
         tool_call_id: callId.trim(),
-        content: outputText
+        content: stringifyResponsesToolOutput(output)
       });
       continue;
     }
-    if (explicitType === "function_call") {
+    if (explicitType === "function_call" || explicitType === "custom_tool_call") {
       const rawCallId = "call_id" in entry ? (entry as { call_id?: unknown }).call_id : undefined;
       const callId =
         typeof rawCallId === "string" && rawCallId.trim()
@@ -419,13 +485,22 @@ function normalizeResponsesInputToLegacyMessages(input: unknown): LegacyChatComp
       const rawName = "name" in entry ? (entry as { name?: unknown }).name : undefined;
       const name =
         typeof rawName === "string" && rawName.trim() ? rawName.trim() : "unknown_tool";
-      const rawArguments = "arguments" in entry ? (entry as { arguments?: unknown }).arguments : "";
+      const rawArguments =
+        explicitType === "custom_tool_call"
+          ? "input" in entry
+            ? (entry as { input?: unknown }).input
+            : ("arguments" in entry ? (entry as { arguments?: unknown }).arguments : "")
+          : "arguments" in entry
+            ? (entry as { arguments?: unknown }).arguments
+            : ("input" in entry ? (entry as { input?: unknown }).input : "");
       const argumentsText =
-        typeof rawArguments === "string"
-          ? rawArguments
-          : rawArguments == null
-            ? ""
-            : JSON.stringify(rawArguments);
+        explicitType === "custom_tool_call"
+          ? stringifyResponsesCustomToolArguments(rawArguments)
+          : typeof rawArguments === "string"
+            ? rawArguments
+            : rawArguments == null
+              ? ""
+              : JSON.stringify(rawArguments);
       messages.push({
         role: "assistant",
         content: "",
@@ -577,13 +652,9 @@ function normalizeResponsesToolsForLegacyChat(tools: unknown): unknown[] | undef
         return null;
       }
       const type = "type" in tool ? (tool as { type?: unknown }).type : undefined;
-      if (type !== "function") {
-        return null;
-      }
-
       const nestedFunction =
         "function" in tool ? (tool as { function?: unknown }).function : undefined;
-      if (nestedFunction && typeof nestedFunction === "object") {
+      if (type === "function" && nestedFunction && typeof nestedFunction === "object") {
         return {
           type: "function",
           function: nestedFunction
@@ -598,6 +669,39 @@ function normalizeResponsesToolsForLegacyChat(tools: unknown): unknown[] | undef
         "description" in tool ? (tool as { description?: unknown }).description : undefined;
       const parameters =
         "parameters" in tool ? (tool as { parameters?: unknown }).parameters : undefined;
+      if (type === "custom") {
+        const format = "format" in tool ? (tool as { format?: unknown }).format : undefined;
+        return {
+          type: "function",
+          function: {
+            name: name.trim(),
+            ...(buildResponsesCustomToolDescription(
+              typeof description === "string" ? description : undefined,
+              format
+            )
+              ? {
+                  description: buildResponsesCustomToolDescription(
+                    typeof description === "string" ? description : undefined,
+                    format
+                  )
+                }
+              : {}),
+            parameters: {
+              type: "object",
+              properties: {
+                input: {
+                  type: "string"
+                }
+              },
+              required: ["input"],
+              additionalProperties: false
+            }
+          }
+        };
+      }
+      if (type !== "function") {
+        return null;
+      }
 
       return {
         type: "function",
@@ -621,13 +725,13 @@ function normalizeResponsesToolChoiceForLegacyChat(toolChoice: unknown): unknown
   }
 
   const type = "type" in toolChoice ? (toolChoice as { type?: unknown }).type : undefined;
-  if (type !== "function") {
+  if (type !== "function" && type !== "custom") {
     return toolChoice;
   }
 
   const nestedFunction =
     "function" in toolChoice ? (toolChoice as { function?: unknown }).function : undefined;
-  if (nestedFunction && typeof nestedFunction === "object") {
+  if (type === "function" && nestedFunction && typeof nestedFunction === "object") {
     return {
       type: "function",
       function: nestedFunction
@@ -684,6 +788,7 @@ export function mapResponsesRequestToLegacyChat(
     temperature: body.temperature,
     max_tokens: body.max_output_tokens,
     top_p: body.top_p,
+    ...(body.reasoning && typeof body.reasoning === "object" ? { reasoning: body.reasoning } : {}),
     ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
     ...(verbosity ? { verbosity } : {}),
     ...(tools ? { tools } : {}),
@@ -970,7 +1075,13 @@ function extractLegacyChatCompletionReasoning(responseJson: unknown): string {
     .trim();
 }
 
-export function mapLegacyChatCompletionToResponses(responseJson: unknown, fallbackModel: string) {
+export function mapLegacyChatCompletionToResponses(
+  responseJson: unknown,
+  fallbackModel: string,
+  options?: {
+    customToolNames?: Iterable<string>;
+  }
+) {
   const payload = responseJson as {
     id?: string;
     model?: string;
@@ -1009,6 +1120,11 @@ export function mapLegacyChatCompletionToResponses(responseJson: unknown, fallba
     : promptTokens + completionTokens;
   const outputText = extractLegacyChatCompletionText(responseJson);
   const reasoningText = extractLegacyChatCompletionReasoning(responseJson);
+  const customToolNames = new Set(
+    Array.from(options?.customToolNames ?? [])
+      .map((name) => (typeof name === "string" ? name.trim() : ""))
+      .filter(Boolean)
+  );
   const toolCalls = (payload.choices?.[0]?.message?.tool_calls ?? [])
     .map((item, index) => {
       if (!item || typeof item !== "object") {
@@ -1034,11 +1150,26 @@ export function mapLegacyChatCompletionToResponses(responseJson: unknown, fallba
           : rawArguments == null
             ? ""
             : JSON.stringify(rawArguments);
+      const customInput = customToolNames.has(name)
+        ? extractResponsesCustomToolInput(rawArguments)
+        : null;
+      if (customInput !== null) {
+        return {
+          id: callId,
+          type: "custom_tool_call" as const,
+          call_id: callId,
+          name,
+          input: customInput,
+          status: "completed" as const
+        };
+      }
       return {
+        id: callId,
         type: "function_call" as const,
         call_id: callId,
         name,
-        arguments: argumentsText
+        arguments: argumentsText,
+        status: "completed" as const
       };
     })
     .filter((item): item is NonNullable<typeof item> => item !== null);
@@ -1046,7 +1177,15 @@ export function mapLegacyChatCompletionToResponses(responseJson: unknown, fallba
   const outputItems: Array<unknown> = [];
   if (reasoningText) {
     outputItems.push({
+      id: `rs_${crypto.randomUUID().replace(/-/g, "")}`,
       type: "reasoning",
+      status: "completed",
+      content: [
+        {
+          type: "reasoning_text",
+          text: reasoningText
+        }
+      ],
       summary: [
         {
           type: "summary_text",
@@ -1057,8 +1196,10 @@ export function mapLegacyChatCompletionToResponses(responseJson: unknown, fallba
   }
   if (outputText) {
     outputItems.push({
+      id: `msg_${crypto.randomUUID().replace(/-/g, "")}`,
       type: "message",
       role: "assistant",
+      status: "completed",
       content: [
         {
           type: "output_text",
@@ -1072,8 +1213,10 @@ export function mapLegacyChatCompletionToResponses(responseJson: unknown, fallba
   }
   if (!outputItems.length) {
     outputItems.push({
+      id: `msg_${crypto.randomUUID().replace(/-/g, "")}`,
       type: "message",
       role: "assistant",
+      status: "completed",
       content: [
         {
           type: "output_text",

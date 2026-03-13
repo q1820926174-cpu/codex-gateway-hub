@@ -26,6 +26,7 @@ The main purpose of this project is to connect legacy third-party OpenAI-compati
 - OpenAI + Anthropic 兼容网关：`/v1/chat/completions`、`/v1/completions`、`/v1/responses`、`/v1/messages`；上游支持 `responses`、`chat_completions`、`anthropic_messages` / OpenAI + Anthropic-compatible gateway endpoints with three upstream wire APIs.
 - 三线兼容上游协议：`responses` + `chat_completions` + `anthropic_messages` / Triple upstream protocol compatibility.
 - 多 Key + 多渠道 + 每 Key 独立模型映射 / Multi keys + multi channels + per-key model mapping.
+- GLM 渠道支持按 Codex `reasoning_effort` 阈值映射深度思考，阈值可在前端模型配置中调整 / GLM channels can map Codex `reasoning_effort` into deep-thinking mode with a configurable frontend threshold.
 - 跨渠道视觉兜底（主模型不支持视觉时先图片转文本） / Cross-channel vision fallback when primary model lacks image support.
 - 运行时 API 切模、清空覆盖、启停 Key / Runtime model switching, override clearing, and key enable or disable.
 - 控制台入口暗号保护 + Cookie 鉴权 / Entry-secret protected console access with cookie-based auth.
@@ -228,6 +229,7 @@ npm run db:migrate:from-sqlite -- \
 - `GET /api/keys/:id`
 - `PUT /api/keys/:id`
 - `DELETE /api/keys/:id`
+- `GET /api/keys/:id/codex-export`（导出原生 Codex CLI 配置包 / export native Codex CLI bundle）
 - `GET /api/upstreams`
 - `POST /api/upstreams`
 - `GET /api/upstreams/:id`
@@ -426,6 +428,39 @@ base_url = "http://127.0.0.1:3000/v1"
 wire_api = "responses"
 model = "gpt-4.1-mini"
 ```
+
+## Third-party Codex apply_patch / 第三方 Codex apply_patch
+
+- 网关侧现有的 Responses 与工具调用映射已经足够；本项目这次补的是原生 Codex 导出侧的元数据与指令文件。 / The gateway-side Responses and tool-call mapping is already sufficient; this project now fills in the native Codex export metadata and instruction files.
+- 要让第三方模型在原生 Codex 里稳定支持 `apply_patch`，不能只配 `base_url` 与 `wire_api`；还需要同时提供 `model_catalog_json` 与 `model_instructions_file`。 / Stable third-party `apply_patch` support in native Codex needs more than `base_url` and `wire_api`; it also requires both `model_catalog_json` and `model_instructions_file`.
+- 控制台 `Access` 页面新增了 `Native Codex CLI Export` 预览，可直接复制 `.env`、`config.toml` 片段、`model_catalog_json`、`instructions` 与可选 `AGENTS.md`。 / The `Access` console now includes a `Native Codex CLI Export` preview for copying the `.env`, `config.toml` snippet, `model_catalog_json`, `instructions`, and optional `AGENTS.md`.
+- 已保存的 Key 也可以调用 `GET /api/keys/:id/codex-export?applyPatchToolType=function|freeform` 获取同一份导出结果。 / Saved keys can also fetch the same export bundle from `GET /api/keys/:id/codex-export?applyPatchToolType=function|freeform`.
+- 推荐先使用 `function` 模式；如果你的上游代理或模型对 freeform/custom 工具更稳定，再切到 `freeform`。 / Start with `function` mode; switch to `freeform` only if your upstream proxy or model behaves better with freeform/custom tools.
+
+推荐的原生 Codex 片段 / Recommended native Codex snippet:
+
+```toml
+model_provider = "gateway"
+model = "gpt-5.3-codex"
+model_reasoning_effort = "high"
+disable_response_storage = true
+model_catalog_json = "~/.codex/codex-gateway-hub/gateway_gpt-5.3-codex.catalog.json"
+model_instructions_file = "~/.codex/codex-gateway-hub/gateway_gpt-5.3-codex.instructions.md"
+
+[model_providers.gateway]
+name = "gateway"
+base_url = "http://127.0.0.1:3000/v1"
+env_key = "OPENAI_API_KEY"
+wire_api = "responses"
+```
+
+最小探针验证 / Minimal probe validation:
+
+1. 创建 `probe_codex.txt`，内容写成 `hello`。 / Create `probe_codex.txt` with `hello`.
+2. 把 `probe_codex.txt` 改成 `hello world`。 / Update `probe_codex.txt` to `hello world`.
+3. 删除 `probe_codex.txt`。 / Delete `probe_codex.txt`.
+
+如果配置正确，Codex 应该触发真实文件编辑，而不是把 patch 文本直接打印在对话里。 / When configured correctly, Codex should trigger real file edits instead of printing the patch in chat output.
 
 ## Notes / 说明
 

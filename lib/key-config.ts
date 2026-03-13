@@ -3,6 +3,8 @@ import { defaultBaseUrlForProvider, PROVIDERS, sanitizeBaseUrl, type ProviderNam
 
 export const UPSTREAM_WIRE_APIS = ["responses", "chat_completions", "anthropic_messages"] as const;
 export type UpstreamWireApi = (typeof UPSTREAM_WIRE_APIS)[number];
+export const GLM_CODEX_THINKING_THRESHOLDS = ["off", "low", "medium", "high"] as const;
+export type GlmCodexThinkingThreshold = (typeof GLM_CODEX_THINKING_THRESHOLDS)[number];
 
 export function normalizeUpstreamWireApiValue(value: string | null | undefined): UpstreamWireApi {
   if (value === "chat_completions") {
@@ -13,6 +15,22 @@ export function normalizeUpstreamWireApiValue(value: string | null | undefined):
   }
   return "responses";
 }
+
+export function normalizeGlmCodexThinkingThresholdValue(
+  value: string | null | undefined
+): GlmCodexThinkingThreshold {
+  if (value === "off") {
+    return "off";
+  }
+  if (value === "medium") {
+    return "medium";
+  }
+  if (value === "high") {
+    return "high";
+  }
+  return "low";
+}
+
 const MAX_UPSTREAM_MODELS = 64;
 const MAX_KEY_MODEL_MAPPINGS = 128;
 export const OPENAI_STYLE_LOCAL_KEY_REGEX = /^sk-(?:proj-)?[A-Za-z0-9_-]{20,}$/;
@@ -27,6 +45,10 @@ const upstreamModelSchema = z
     model: z.string().min(1).max(256),
     contextWindow: z.number().int().min(256).max(20_000_000).nullable().optional(),
     upstreamWireApi: z.enum(UPSTREAM_WIRE_APIS).default("responses"),
+    glmCodexThinkingThreshold: z
+      .enum(GLM_CODEX_THINKING_THRESHOLDS)
+      .default("low")
+      .optional(),
     supportsVision: z.boolean().default(true),
     visionChannelId: z.number().int().positive().nullable().optional(),
     visionModel: z.string().min(1).max(256).nullable().optional(),
@@ -58,6 +80,7 @@ export type UpstreamModelConfig = {
   model: string;
   contextWindow: number | null;
   upstreamWireApi: UpstreamWireApi;
+  glmCodexThinkingThreshold: GlmCodexThinkingThreshold;
   supportsVision: boolean;
   visionChannelId: number | null;
   visionModel: string | null;
@@ -126,6 +149,7 @@ function fallbackModel(fallback: UpstreamModelFallback): UpstreamModelConfig {
     model: fallback.model.trim(),
     contextWindow: null,
     upstreamWireApi: fallback.upstreamWireApi,
+    glmCodexThinkingThreshold: "low",
     supportsVision: useSupportsVision,
     visionChannelId: null,
     visionModel: useSupportsVision ? null : normalizedVisionModel,
@@ -151,6 +175,9 @@ export function normalizeUpstreamModels(
       model: item.model.trim(),
       contextWindow: typeof item.contextWindow === "number" ? item.contextWindow : null,
       upstreamWireApi: item.upstreamWireApi,
+      glmCodexThinkingThreshold: normalizeGlmCodexThinkingThresholdValue(
+        item.glmCodexThinkingThreshold
+      ),
       supportsVision: item.supportsVision,
       visionChannelId: item.visionChannelId ?? null,
       visionModel: item.supportsVision ? null : item.visionModel?.trim() ?? null,
@@ -182,7 +209,7 @@ export function ensureModelExistsInPool(
   models: UpstreamModelConfig[],
   model: string,
   fallback: Omit<UpstreamModelFallback, "model">
-) {
+): UpstreamModelConfig[] {
   const targetModel = model.trim();
   if (!targetModel) {
     return models;
@@ -206,6 +233,7 @@ export function ensureModelExistsInPool(
       model: targetModel,
       contextWindow: null,
       upstreamWireApi: fallback.upstreamWireApi,
+      glmCodexThinkingThreshold: "low",
       supportsVision: useSupportsVision,
       visionChannelId: null,
       visionModel: useSupportsVision ? null : normalizedVisionModel,

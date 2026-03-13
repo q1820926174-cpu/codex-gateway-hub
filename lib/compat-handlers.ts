@@ -38,7 +38,13 @@ import {
   resolveGatewayKey
 } from "@/lib/upstream";
 import { prisma } from "@/lib/prisma";
-import { mapModelByKeyMappings, normalizeUpstreamModels, normalizeUpstreamWireApiValue } from "@/lib/key-config";
+import {
+  mapModelByKeyMappings,
+  normalizeGlmCodexThinkingThresholdValue,
+  normalizeUpstreamModels,
+  normalizeUpstreamWireApiValue,
+  type GlmCodexThinkingThreshold
+} from "@/lib/key-config";
 import { normalizeUpstreamModelCode } from "@/lib/providers";
 import {
   estimateLegacyChatTokens,
@@ -69,10 +75,82 @@ function mapRequestedModelForKey(requestedModel: string, key: ResolvedGatewayKey
   return mapModelByKeyMappings(requestedModel, key.modelMappings);
 }
 
+function collectCustomToolNamesFromResponsesRequest(body: ResponsesRequest): Set<string> {
+  const names = new Set<string>();
+  const addName = (value: unknown) => {
+    if (typeof value !== "string") {
+      return;
+    }
+    const normalized = value.trim();
+    if (normalized) {
+      names.add(normalized);
+    }
+  };
+
+  if (Array.isArray(body.tools)) {
+    for (const tool of body.tools) {
+      if (!tool || typeof tool !== "object") {
+        continue;
+      }
+      const type = "type" in tool ? (tool as { type?: unknown }).type : undefined;
+      if (type === "custom") {
+        addName("name" in tool ? (tool as { name?: unknown }).name : undefined);
+      }
+    }
+  }
+
+  if (body.tool_choice && typeof body.tool_choice === "object") {
+    const type =
+      "type" in body.tool_choice
+        ? (body.tool_choice as { type?: unknown }).type
+        : undefined;
+    if (type === "custom") {
+      addName("name" in body.tool_choice ? (body.tool_choice as { name?: unknown }).name : undefined);
+    }
+  }
+
+  return names;
+}
+
+function extractCustomToolInputFromChatArguments(
+  rawArguments: unknown,
+  allowFallback = true
+): string | null {
+  if (typeof rawArguments === "string") {
+    try {
+      const parsed = JSON.parse(rawArguments);
+      if (parsed && typeof parsed === "object" && "input" in parsed) {
+        const input = (parsed as { input?: unknown }).input;
+        return typeof input === "string"
+          ? input
+          : input == null
+            ? ""
+            : JSON.stringify(input);
+      }
+      return allowFallback ? rawArguments : null;
+    } catch {
+      return allowFallback ? rawArguments : null;
+    }
+  }
+  if (rawArguments && typeof rawArguments === "object" && "input" in rawArguments) {
+    const input = (rawArguments as { input?: unknown }).input;
+    return typeof input === "string"
+      ? input
+      : input == null
+        ? ""
+        : JSON.stringify(input);
+  }
+  if (!allowFallback) {
+    return null;
+  }
+  return rawArguments == null ? "" : JSON.stringify(rawArguments);
+}
+
 type RuntimeModelResolved = {
   runtimeKey: ResolvedGatewayKey;
   upstreamModel: string;
   clientModel: string;
+  profile: ResolvedGatewayKey["upstreamModels"][number] | null;
 };
 
 type RequestWireApi = "responses" | "chat_completions" | "completions" | "anthropic_messages";
@@ -88,9 +166,17 @@ type UsageTraceContext = {
   stream: boolean;
   systemPrompt: string;
   userPrompt: string;
+  conversationTranscript: string;
 };
 
-const MAX_LOG_TEXT_CHARS = 12_000;
+type PromptSnapshot = {
+  systemPrompt: string;
+  userPrompt: string;
+  conversationTranscript: string;
+};
+
+const MAX_LOG_TEXT_CHARS = 40_000;
+const MAX_LOG_TRANSCRIPT_CHARS = 120_000;
 
 function classifyAnthropicErrorType(status: number) {
   if (status === 401 || status === 403) {
@@ -166,7 +252,53 @@ function clipLogText(value: string, max = MAX_LOG_TEXT_CHARS) {
   if (!normalized) {
     return "";
   }
-  return normalized.length > max ? `${normalized.slice(0, max)}...` : normalized;
+  if (normalized.length <= max) {
+    return normalized;
+  }
+  return `${normalized.slice(0, max)}\n\n...[truncated ${normalized.length - max} chars]`;
+}
+
+function stringifyUnknownForLog(value: unknown) {
+  if (typeof value === "string") {
+    return value.trim();
+  }
+  if (value == null) {
+    return "";
+  }
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function buildConversationTranscriptFromLegacyMessages(messages: LegacyChatMessage[]) {
+  const parts: string[] = [];
+  for (const message of messages) {
+    const labels: string[] = [message.role];
+    if (message.name?.trim()) {
+      labels.push(`name=${message.name.trim()}`);
+    }
+    if (message.tool_call_id?.trim()) {
+      labels.push(`tool_call_id=${message.tool_call_id.trim()}`);
+    }
+    const blocks: string[] = [];
+    const text = extractTextFromUnknownContent(message.content);
+    if (text) {
+      blocks.push(text);
+    }
+    if (message.tool_calls !== undefined) {
+      const toolCallsText = stringifyUnknownForLog(message.tool_calls);
+      if (toolCallsText) {
+        blocks.push(`[tool_calls]\n${toolCallsText}`);
+      }
+    }
+    if (!blocks.length) {
+      continue;
+    }
+    parts.push(`[${labels.join(" ")}]\n${blocks.join("\n\n")}`);
+  }
+  return clipLogText(parts.join("\n\n"), MAX_LOG_TRANSCRIPT_CHARS);
 }
 
 function extractTextFromUnknownContent(content: unknown) {
@@ -210,7 +342,7 @@ function extractTextFromUnknownContent(content: unknown) {
   return parts.join("\n");
 }
 
-function extractPromptSnapshotFromLegacyMessages(messages: LegacyChatMessage[]) {
+function extractPromptSnapshotFromLegacyMessages(messages: LegacyChatMessage[]): PromptSnapshot {
   const systemParts: string[] = [];
   const userParts: string[] = [];
   for (const message of messages) {
@@ -229,23 +361,21 @@ function extractPromptSnapshotFromLegacyMessages(messages: LegacyChatMessage[]) 
 
   return {
     systemPrompt: clipLogText(systemParts.join("\n\n")),
-    userPrompt: clipLogText(userParts.join("\n\n"))
+    userPrompt: clipLogText(userParts.join("\n\n")),
+    conversationTranscript: buildConversationTranscriptFromLegacyMessages(messages)
   };
 }
 
-function extractPromptSnapshotFromLegacyCompletionBody(body: { prompt?: string | string[] }) {
+function extractPromptSnapshotFromLegacyCompletionBody(
+  body: { prompt?: string | string[] }
+): PromptSnapshot {
   const prompt = body.prompt;
   const promptText = Array.isArray(prompt) ? prompt.join("\n") : typeof prompt === "string" ? prompt : "";
   return {
     systemPrompt: "",
-    userPrompt: clipLogText(promptText)
+    userPrompt: clipLogText(promptText),
+    conversationTranscript: clipLogText(`[user]\n${promptText}`, MAX_LOG_TRANSCRIPT_CHARS)
   };
-}
-
-function extractPromptSnapshotFromResponsesBody(body: ResponsesRequest) {
-  const mapped = mapResponsesRequestToLegacyChat(body, body.model?.trim() || "gpt-4.1-mini");
-  const messages = normalizeLegacyMessages(mapped.messages as LegacyChatRequest["messages"]);
-  return extractPromptSnapshotFromLegacyMessages(messages);
 }
 
 function normalizeModelForCompare(provider: string, model: string | null | undefined) {
@@ -302,7 +432,8 @@ function resolveRuntimeModel(key: ResolvedGatewayKey, model: string): RuntimeMod
         visionModel: fallbackVisionModel
       },
       upstreamModel: requestedNormalized || normalizeUpstreamModelCode(key.provider, key.defaultModel),
-      clientModel: model
+      clientModel: model,
+      profile: defaultProfile
     };
   }
 
@@ -315,7 +446,8 @@ function resolveRuntimeModel(key: ResolvedGatewayKey, model: string): RuntimeMod
       visionModel: profile.supportsVision ? null : profile.visionModel ?? null
     },
     upstreamModel: normalizeUpstreamModelCode(key.provider, profile.model),
-    clientModel: model
+    clientModel: model,
+    profile
   };
 }
 
@@ -388,6 +520,7 @@ async function persistUsageEvent(
       stream: context.stream,
       systemPrompt: context.systemPrompt,
       userPrompt: context.userPrompt,
+      conversationTranscript: context.conversationTranscript,
       assistantResponse: clipLogText(completionText),
       createdAt: new Date().toISOString()
     });
@@ -791,6 +924,9 @@ function normalizeLegacyMessages(messages: LegacyChatRequest["messages"] | undef
     .map((message) => ({
       role: message.role,
       content: deepCloneUnknown(message.content),
+      ...(message.reasoning_content !== undefined
+        ? { reasoning_content: deepCloneUnknown(message.reasoning_content) }
+        : {}),
       ...(message.name ? { name: message.name } : {}),
       ...(message.tool_call_id ? { tool_call_id: message.tool_call_id } : {}),
       ...(message.tool_calls ? { tool_calls: deepCloneUnknown(message.tool_calls) } : {})
@@ -1319,20 +1455,53 @@ function sanitizeLegacyContentForGenericUpstream(content: unknown, role: LegacyC
   return contentParts;
 }
 
-function sanitizeLegacyMessagesForGenericUpstream(messages: LegacyChatRequest["messages"] | undefined) {
+function sanitizeLegacyMessagesForGenericUpstream(
+  messages: LegacyChatRequest["messages"] | undefined,
+  options?: {
+    preserveReasoningContent?: boolean;
+  }
+) {
   if (!Array.isArray(messages)) {
     return messages;
   }
   return messages.map((message) => ({
-    ...message,
-    content: sanitizeLegacyContentForGenericUpstream(message.content, message.role)
+    role: message.role,
+    content: sanitizeLegacyContentForGenericUpstream(message.content, message.role),
+    ...(options?.preserveReasoningContent &&
+    message.role === "assistant" &&
+    message.reasoning_content !== undefined
+      ? { reasoning_content: deepCloneUnknown(message.reasoning_content) }
+      : {}),
+    ...(message.name ? { name: message.name } : {}),
+    ...(message.tool_call_id ? { tool_call_id: message.tool_call_id } : {}),
+    ...(message.tool_calls ? { tool_calls: deepCloneUnknown(message.tool_calls) } : {})
   }));
+}
+
+function hasReasoningContentValue(value: unknown) {
+  if (typeof value === "string") {
+    return value.trim().length > 0;
+  }
+  if (Array.isArray(value)) {
+    return value.length > 0;
+  }
+  return Boolean(value && typeof value === "object");
 }
 
 function resolveReasoningEffortForChatPayload(payload: LegacyChatRequest) {
   const direct = normalizeOptionalField(payload.reasoning_effort);
   if (direct) {
     return direct;
+  }
+
+  const objectEffort =
+    payload.reasoning &&
+    typeof payload.reasoning === "object" &&
+    typeof payload.reasoning.effort === "string"
+      ? payload.reasoning.effort.trim()
+      : "";
+  if (objectEffort) {
+    return objectEffort;
   }
 
   const thinking = payload.thinking;
@@ -1374,8 +1543,57 @@ function resolveThinkingBudgetFromEffort(effort: string) {
   return 0;
 }
 
-function applyCodexThinkingModeForChat<T extends LegacyChatRequest>(payload: T, provider: string): T {
+function normalizeReasoningEffortLevel(value: string) {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "high") {
+    return "high";
+  }
+  if (normalized === "medium") {
+    return "medium";
+  }
+  if (normalized && !isThinkingDisabledByEffort(normalized)) {
+    return "low";
+  }
+  return "";
+}
+
+function shouldEnableGlmThinkingForEffort(
+  effort: string,
+  threshold: GlmCodexThinkingThreshold
+) {
+  if (threshold === "off") {
+    return false;
+  }
+  const level = normalizeReasoningEffortLevel(effort);
+  if (!level) {
+    return false;
+  }
+  const ranks = {
+    low: 1,
+    medium: 2,
+    high: 3
+  } as const;
+  return ranks[level] >= ranks[threshold];
+}
+
+function applyCodexThinkingModeForChat<T extends LegacyChatRequest>(
+  payload: T,
+  provider: string,
+  glmCodexThinkingThreshold?: GlmCodexThinkingThreshold | null
+): T {
   const reasoningEffort = resolveReasoningEffortForChatPayload(payload);
+  const reasoningSummary =
+    payload.reasoning &&
+    typeof payload.reasoning === "object" &&
+    typeof payload.reasoning.summary === "string"
+      ? payload.reasoning.summary.trim()
+      : "";
+  const hasReasoningHistory =
+    Array.isArray(payload.messages) &&
+    payload.messages.some(
+      (message) =>
+        message.role === "assistant" && hasReasoningContentValue(message.reasoning_content)
+    );
 
   const nextPayload: LegacyChatRequest = {
     ...payload,
@@ -1384,6 +1602,10 @@ function applyCodexThinkingModeForChat<T extends LegacyChatRequest>(payload: T, 
   // GLM chat/completions follows documented `thinking.type` only.
   const normalizedProvider = provider.trim().toLowerCase();
   if (normalizedProvider === "glm") {
+    nextPayload.messages = sanitizeLegacyMessagesForGenericUpstream(payload.messages, {
+      preserveReasoningContent: true
+    });
+    const threshold = normalizeGlmCodexThinkingThresholdValue(glmCodexThinkingThreshold);
     const existingThinking = payload.thinking && typeof payload.thinking === "object" ? payload.thinking : null;
     const incomingType = normalizeThinkingType(existingThinking ? (existingThinking as { type?: unknown }).type : undefined);
     const type = incomingType
@@ -1391,8 +1613,22 @@ function applyCodexThinkingModeForChat<T extends LegacyChatRequest>(payload: T, 
         ? "disabled"
         : "enabled"
       : reasoningEffort
-        ? (isThinkingDisabledByEffort(reasoningEffort) ? "disabled" : "enabled")
-        : "";
+        ? isThinkingDisabledByEffort(reasoningEffort)
+          ? "disabled"
+          : shouldEnableGlmThinkingForEffort(reasoningEffort, threshold)
+            ? "enabled"
+            : ""
+        : reasoningSummary || hasReasoningHistory
+          ? threshold === "off"
+            ? ""
+            : "enabled"
+          : "";
+    const clearThinking =
+      type === "enabled"
+        ? existingThinking && typeof (existingThinking as { clear_thinking?: unknown }).clear_thinking === "boolean"
+          ? Boolean((existingThinking as { clear_thinking?: unknown }).clear_thinking)
+          : false
+        : undefined;
 
     nextPayload.anthropic_output_config = undefined;
     nextPayload.reasoning_effort = undefined;
@@ -1403,7 +1639,8 @@ function applyCodexThinkingModeForChat<T extends LegacyChatRequest>(payload: T, 
     }
 
     nextPayload.thinking = {
-      type
+      type,
+      ...(typeof clearThinking === "boolean" ? { clear_thinking: clearThinking } : {})
     };
     return nextPayload as T;
   }
@@ -1426,6 +1663,7 @@ function extractAssistantMessageFromLegacyChatPayload(payload: unknown): LegacyC
       choices?: Array<{
         message?: {
           content?: unknown;
+          reasoning_content?: unknown;
           tool_calls?: unknown;
           name?: unknown;
           tool_call_id?: unknown;
@@ -1449,13 +1687,15 @@ function extractAssistantMessageFromLegacyChatPayload(payload: unknown): LegacyC
     (typeof content === "string" && content.trim().length > 0) ||
     (Array.isArray(content) && content.length > 0) ||
     (content && typeof content === "object");
+  const rawReasoningContent = "reasoning_content" in message ? message.reasoning_content : undefined;
+  const hasReasoningContent = hasReasoningContentValue(rawReasoningContent);
 
   const rawToolCalls = "tool_calls" in message ? message.tool_calls : undefined;
   const hasToolCalls =
     (Array.isArray(rawToolCalls) && rawToolCalls.length > 0) ||
     (rawToolCalls && typeof rawToolCalls === "object");
 
-  if (!hasContent && !hasToolCalls) {
+  if (!hasContent && !hasToolCalls && !hasReasoningContent) {
     return null;
   }
 
@@ -1464,6 +1704,7 @@ function extractAssistantMessageFromLegacyChatPayload(payload: unknown): LegacyC
   return {
     role: "assistant",
     content: hasContent ? content : "",
+    ...(hasReasoningContent ? { reasoning_content: deepCloneUnknown(rawReasoningContent) } : {}),
     ...(typeof nameValue === "string" && nameValue.trim() ? { name: nameValue.trim() } : {}),
     ...(typeof toolCallId === "string" && toolCallId.trim() ? { tool_call_id: toolCallId.trim() } : {}),
     ...(hasToolCalls ? { tool_calls: deepCloneUnknown(rawToolCalls) } : {})
@@ -1684,6 +1925,7 @@ function transformChatStreamToResponses(
   model: string,
   options?: {
     promptTokensEstimate?: number;
+    customToolNames?: Set<string>;
     onCompleted?: (payload: {
       responseId: string;
       assistantMessage: LegacyChatMessage | null;
@@ -1692,60 +1934,294 @@ function transformChatStreamToResponses(
 ) {
   const responseId = `resp_${crypto.randomUUID().replace(/-/g, "")}`;
   const messageId = `msg_${crypto.randomUUID().replace(/-/g, "")}`;
+  const reasoningItemId = `rs_${crypto.randomUUID().replace(/-/g, "")}`;
   const createdAt = Math.floor(Date.now() / 1000);
+  type ResponseOutputTextPart = {
+    type: "output_text";
+    text: string;
+    annotations: unknown[];
+  };
+  type ResponseReasoningTextPart = {
+    type: "reasoning_text";
+    text: string;
+  };
   type ResponseOutputItem =
     | {
         id: string;
         type: "message";
         role: "assistant";
-        content: Array<{
-          type: "output_text";
+        status: "in_progress" | "completed";
+        content: ResponseOutputTextPart[];
+      }
+    | {
+        id: string;
+        type: "reasoning";
+        status: "in_progress" | "completed";
+        content: ResponseReasoningTextPart[];
+        summary: Array<{
+          type: "summary_text";
           text: string;
         }>;
       }
     | {
+        id: string;
         type: "function_call";
         call_id: string;
         name: string;
         arguments: string;
+        status: "in_progress" | "completed";
+      }
+    | {
+        id: string;
+        type: "custom_tool_call";
+        call_id: string;
+        name: string;
+        input: string;
+        status: "in_progress" | "completed";
       };
 
   type PendingToolCall = {
     index: number;
     callId: string;
+    itemId: string;
     name: string;
     arguments: string;
+    itemAdded: boolean;
+    outputIndex: number;
+    emittedPayloadLength: number;
   };
 
   let completed = false;
   let outputText = "";
   let reasoningText = "";
+  let emittedReasoningDelta = false;
   let explicitUsage: ReturnType<typeof extractTokenUsageFromPayload> | null = null;
   let emittedTextDelta = false;
+  let reasoningItemAdded = false;
+  let reasoningPartAdded = false;
+  let reasoningItemDone = false;
   let messageItemAdded = false;
+  let contentPartAdded = false;
   let messageItemDone = false;
   let toolCallsDone = false;
+  let reasoningOutputIndex = -1;
+  let messageOutputIndex = -1;
   const pendingToolCalls = new Map<number, PendingToolCall>();
   const completedOutputItems: ResponseOutputItem[] = [];
+  const isCustomToolCall = (callName: string) => options?.customToolNames?.has(callName.trim()) ?? false;
+  const getToolCallPayload = (call: PendingToolCall, allowFallback = true) =>
+    isCustomToolCall(call.name)
+      ? extractCustomToolInputFromChatArguments(call.arguments, allowFallback)
+      : call.arguments;
 
   const ensureMessageItemAdded = (emitJson: (payload: unknown) => void) => {
     if (messageItemAdded) {
       return;
     }
     messageItemAdded = true;
+    const messageItem: ResponseOutputItem = {
+      id: messageId,
+      type: "message",
+      role: "assistant",
+      status: "in_progress",
+      content: [
+        {
+          type: "output_text",
+          text: "",
+          annotations: []
+        }
+      ]
+    };
+    messageOutputIndex = completedOutputItems.push(messageItem) - 1;
     emitJson({
       type: "response.output_item.added",
-      item: {
-        id: messageId,
-        type: "message",
-        role: "assistant",
-        content: [
-          {
-            type: "output_text",
-            text: ""
-          }
-        ]
+      output_index: messageOutputIndex,
+      item: messageItem
+    });
+    if (!contentPartAdded) {
+      contentPartAdded = true;
+      emitJson({
+        type: "response.content_part.added",
+        item_id: messageId,
+        output_index: messageOutputIndex,
+        content_index: 0,
+        part: messageItem.content[0]
+      });
+    }
+  };
+
+  const getMessageItem = () => {
+    if (messageOutputIndex < 0) {
+      return null;
+    }
+    const messageItem = completedOutputItems[messageOutputIndex];
+    return messageItem && messageItem.type === "message" ? messageItem : null;
+  };
+
+  const ensureReasoningItemAdded = (emitJson: (payload: unknown) => void) => {
+    if (reasoningItemAdded) {
+      return;
+    }
+    reasoningItemAdded = true;
+    const reasoningItem: ResponseOutputItem = {
+      id: reasoningItemId,
+      type: "reasoning",
+      status: "in_progress",
+      content: [],
+      summary: []
+    };
+    reasoningOutputIndex = completedOutputItems.push(reasoningItem) - 1;
+    emitJson({
+      type: "response.output_item.added",
+      output_index: reasoningOutputIndex,
+      item: reasoningItem
+    });
+  };
+
+  const getReasoningItem = () => {
+    if (reasoningOutputIndex < 0) {
+      return null;
+    }
+    const reasoningItem = completedOutputItems[reasoningOutputIndex];
+    return reasoningItem && reasoningItem.type === "reasoning" ? reasoningItem : null;
+  };
+
+  const ensureReasoningPartAdded = (emitJson: (payload: unknown) => void) => {
+    ensureReasoningItemAdded(emitJson);
+    const reasoningItem = getReasoningItem();
+    if (!reasoningItem || reasoningPartAdded) {
+      return;
+    }
+    reasoningPartAdded = true;
+    const part: ResponseReasoningTextPart = {
+      type: "reasoning_text",
+      text: ""
+    };
+    reasoningItem.content.push(part);
+    emitJson({
+      type: "response.content_part.added",
+      item_id: reasoningItemId,
+      output_index: reasoningOutputIndex,
+      content_index: 0,
+      part
+    });
+  };
+
+  const emitReasoningItemDone = (emitJson: (payload: unknown) => void) => {
+    if (reasoningItemDone || !reasoningText) {
+      return;
+    }
+    ensureReasoningPartAdded(emitJson);
+    const reasoningItem = getReasoningItem();
+    if (!reasoningItem || !reasoningItem.content[0]) {
+      return;
+    }
+    reasoningItem.content[0].text = reasoningText;
+    reasoningItem.summary = [
+      {
+        type: "summary_text",
+        text: reasoningText
       }
+    ];
+    reasoningItem.status = "completed";
+    emitJson({
+      type: "response.reasoning_text.done",
+      item_id: reasoningItemId,
+      output_index: reasoningOutputIndex,
+      content_index: 0,
+      text: reasoningText
+    });
+    emitJson({
+      type: "response.content_part.done",
+      item_id: reasoningItemId,
+      output_index: reasoningOutputIndex,
+      content_index: 0,
+      part: reasoningItem.content[0]
+    });
+    emitJson({
+      type: "response.output_item.done",
+      output_index: reasoningOutputIndex,
+      item: reasoningItem
+    });
+    reasoningItemDone = true;
+  };
+
+  const ensureToolCallItemAdded = (
+    emitJson: (payload: unknown) => void,
+    call: PendingToolCall
+  ) => {
+    if (call.itemAdded) {
+      return;
+    }
+    const toolName = call.name || "unknown_tool";
+    const item: ResponseOutputItem = isCustomToolCall(toolName)
+      ? {
+          id: call.itemId,
+          type: "custom_tool_call",
+          call_id: call.callId,
+          name: toolName,
+          input: "",
+          status: "in_progress"
+        }
+      : {
+          id: call.itemId,
+          type: "function_call",
+          call_id: call.callId,
+          name: toolName,
+          arguments: "",
+          status: "in_progress"
+        };
+    call.outputIndex = completedOutputItems.push(item) - 1;
+    call.itemAdded = true;
+    emitJson({
+      type: "response.output_item.added",
+      output_index: call.outputIndex,
+      item
+    });
+  };
+
+  const emitToolCallPayloadDelta = (
+    emitJson: (payload: unknown) => void,
+    call: PendingToolCall
+  ) => {
+    if (!call.itemAdded || call.outputIndex < 0) {
+      return;
+    }
+    const item = completedOutputItems[call.outputIndex];
+    if (!item || (item.type !== "function_call" && item.type !== "custom_tool_call")) {
+      return;
+    }
+    const toolName = call.name || "unknown_tool";
+    const payload = getToolCallPayload(call, item.type !== "custom_tool_call");
+    if (payload == null) {
+      return;
+    }
+    item.call_id = call.callId;
+    item.name = toolName;
+    if (item.type === "custom_tool_call") {
+      item.input = payload;
+    } else {
+      item.arguments = payload;
+    }
+    const delta = payload.slice(call.emittedPayloadLength);
+    if (!delta) {
+      return;
+    }
+    call.emittedPayloadLength = payload.length;
+    if (item.type === "custom_tool_call") {
+      emitJson({
+        type: "response.custom_tool_call_input.delta",
+        item_id: call.itemId,
+        output_index: call.outputIndex,
+        delta
+      });
+      return;
+    }
+    emitJson({
+      type: "response.function_call_arguments.delta",
+      item_id: call.itemId,
+      output_index: call.outputIndex,
+      delta
     });
   };
 
@@ -1754,23 +2230,32 @@ function transformChatStreamToResponses(
       return;
     }
     ensureMessageItemAdded(emitJson);
-    const messageItem: ResponseOutputItem = {
-      id: messageId,
-      type: "message",
-      role: "assistant",
-      content: [
-        {
-          type: "output_text",
-          text: outputText
-        }
-      ]
-    };
+    const messageItem = getMessageItem();
+    if (!messageItem) {
+      return;
+    }
+    messageItem.content[0].text = outputText;
+    messageItem.status = "completed";
+    emitJson({
+      type: "response.output_text.done",
+      item_id: messageId,
+      output_index: messageOutputIndex,
+      content_index: 0,
+      text: outputText
+    });
+    emitJson({
+      type: "response.content_part.done",
+      item_id: messageId,
+      output_index: messageOutputIndex,
+      content_index: 0,
+      part: messageItem.content[0]
+    });
     emitJson({
       type: "response.output_item.done",
+      output_index: messageOutputIndex,
       item: messageItem
     });
     messageItemDone = true;
-    completedOutputItems.push(messageItem);
   };
 
   const emitToolCalls = (emitJson: (payload: unknown) => void) => {
@@ -1783,17 +2268,43 @@ function transformChatStreamToResponses(
     }
 
     for (const call of calls) {
-      const item: ResponseOutputItem = {
-        type: "function_call",
-        call_id: call.callId,
-        name: call.name || "unknown_tool",
-        arguments: call.arguments
-      };
+      ensureToolCallItemAdded(emitJson, call);
+      emitToolCallPayloadDelta(emitJson, call);
+      const item = completedOutputItems[call.outputIndex];
+      if (!item || (item.type !== "function_call" && item.type !== "custom_tool_call")) {
+        continue;
+      }
+      const toolName = call.name || "unknown_tool";
+      const payload = getToolCallPayload(call);
+      item.call_id = call.callId;
+      item.name = toolName;
+      if (item.type === "custom_tool_call") {
+        item.input = payload ?? "";
+      } else {
+        item.arguments = payload ?? "";
+      }
+      item.status = "completed";
+      if (item.type === "custom_tool_call") {
+        emitToolCallPayloadDelta(emitJson, call);
+        emitJson({
+          type: "response.custom_tool_call_input.done",
+          item_id: call.itemId,
+          output_index: call.outputIndex,
+          input: item.input
+        });
+      } else {
+        emitJson({
+          type: "response.function_call_arguments.done",
+          item_id: call.itemId,
+          output_index: call.outputIndex,
+          arguments: item.arguments
+        });
+      }
       emitJson({
         type: "response.output_item.done",
+        output_index: call.outputIndex,
         item
       });
-      completedOutputItems.push(item);
     }
     toolCallsDone = true;
   };
@@ -1803,14 +2314,37 @@ function transformChatStreamToResponses(
       return;
     }
 
+    if (!emittedReasoningDelta && reasoningText) {
+      ensureReasoningPartAdded(emitJson);
+      const reasoningItem = getReasoningItem();
+      if (reasoningItem && reasoningItem.content[0]) {
+        reasoningItem.content[0].text = reasoningText;
+      }
+      emitJson({
+        type: "response.reasoning_text.delta",
+        item_id: reasoningItemId,
+        output_index: reasoningOutputIndex,
+        content_index: 0,
+        delta: reasoningText
+      });
+      emittedReasoningDelta = true;
+    }
     if (!emittedTextDelta && outputText) {
       ensureMessageItemAdded(emitJson);
+      const messageItem = getMessageItem();
+      if (messageItem) {
+        messageItem.content[0].text = outputText;
+      }
       emitJson({
         type: "response.output_text.delta",
+        item_id: messageId,
+        output_index: messageOutputIndex,
+        content_index: 0,
         delta: outputText
       });
       emittedTextDelta = true;
     }
+    emitReasoningItemDone(emitJson);
     if (outputText) {
       emitMessageItemDone(emitJson);
     }
@@ -1860,10 +2394,11 @@ function transformChatStreamToResponses(
           }
         }));
       const assistantMessage =
-        outputText || assistantToolCalls.length
+        outputText || assistantToolCalls.length || reasoningText.trim()
           ? ({
               role: "assistant",
               content: outputText,
+              ...(reasoningText.trim() ? { reasoning_content: reasoningText } : {}),
               ...(assistantToolCalls.length ? { tool_calls: assistantToolCalls } : {})
             } satisfies LegacyChatMessage)
           : null;
@@ -1886,6 +2421,16 @@ function transformChatStreamToResponses(
     onStart: (emitJson) => {
       emitJson({
         type: "response.created",
+        response: {
+          id: responseId,
+          object: "response",
+          created_at: createdAt,
+          model,
+          status: "in_progress"
+        }
+      });
+      emitJson({
+        type: "response.in_progress",
         response: {
           id: responseId,
           object: "response",
@@ -1928,8 +2473,12 @@ function transformChatStreamToResponses(
           callId:
             toolCallDelta.callId ??
             `call_${responseId}_${Math.max(0, toolCallDelta.index)}`,
+          itemId: `fc_${crypto.randomUUID().replace(/-/g, "")}`,
           name: "",
-          arguments: ""
+          arguments: "",
+          itemAdded: false,
+          outputIndex: -1,
+          emittedPayloadLength: 0
         };
 
         if (toolCallDelta.callId) {
@@ -1946,22 +2495,46 @@ function transformChatStreamToResponses(
           existing.arguments += toolCallDelta.argumentsPart;
         }
         pendingToolCalls.set(toolCallDelta.index, existing);
+        if (existing.name && !existing.itemAdded) {
+          ensureToolCallItemAdded(emitJson, existing);
+        }
+        emitToolCallPayloadDelta(emitJson, existing);
       }
 
       const delta = extractChatDeltaTextFromChunk(payload);
       if (delta) {
         ensureMessageItemAdded(emitJson);
+        const messageItem = getMessageItem();
         outputText += delta;
+        if (messageItem) {
+          messageItem.content[0].text = outputText;
+        }
         emittedTextDelta = true;
         emitJson({
           type: "response.output_text.delta",
+          item_id: messageId,
+          output_index: messageOutputIndex,
+          content_index: 0,
           delta
         });
       }
 
       const reasoningDelta = extractChatReasoningDeltaFromChunk(payload);
       if (reasoningDelta) {
+        ensureReasoningPartAdded(emitJson);
+        const reasoningItem = getReasoningItem();
         reasoningText += reasoningDelta;
+        if (reasoningItem && reasoningItem.content[0]) {
+          reasoningItem.content[0].text = reasoningText;
+        }
+        emittedReasoningDelta = true;
+        emitJson({
+          type: "response.reasoning_text.delta",
+          item_id: reasoningItemId,
+          output_index: reasoningOutputIndex,
+          content_index: 0,
+          delta: reasoningDelta
+        });
       }
 
       const finishReason = extractChatFinishReason(payload);
@@ -3625,6 +4198,10 @@ async function describeMediaWithVisionModel(
       stream: false,
       systemPrompt: "",
       userPrompt: clipLogText(`${captionPrompt}\n[${media.kind}_input]`),
+      conversationTranscript: clipLogText(
+        `[user]\n${captionPrompt}\n[${media.kind}_input]`,
+        MAX_LOG_TRANSCRIPT_CHARS
+      ),
       assistantResponse: clipLogText(finalCaption),
       images: [mediaSnapshot],
       createdAt: new Date().toISOString()
@@ -3746,7 +4323,8 @@ export async function handleLegacyChatCompletions(
           model: modelResolved.upstreamModel,
           stream: true
         },
-        runtimeKey.provider
+        runtimeKey.provider,
+        modelResolved.profile?.glmCodexThinkingThreshold
       );
       const upstream = await callChatCompletionsApiStream(
         upstreamPayload,
@@ -3765,7 +4343,8 @@ export async function handleLegacyChatCompletions(
         promptTokensEstimate,
         stream: true,
         systemPrompt: promptSnapshot.systemPrompt,
-        userPrompt: promptSnapshot.userPrompt
+        userPrompt: promptSnapshot.userPrompt,
+        conversationTranscript: promptSnapshot.conversationTranscript
       });
     }
     if (runtimeKey.upstreamWireApi === "anthropic_messages") {
@@ -3792,7 +4371,8 @@ export async function handleLegacyChatCompletions(
         promptTokensEstimate,
         stream: true,
         systemPrompt: promptSnapshot.systemPrompt,
-        userPrompt: promptSnapshot.userPrompt
+        userPrompt: promptSnapshot.userPrompt,
+        conversationTranscript: promptSnapshot.conversationTranscript
       });
       const responsesStream = transformAnthropicStreamToResponses(tracked, modelResolved.clientModel, {
         promptTokensEstimate
@@ -3824,7 +4404,8 @@ export async function handleLegacyChatCompletions(
       promptTokensEstimate,
       stream: true,
       systemPrompt: promptSnapshot.systemPrompt,
-      userPrompt: promptSnapshot.userPrompt
+      userPrompt: promptSnapshot.userPrompt,
+      conversationTranscript: promptSnapshot.conversationTranscript
     });
     return transformResponsesStreamToLegacyChat(tracked, modelResolved.clientModel);
   }
@@ -3835,7 +4416,8 @@ export async function handleLegacyChatCompletions(
         ...rewritten.body,
         model: modelResolved.upstreamModel
       },
-      runtimeKey.provider
+      runtimeKey.provider,
+      modelResolved.profile?.glmCodexThinkingThreshold
     );
     const upstream = await callChatCompletionsApi(
       upstreamPayload,
@@ -3855,7 +4437,8 @@ export async function handleLegacyChatCompletions(
         promptTokensEstimate,
         stream: false,
         systemPrompt: promptSnapshot.systemPrompt,
-        userPrompt: promptSnapshot.userPrompt
+        userPrompt: promptSnapshot.userPrompt,
+        conversationTranscript: promptSnapshot.conversationTranscript
       },
       extractTokenUsageFromPayload(upstream.body),
       extractLegacyChatCompletionText(upstream.body)
@@ -3887,7 +4470,8 @@ export async function handleLegacyChatCompletions(
         promptTokensEstimate,
         stream: false,
         systemPrompt: promptSnapshot.systemPrompt,
-        userPrompt: promptSnapshot.userPrompt
+        userPrompt: promptSnapshot.userPrompt,
+        conversationTranscript: promptSnapshot.conversationTranscript
       },
       extractTokenUsageFromPayload(upstream.body),
       extractAnthropicMessageText(upstream.body)
@@ -3914,7 +4498,8 @@ export async function handleLegacyChatCompletions(
       promptTokensEstimate,
       stream: false,
       systemPrompt: promptSnapshot.systemPrompt,
-      userPrompt: promptSnapshot.userPrompt
+      userPrompt: promptSnapshot.userPrompt,
+      conversationTranscript: promptSnapshot.conversationTranscript
     },
     extractTokenUsageFromPayload(upstream.body),
     extractResponseText(upstream.body)
@@ -3976,7 +4561,8 @@ export async function handleAnthropicMessages(
           model: modelResolved.upstreamModel,
           stream: true
         },
-        runtimeKey.provider
+        runtimeKey.provider,
+        modelResolved.profile?.glmCodexThinkingThreshold
       );
       const upstream = await callChatCompletionsApiStream(upstreamPayload, runtimeKey);
       if (!upstream.ok) {
@@ -3992,7 +4578,8 @@ export async function handleAnthropicMessages(
         promptTokensEstimate,
         stream: true,
         systemPrompt: promptSnapshot.systemPrompt,
-        userPrompt: promptSnapshot.userPrompt
+        userPrompt: promptSnapshot.userPrompt,
+        conversationTranscript: promptSnapshot.conversationTranscript
       });
       return transformChatStreamToAnthropic(tracked, modelResolved.clientModel, {
         promptTokensEstimate
@@ -4028,7 +4615,8 @@ export async function handleAnthropicMessages(
         promptTokensEstimate,
         stream: true,
         systemPrompt: promptSnapshot.systemPrompt,
-        userPrompt: promptSnapshot.userPrompt
+        userPrompt: promptSnapshot.userPrompt,
+        conversationTranscript: promptSnapshot.conversationTranscript
       });
     }
 
@@ -4057,7 +4645,8 @@ export async function handleAnthropicMessages(
       promptTokensEstimate,
       stream: true,
       systemPrompt: promptSnapshot.systemPrompt,
-      userPrompt: promptSnapshot.userPrompt
+      userPrompt: promptSnapshot.userPrompt,
+      conversationTranscript: promptSnapshot.conversationTranscript
     });
     return transformResponsesStreamToAnthropic(tracked, modelResolved.clientModel, {
       promptTokensEstimate
@@ -4070,7 +4659,8 @@ export async function handleAnthropicMessages(
         ...rewritten.body,
         model: modelResolved.upstreamModel
       },
-      runtimeKey.provider
+      runtimeKey.provider,
+      modelResolved.profile?.glmCodexThinkingThreshold
     );
     const upstream = await callChatCompletionsApi(upstreamPayload, runtimeKey);
     if (!upstream.ok) {
@@ -4090,7 +4680,8 @@ export async function handleAnthropicMessages(
         promptTokensEstimate,
         stream: false,
         systemPrompt: promptSnapshot.systemPrompt,
-        userPrompt: promptSnapshot.userPrompt
+        userPrompt: promptSnapshot.userPrompt,
+        conversationTranscript: promptSnapshot.conversationTranscript
       },
       extractTokenUsageFromPayload(upstream.body),
       extractLegacyChatCompletionText(upstream.body)
@@ -4135,7 +4726,8 @@ export async function handleAnthropicMessages(
         promptTokensEstimate,
         stream: false,
         systemPrompt: promptSnapshot.systemPrompt,
-        userPrompt: promptSnapshot.userPrompt
+        userPrompt: promptSnapshot.userPrompt,
+        conversationTranscript: promptSnapshot.conversationTranscript
       },
       extractTokenUsageFromPayload(upstream.body),
       extractAnthropicMessageText(upstream.body)
@@ -4165,7 +4757,8 @@ export async function handleAnthropicMessages(
       promptTokensEstimate,
       stream: false,
       systemPrompt: promptSnapshot.systemPrompt,
-      userPrompt: promptSnapshot.userPrompt
+      userPrompt: promptSnapshot.userPrompt,
+      conversationTranscript: promptSnapshot.conversationTranscript
     },
     extractTokenUsageFromPayload(upstream.body),
     extractResponseText(upstream.body)
@@ -4229,7 +4822,8 @@ export async function handleLegacyCompletions(
         promptTokensEstimate,
         stream: true,
         systemPrompt: promptSnapshot.systemPrompt,
-        userPrompt: promptSnapshot.userPrompt
+        userPrompt: promptSnapshot.userPrompt,
+        conversationTranscript: promptSnapshot.conversationTranscript
       });
     }
     if (runtimeKey.upstreamWireApi === "anthropic_messages") {
@@ -4257,7 +4851,8 @@ export async function handleLegacyCompletions(
         promptTokensEstimate,
         stream: true,
         systemPrompt: promptSnapshot.systemPrompt,
-        userPrompt: promptSnapshot.userPrompt
+        userPrompt: promptSnapshot.userPrompt,
+        conversationTranscript: promptSnapshot.conversationTranscript
       });
       const responsesStream = transformAnthropicStreamToResponses(tracked, modelResolved.clientModel, {
         promptTokensEstimate
@@ -4287,7 +4882,8 @@ export async function handleLegacyCompletions(
       promptTokensEstimate,
       stream: true,
       systemPrompt: promptSnapshot.systemPrompt,
-      userPrompt: promptSnapshot.userPrompt
+      userPrompt: promptSnapshot.userPrompt,
+      conversationTranscript: promptSnapshot.conversationTranscript
     });
     return transformResponsesStreamToLegacyCompletion(tracked, modelResolved.clientModel);
   }
@@ -4314,7 +4910,8 @@ export async function handleLegacyCompletions(
         promptTokensEstimate,
         stream: false,
         systemPrompt: promptSnapshot.systemPrompt,
-        userPrompt: promptSnapshot.userPrompt
+        userPrompt: promptSnapshot.userPrompt,
+        conversationTranscript: promptSnapshot.conversationTranscript
       },
       extractTokenUsageFromPayload(upstream.body),
       extractLegacyCompletionText(upstream.body)
@@ -4347,7 +4944,8 @@ export async function handleLegacyCompletions(
         promptTokensEstimate,
         stream: false,
         systemPrompt: promptSnapshot.systemPrompt,
-        userPrompt: promptSnapshot.userPrompt
+        userPrompt: promptSnapshot.userPrompt,
+        conversationTranscript: promptSnapshot.conversationTranscript
       },
       extractTokenUsageFromPayload(upstream.body),
       extractAnthropicMessageText(upstream.body)
@@ -4377,7 +4975,8 @@ export async function handleLegacyCompletions(
       promptTokensEstimate,
       stream: false,
       systemPrompt: promptSnapshot.systemPrompt,
-      userPrompt: promptSnapshot.userPrompt
+      userPrompt: promptSnapshot.userPrompt,
+      conversationTranscript: promptSnapshot.conversationTranscript
     },
     extractTokenUsageFromPayload(upstream.body),
     extractResponseText(upstream.body)
@@ -4405,7 +5004,6 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
   }
 
   const body = rewrittenForFileIds.body;
-  const promptSnapshot = extractPromptSnapshotFromResponsesBody(body);
 
   const requestedModel = pickRequestedModel(body.model, resolved.key);
   const mappedRequestedModel = mapRequestedModelForKey(requestedModel, resolved.key);
@@ -4422,6 +5020,16 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
   };
   const runtimeKey = modelResolved.runtimeKey;
   const responseContextScope = String(resolved.key.id);
+  const mappedPrompt = mapResponsesRequestToLegacyChat(body, body.model?.trim() || runtimeKey.defaultModel);
+  const previousPromptMessages = readResponseContext(responseContextScope, body.previous_response_id);
+  const incomingPromptMessages = normalizeLegacyMessages(
+    mappedPrompt.messages as LegacyChatRequest["messages"]
+  );
+  const mergedPromptMessages = mergeContinuationMessages(
+    previousPromptMessages,
+    incomingPromptMessages
+  );
+  const promptSnapshot = extractPromptSnapshotFromLegacyMessages(mergedPromptMessages);
 
   if (body.stream === true) {
     if (runtimeKey.upstreamWireApi === "responses") {
@@ -4455,7 +5063,8 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
         promptTokensEstimate,
         stream: true,
         systemPrompt: promptSnapshot.systemPrompt,
-        userPrompt: promptSnapshot.userPrompt
+        userPrompt: promptSnapshot.userPrompt,
+        conversationTranscript: promptSnapshot.conversationTranscript
       });
     }
 
@@ -4502,7 +5111,8 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
         promptTokensEstimate,
         stream: true,
         systemPrompt: promptSnapshot.systemPrompt,
-        userPrompt: promptSnapshot.userPrompt
+        userPrompt: promptSnapshot.userPrompt,
+        conversationTranscript: promptSnapshot.conversationTranscript
       });
       const contextBaseMessages = normalizeLegacyMessages(
         legacyPayload.messages as LegacyChatRequest["messages"]
@@ -4519,6 +5129,7 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
     }
 
     const mapped = mapResponsesRequestToLegacyChat(body, modelResolved.upstreamModel);
+    const customToolNames = collectCustomToolNamesFromResponsesRequest(body);
     const previousMessages = readResponseContext(responseContextScope, body.previous_response_id);
     const incomingMessages = normalizeLegacyMessages(mapped.messages as LegacyChatRequest["messages"]);
     const mergedMessages = mergeContinuationMessages(previousMessages, incomingMessages);
@@ -4544,7 +5155,11 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
       messages: rewritten.body.messages,
       stream: true
     };
-    const upstreamPayload = applyCodexThinkingModeForChat(legacyPayload, runtimeKey.provider);
+    const upstreamPayload = applyCodexThinkingModeForChat(
+      legacyPayload,
+      runtimeKey.provider,
+      modelResolved.profile?.glmCodexThinkingThreshold
+    );
     const upstream = await callChatCompletionsApiStream(upstreamPayload, runtimeKey);
     if (!upstream.ok) {
       return upstream;
@@ -4559,13 +5174,15 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
       promptTokensEstimate,
       stream: true,
       systemPrompt: promptSnapshot.systemPrompt,
-      userPrompt: promptSnapshot.userPrompt
+      userPrompt: promptSnapshot.userPrompt,
+      conversationTranscript: promptSnapshot.conversationTranscript
     });
     const contextBaseMessages = normalizeLegacyMessages(
       upstreamPayload.messages as LegacyChatRequest["messages"]
     );
     return transformChatStreamToResponses(tracked, modelResolved.clientModel, {
       promptTokensEstimate,
+      customToolNames,
       onCompleted: ({ responseId, assistantMessage }) => {
         const nextMessages = assistantMessage
           ? [...contextBaseMessages, assistantMessage]
@@ -4606,7 +5223,8 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
         promptTokensEstimate,
         stream: false,
         systemPrompt: promptSnapshot.systemPrompt,
-        userPrompt: promptSnapshot.userPrompt
+        userPrompt: promptSnapshot.userPrompt,
+        conversationTranscript: promptSnapshot.conversationTranscript
       },
       extractTokenUsageFromPayload(upstream.body),
       extractResponseText(upstream.body)
@@ -4657,7 +5275,8 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
         promptTokensEstimate,
         stream: false,
         systemPrompt: promptSnapshot.systemPrompt,
-        userPrompt: promptSnapshot.userPrompt
+        userPrompt: promptSnapshot.userPrompt,
+        conversationTranscript: promptSnapshot.conversationTranscript
       },
       extractTokenUsageFromPayload(upstream.body),
       extractAnthropicMessageText(upstream.body)
@@ -4671,6 +5290,7 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
   }
 
   const mapped = mapResponsesRequestToLegacyChat(body, modelResolved.upstreamModel);
+  const customToolNames = collectCustomToolNamesFromResponsesRequest(body);
   const previousMessages = readResponseContext(responseContextScope, body.previous_response_id);
   const incomingMessages = normalizeLegacyMessages(mapped.messages as LegacyChatRequest["messages"]);
   const mergedMessages = mergeContinuationMessages(previousMessages, incomingMessages);
@@ -4696,7 +5316,11 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
     messages: rewritten.body.messages
   };
 
-  const upstreamPayload = applyCodexThinkingModeForChat(legacyPayload, runtimeKey.provider);
+  const upstreamPayload = applyCodexThinkingModeForChat(
+    legacyPayload,
+    runtimeKey.provider,
+    modelResolved.profile?.glmCodexThinkingThreshold
+  );
   const upstream = await callChatCompletionsApi(upstreamPayload, runtimeKey);
   if (!upstream.ok) {
     return NextResponse.json(upstream.body, { status: upstream.status });
@@ -4712,13 +5336,16 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
       promptTokensEstimate,
       stream: false,
       systemPrompt: promptSnapshot.systemPrompt,
-      userPrompt: promptSnapshot.userPrompt
+      userPrompt: promptSnapshot.userPrompt,
+      conversationTranscript: promptSnapshot.conversationTranscript
     },
     extractTokenUsageFromPayload(upstream.body),
     extractLegacyChatCompletionText(upstream.body)
   );
 
-  const mappedResponse = mapLegacyChatCompletionToResponses(upstream.body, modelResolved.clientModel);
+  const mappedResponse = mapLegacyChatCompletionToResponses(upstream.body, modelResolved.clientModel, {
+    customToolNames
+  });
   const baseMessages = normalizeLegacyMessages(upstreamPayload.messages as LegacyChatRequest["messages"]);
   const assistantMessage = extractAssistantMessageFromLegacyChatPayload(upstream.body);
   const nextMessages = assistantMessage ? [...baseMessages, assistantMessage] : baseMessages;

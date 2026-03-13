@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   ensureModelExistsInPool,
+  GLM_CODEX_THINKING_THRESHOLDS,
   normalizeUpstreamModels,
   pickModelFromPool,
   resolveUpstreamBaseUrl,
@@ -24,6 +25,10 @@ export const createUpstreamChannelSchema = z.object({
       model: z.string().min(1).max(256),
       contextWindow: z.number().int().min(256).max(20_000_000).nullable().optional(),
       upstreamWireApi: z.enum(UPSTREAM_WIRE_APIS).default("responses"),
+      glmCodexThinkingThreshold: z
+        .enum(GLM_CODEX_THINKING_THRESHOLDS)
+        .default("low")
+        .optional(),
       supportsVision: z.boolean().default(true),
       visionChannelId: z.number().int().positive().nullable().optional(),
       visionModel: z.string().min(1).max(256).nullable().optional(),
@@ -52,6 +57,10 @@ export const updateUpstreamChannelSchema = z.object({
       model: z.string().min(1).max(256),
       contextWindow: z.number().int().min(256).max(20_000_000).nullable().optional(),
       upstreamWireApi: z.enum(UPSTREAM_WIRE_APIS).default("responses"),
+      glmCodexThinkingThreshold: z
+        .enum(GLM_CODEX_THINKING_THRESHOLDS)
+        .default("low")
+        .optional(),
       supportsVision: z.boolean().default(true),
       visionChannelId: z.number().int().positive().nullable().optional(),
       visionModel: z.string().min(1).max(256).nullable().optional(),

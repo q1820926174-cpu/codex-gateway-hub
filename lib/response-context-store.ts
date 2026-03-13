@@ -35,6 +35,16 @@ function cloneMessages(messages: LegacyChatMessage[]): LegacyChatMessage[] {
         : message.content == null
           ? message.content
           : JSON.parse(JSON.stringify(message.content)),
+    ...(message.reasoning_content !== undefined
+      ? {
+          reasoning_content:
+            typeof message.reasoning_content === "string"
+              ? message.reasoning_content
+              : message.reasoning_content == null
+                ? message.reasoning_content
+                : JSON.parse(JSON.stringify(message.reasoning_content))
+        }
+      : {}),
     ...(message.name ? { name: message.name } : {}),
     ...(message.tool_call_id ? { tool_call_id: message.tool_call_id } : {}),
     ...(message.tool_calls
