@@ -177,6 +177,124 @@ type PromptSnapshot = {
 
 const MAX_LOG_TEXT_CHARS = 40_000;
 const MAX_LOG_TRANSCRIPT_CHARS = 120_000;
+const VISION_CAPTION_CACHE_TTL_MS = parsePositiveIntEnv(
+  process.env.VISION_CAPTION_CACHE_TTL_MS,
+  86_400_000,
+  0,
+  7 * 24 * 60 * 60 * 1000
+);
+const VISION_CAPTION_CACHE_MAX = parsePositiveIntEnv(
+  process.env.VISION_CAPTION_CACHE_MAX,
+  2_048,
+  0,
+  20_000
+);
+
+type VisionCaptionCacheEntry = {
+  caption: string;
+  expiresAt: number;
+};
+
+const visionCaptionCache = new Map<string, VisionCaptionCacheEntry>();
+
+function parsePositiveIntEnv(
+  value: string | undefined,
+  fallback: number,
+  min: number,
+  max: number
+) {
+  const parsed = Number.parseInt(value ?? "", 10);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  if (parsed < min) {
+    return min;
+  }
+  if (parsed > max) {
+    return max;
+  }
+  return parsed;
+}
+
+function isVisionCaptionCacheEnabled() {
+  return VISION_CAPTION_CACHE_TTL_MS > 0 && VISION_CAPTION_CACHE_MAX > 0;
+}
+
+function hashStringFnv1a(text: string) {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function buildVisionCaptionCacheKey(params: {
+  mediaKind: "image" | "video";
+  mediaUrl: string;
+  mediaDetail?: string;
+  visionModel: string;
+  provider: string;
+  transportWireApi: string;
+}) {
+  const mediaUrl = params.mediaUrl.trim();
+  const mediaFingerprint = `${mediaUrl.length}:${hashStringFnv1a(mediaUrl)}`;
+  return [
+    params.mediaKind,
+    params.provider.trim().toLowerCase(),
+    params.transportWireApi.trim().toLowerCase(),
+    params.visionModel.trim().toLowerCase(),
+    params.mediaDetail?.trim().toLowerCase() || "-",
+    mediaFingerprint
+  ].join("|");
+}
+
+function pruneVisionCaptionCache(now: number) {
+  for (const [key, entry] of visionCaptionCache.entries()) {
+    if (entry.expiresAt <= now) {
+      visionCaptionCache.delete(key);
+    }
+  }
+  while (visionCaptionCache.size > VISION_CAPTION_CACHE_MAX) {
+    const oldest = visionCaptionCache.keys().next().value;
+    if (!oldest) {
+      break;
+    }
+    visionCaptionCache.delete(oldest);
+  }
+}
+
+function readVisionCaptionCache(cacheKey: string) {
+  if (!isVisionCaptionCacheEnabled()) {
+    return null;
+  }
+  const now = Date.now();
+  const cached = visionCaptionCache.get(cacheKey);
+  if (!cached) {
+    return null;
+  }
+  if (cached.expiresAt <= now) {
+    visionCaptionCache.delete(cacheKey);
+    return null;
+  }
+  // Refresh entry order to keep hot captions in cache.
+  visionCaptionCache.delete(cacheKey);
+  visionCaptionCache.set(cacheKey, cached);
+  return cached.caption;
+}
+
+function writeVisionCaptionCache(cacheKey: string, caption: string) {
+  if (!isVisionCaptionCacheEnabled()) {
+    return;
+  }
+  const now = Date.now();
+  pruneVisionCaptionCache(now);
+  visionCaptionCache.set(cacheKey, {
+    caption,
+    expiresAt: now + VISION_CAPTION_CACHE_TTL_MS
+  });
+  pruneVisionCaptionCache(now);
+}
 
 function classifyAnthropicErrorType(status: number) {
   if (status === 401 || status === 403) {
@@ -4007,7 +4125,6 @@ async function describeMediaWithVisionModel(
       mediaKind: media.kind,
       mediaDetail: media.detail
     });
-    const mediaSnapshot = await persistAiCallImage(media.mediaUrl);
     const dataUrlParts = media.mediaUrl.startsWith("data:")
       ? parseDataUrlParts(media.mediaUrl)
       : null;
@@ -4038,6 +4155,21 @@ async function describeMediaWithVisionModel(
     const captionTransportWireApi = useDoubaoVideoCompat
       ? "chat_completions"
       : visionRuntimeKey.upstreamWireApi;
+    const captionCacheKey = buildVisionCaptionCacheKey({
+      mediaKind: media.kind,
+      mediaUrl: media.mediaUrl,
+      mediaDetail: media.detail,
+      visionModel: visionModelForCaption,
+      provider: visionRuntimeKey.provider,
+      transportWireApi: captionTransportWireApi
+    });
+    const cachedCaption = readVisionCaptionCache(captionCacheKey);
+    if (cachedCaption) {
+      captions.push(cachedCaption);
+      continue;
+    }
+
+    const mediaSnapshot = await persistAiCallImage(media.mediaUrl);
 
     const captionResp =
       captionTransportWireApi === "responses"
@@ -4183,6 +4315,7 @@ async function describeMediaWithVisionModel(
           ? extractAnthropicMessageText(captionResp.body).trim()
           : extractLegacyChatCompletionText(captionResp.body).trim();
     const finalCaption = caption || (media.kind === "video" ? "Video content provided." : "Image content provided.");
+    writeVisionCaptionCache(captionCacheKey, finalCaption);
     captions.push(finalCaption);
     await appendAiCallLogEntry({
       id: crypto.randomUUID().slice(0, 12),

@@ -6,6 +6,18 @@ import type { AiCallLogImage } from "@/lib/ai-call-log-store";
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const FETCH_TIMEOUT_MS = 15_000;
 
+function isSupportedMediaMimeType(mimeType: string | null | undefined) {
+  const normalized = (mimeType ?? "").trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  return (
+    normalized.startsWith("image/") ||
+    normalized.startsWith("video/") ||
+    normalized === "application/octet-stream"
+  );
+}
+
 function normalizeSource(source: string) {
   const trimmed = source.trim();
   if (!trimmed) {
@@ -32,6 +44,10 @@ function resolveExtByMimeType(mimeType: string | null | undefined) {
   if (normalized.includes("image/svg")) return "svg";
   if (normalized.includes("image/tiff")) return "tiff";
   if (normalized.includes("image/avif")) return "avif";
+  if (normalized.includes("video/mp4")) return "mp4";
+  if (normalized.includes("video/webm")) return "webm";
+  if (normalized.includes("video/quicktime")) return "mov";
+  if (normalized.includes("video/x-matroska")) return "mkv";
   return null;
 }
 
@@ -64,15 +80,48 @@ function parseDataUrl(dataUrl: string) {
   const isBase64 = header.toLowerCase().includes(";base64");
 
   try {
+    if (mimePart && !isSupportedMediaMimeType(mimePart)) {
+      return null;
+    }
+
     if (isBase64) {
+      const normalizedPayload = payload.includes("%")
+        ? decodeURIComponent(payload)
+        : payload;
       return {
         mimeType: mimePart,
-        buffer: Buffer.from(payload, "base64")
+        buffer: Buffer.from(normalizedPayload, "base64")
       };
     }
+
+    const bytes: number[] = [];
+    for (let i = 0; i < payload.length; i += 1) {
+      if (payload[i] === "%") {
+        if (i + 2 >= payload.length) {
+          return null;
+        }
+        const hex = payload.slice(i + 1, i + 3);
+        if (!/^[0-9a-f]{2}$/i.test(hex)) {
+          return null;
+        }
+        bytes.push(Number.parseInt(hex, 16));
+        i += 2;
+        continue;
+      }
+
+      const code = payload.charCodeAt(i);
+      if (code > 0xff) {
+        return {
+          mimeType: mimePart,
+          buffer: Buffer.from(payload, "utf8")
+        };
+      }
+      bytes.push(code);
+    }
+
     return {
       mimeType: mimePart,
-      buffer: Buffer.from(decodeURIComponent(payload), "utf8")
+      buffer: Buffer.from(bytes)
     };
   } catch {
     return null;
@@ -191,6 +240,14 @@ export async function persistAiCallImage(source: string): Promise<AiCallLogImage
 
     const contentTypeRaw = response.headers.get("content-type") ?? "";
     const mimeType = contentTypeRaw.split(";")[0]?.trim().toLowerCase() || null;
+    if (mimeType && !isSupportedMediaMimeType(mimeType)) {
+      return buildFailedImageRecord({
+        sourceType: "remote_url",
+        source: trimmed,
+        mimeType,
+        error: `Unsupported content type: ${mimeType}.`
+      });
+    }
     const ext = resolveExtByMimeType(mimeType) ?? resolveExtByUrl(trimmed) ?? "bin";
     const saved = await saveImageBuffer(buffer, ext);
     return {

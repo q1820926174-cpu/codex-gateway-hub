@@ -145,6 +145,8 @@ OPENAI_FILE_DATA_URL_MAX_BYTES="20971520"
 GATEWAY_KEY_CACHE_TTL_MS="1500"
 GATEWAY_KEY_CACHE_MAX="2048"
 GATEWAY_STREAM_TIMEOUT_MS="600000"
+VISION_CAPTION_CACHE_TTL_MS="86400000"
+VISION_CAPTION_CACHE_MAX="2048"
 DOCKER_ACCELERATE_CN="0"
 NPM_REGISTRY="https://registry.npmjs.org/"
 NPM_REGISTRY_CN="https://registry.npmmirror.com/"
@@ -167,6 +169,8 @@ NO_PROXY="localhost,127.0.0.1"
 - `GATEWAY_KEY_CACHE_TTL_MS` 与 `GATEWAY_KEY_CACHE_MAX` 用于高并发下本地 Key 缓存 / These two variables control local-key cache for high concurrency.
 - `GATEWAY_KEY_CACHE_TTL_MS=0` 可关闭缓存 / Set `GATEWAY_KEY_CACHE_TTL_MS=0` to disable cache.
 - `GATEWAY_STREAM_TIMEOUT_MS` 控制流式上游请求超时（默认 `600000` 毫秒）；`0` 表示不设置流式超时 / `GATEWAY_STREAM_TIMEOUT_MS` controls stream upstream timeout (default `600000` ms); set `0` to disable stream timeout.
+- `VISION_CAPTION_CACHE_TTL_MS` 控制“非视觉模型图片兜底解析”结果缓存 TTL（默认 `86400000` 毫秒，即 24 小时）；`0` 表示关闭缓存 / `VISION_CAPTION_CACHE_TTL_MS` controls TTL for vision-fallback caption cache (default `86400000` ms, 24h); set `0` to disable.
+- `VISION_CAPTION_CACHE_MAX` 控制“非视觉模型图片兜底解析”缓存条目上限（默认 `2048`）；`0` 表示关闭缓存 / `VISION_CAPTION_CACHE_MAX` sets max entries for vision-fallback caption cache (default `2048`); set `0` to disable.
 - `DOCKER_ACCELERATE_CN=1` 时，Docker 构建阶段 npm 将使用 `NPM_REGISTRY_CN` / When `DOCKER_ACCELERATE_CN=1`, Docker build uses `NPM_REGISTRY_CN` for npm install.
 - `NPM_REGISTRY` 为默认 npm 源，`NPM_REGISTRY_CN` 为加速模式 npm 源 / `NPM_REGISTRY` is default npm registry; `NPM_REGISTRY_CN` is used in acceleration mode.
 - `HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY` 会透传到构建与运行容器 / `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` are passed to both build and runtime containers.
