@@ -34,13 +34,23 @@ import {
   Tag
 } from "tdesign-react";
 import {
-  ApiIcon,
-  ControlPlatformIcon,
-  DashboardIcon,
-  TimeIcon,
-  UserCircleIcon,
-  UserIcon
-} from "tdesign-icons-react";
+  LayoutDashboard,
+  Plug,
+  Clock,
+  Settings,
+  User,
+  UserCircle,
+  BookOpen,
+  Activity,
+  FileText,
+  Database,
+  ArrowUpDown,
+  Globe,
+  Code2,
+  FileOutput,
+  Terminal,
+  HelpCircle
+} from "lucide-react";
 import type { EChartsOption } from "echarts";
 
 const ReactECharts = dynamic(() => import("echarts-for-react"), { ssr: false });
@@ -3259,35 +3269,35 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
             expanded={["key-mgmt"]}
             onChange={(value) => handleMenuRoute(String(value))}
           >
-            <Menu.MenuItem value="dashboard" icon={<DashboardIcon />} disabled>
+            <Menu.MenuItem value="dashboard" icon={<LayoutDashboard size={18} />} disabled>
               {t("工作台", "Dashboard")}
             </Menu.MenuItem>
-            <Menu.SubMenu value="key-mgmt" title={t("Key 管理", "Key Management")} icon={<ControlPlatformIcon />}>
-              <Menu.MenuItem value="access" icon={<UserIcon />}>
+            <Menu.SubMenu value="key-mgmt" title={t("Key 管理", "Key Management")} icon={<Settings size={18} />}>
+              <Menu.MenuItem value="access" icon={<User size={18} />}>
                 {t("基础接入", "Access")}
               </Menu.MenuItem>
-              <Menu.MenuItem value="prompt" icon={<ApiIcon />}>
+              <Menu.MenuItem value="prompt" icon={<Code2 size={18} />}>
                 {t("提示词配置", "Prompt Config")}
               </Menu.MenuItem>
-              <Menu.MenuItem value="export" icon={<ApiIcon />}>
+              <Menu.MenuItem value="export" icon={<FileOutput size={18} />}>
                 {t("配置导出", "Export")}
               </Menu.MenuItem>
-              <Menu.MenuItem value="upstream" icon={<ApiIcon />}>
+              <Menu.MenuItem value="upstream" icon={<Globe size={18} />}>
                 {t("上游渠道", "Upstreams")}
               </Menu.MenuItem>
-              <Menu.MenuItem value="runtime" icon={<TimeIcon />} disabled={keys.length === 0}>
+              <Menu.MenuItem value="runtime" icon={<ArrowUpDown size={18} />} disabled={keys.length === 0}>
                 {t("运行时调度", "Runtime")}
               </Menu.MenuItem>
-              <Menu.MenuItem value="logs" icon={<ApiIcon />}>
+              <Menu.MenuItem value="logs" icon={<FileText size={18} />}>
                 {t("请求日志", "Request Logs")}
               </Menu.MenuItem>
-              <Menu.MenuItem value="calls" icon={<ApiIcon />}>
+              <Menu.MenuItem value="calls" icon={<Activity size={18} />}>
                 {t("AI 调用日志", "AI Call Logs")}
               </Menu.MenuItem>
-              <Menu.MenuItem value="usage" icon={<TimeIcon />}>
+              <Menu.MenuItem value="usage" icon={<Database size={18} />}>
                 {t("用量报表", "Usage Report")}
               </Menu.MenuItem>
-              <Menu.MenuItem value="docs" icon={<ApiIcon />}>
+              <Menu.MenuItem value="docs" icon={<BookOpen size={18} />}>
                 {t("接口文档", "API Docs")}
               </Menu.MenuItem>
             </Menu.SubMenu>
@@ -3318,7 +3328,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                   }
                 }}
               />
-              <Button variant="text" shape="circle" icon={<UserCircleIcon />} />
+              <Button variant="text" shape="circle" icon={<UserCircle size={18} />} />
             </div>
           </Layout.Header>
 
