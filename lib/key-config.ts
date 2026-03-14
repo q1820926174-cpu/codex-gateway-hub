@@ -68,6 +68,8 @@ const keyModelMappingSchema = z.object({
   id: z.string().min(1).max(64).optional(),
   clientModel: z.string().min(1).max(256),
   targetModel: z.string().min(1).max(256),
+  upstreamChannelId: z.number().int().positive().nullable().optional(),
+  thinkingType: z.enum(["enabled", "disabled", "auto"]).nullable().optional(),
   enabled: z.boolean().default(true)
 });
 
@@ -91,6 +93,8 @@ export type KeyModelMapping = {
   id: string;
   clientModel: string;
   targetModel: string;
+  upstreamChannelId: number | null;
+  thinkingType: "enabled" | "disabled" | "auto" | null;
   enabled: boolean;
 };
 
@@ -276,6 +280,8 @@ export function normalizeKeyModelMappings(raw: unknown): KeyModelMapping[] {
       id: item.id?.trim() || createMappingId(),
       clientModel,
       targetModel,
+      upstreamChannelId: item.upstreamChannelId ?? null,
+      thinkingType: item.thinkingType ?? null,
       enabled: item.enabled
     });
   }
@@ -298,18 +304,26 @@ export function serializeKeyModelMappings(mappings: KeyModelMapping[]) {
   return JSON.stringify(mappings);
 }
 
+export function pickKeyModelMapping(model: string, mappings: KeyModelMapping[]) {
+  const requested = model.trim();
+  if (!requested) {
+    return null;
+  }
+  const requestedLower = requested.toLowerCase();
+
+  return (
+    mappings.find((item) => item.clientModel.trim().toLowerCase() === requestedLower && item.enabled) ??
+    mappings.find((item) => item.clientModel.trim().toLowerCase() === requestedLower) ??
+    null
+  );
+}
+
 export function mapModelByKeyMappings(model: string, mappings: KeyModelMapping[]) {
   const requested = model.trim();
   if (!requested) {
     return requested;
   }
-  const requestedLower = requested.toLowerCase();
-
-  const matched =
-    mappings.find((item) => item.clientModel.trim().toLowerCase() === requestedLower && item.enabled) ??
-    mappings.find((item) => item.clientModel.trim().toLowerCase() === requestedLower) ??
-    null;
-  return matched?.targetModel ?? requested;
+  return pickKeyModelMapping(requested, mappings)?.targetModel ?? requested;
 }
 
 export const createGatewayKeySchema = z.object({

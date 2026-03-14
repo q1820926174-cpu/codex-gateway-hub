@@ -51,6 +51,8 @@ const UPSTREAM_WIRE_APIS = ["responses", "chat_completions", "anthropic_messages
 type UpstreamWireApi = (typeof UPSTREAM_WIRE_APIS)[number];
 const GLM_CODEX_THINKING_THRESHOLDS = ["off", "low", "medium", "high"] as const;
 type GlmCodexThinkingThreshold = (typeof GLM_CODEX_THINKING_THRESHOLDS)[number];
+const DOUBAO_THINKING_TYPES = ["enabled", "disabled", "auto"] as const;
+type DoubaoThinkingType = (typeof DOUBAO_THINKING_TYPES)[number];
 
 const PROVIDER_DEFAULT_BASE_URL: Record<Exclude<ProviderName, "custom">, string> = {
   openai: "https://api.openai.com",
@@ -263,6 +265,8 @@ type KeyModelMapping = {
   id: string;
   clientModel: string;
   targetModel: string;
+  upstreamChannelId: number | null;
+  thinkingType: DoubaoThinkingType | null;
   enabled: boolean;
 };
 
@@ -546,6 +550,15 @@ function shouldShowGlmThinkingThreshold(provider: ProviderName, model: string) {
   return provider === "glm" || model.trim().toLowerCase().startsWith("glm-");
 }
 
+function shouldShowDoubaoThinkingType(provider: ProviderName, model: string) {
+  const normalized = model.trim().toLowerCase();
+  return (
+    provider === "doubao" ||
+    normalized.startsWith("doubao-") ||
+    normalized.startsWith("deepseek-")
+  );
+}
+
 function createEmptyKeyFormState(localKey = ""): KeyFormState {
   return {
     name: "new-local-key",
@@ -605,6 +618,14 @@ function toKeyForm(key: GatewayKey): KeyFormState {
         id: item.id || generateMappingId(),
         clientModel: item.clientModel,
         targetModel: item.targetModel,
+        upstreamChannelId:
+          typeof item.upstreamChannelId === "number" ? item.upstreamChannelId : null,
+        thinkingType:
+          item.thinkingType === "enabled" ||
+          item.thinkingType === "disabled" ||
+          item.thinkingType === "auto"
+            ? item.thinkingType
+            : null,
         enabled: item.enabled
       })) ?? [],
     dynamicModelSwitch: key.dynamicModelSwitch,
@@ -925,6 +946,15 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     }
     return `${threshold}+`;
   };
+  const formatDoubaoThinkingTypeLabel = (type: DoubaoThinkingType) => {
+    if (type === "enabled") {
+      return t("强制开启", "Force Enabled");
+    }
+    if (type === "disabled") {
+      return t("强制关闭", "Force Disabled");
+    }
+    return t("自动判断", "Auto");
+  };
   const routeModule = module;
 
   const [keys, setKeys] = useState<GatewayKey[]>([]);
@@ -999,17 +1029,23 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     () => channels.find((item) => item.id === keyForm.upstreamChannelId) ?? null,
     [channels, keyForm.upstreamChannelId]
   );
-  const findBoundChannelModelProfile = (targetModel: string) => {
+  const resolveMappingChannel = (mapping: KeyModelMapping) => {
+    if (typeof mapping.upstreamChannelId === "number") {
+      return channels.find((item) => item.id === mapping.upstreamChannelId) ?? null;
+    }
+    return selectedChannelForKey;
+  };
+  const findChannelModelProfile = (channel: UpstreamChannel | null, targetModel: string) => {
     const normalizedTargetModel = targetModel.trim().toLowerCase();
-    if (!normalizedTargetModel || !selectedChannelForKey) {
+    if (!normalizedTargetModel || !channel) {
       return null;
     }
 
     return (
-      selectedChannelForKey.upstreamModels.find(
+      channel.upstreamModels.find(
         (item) => item.model.trim().toLowerCase() === normalizedTargetModel
       ) ??
-      selectedChannelForKey.upstreamModels.find(
+      channel.upstreamModels.find(
         (item) => (item.aliasModel?.trim().toLowerCase() ?? "") === normalizedTargetModel
       ) ??
       null
@@ -1229,6 +1265,19 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
         value: String(item.id)
       })),
     [channels]
+  );
+  const mappingBindChannelOptions = useMemo(
+    () => [
+      {
+        label: t("继承 Key 绑定渠道", "Inherit key bound channel"),
+        value: "__inherit__"
+      },
+      ...channels.map((item) => ({
+        label: `${item.name} · ${PROVIDER_META[item.provider].label}`,
+        value: String(item.id)
+      }))
+    ],
+    [channels, t]
   );
 
   const usageKeyOptions = useMemo(
@@ -2205,6 +2254,8 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
           id: generateMappingId(),
           clientModel: "",
           targetModel: selectedChannelForKey?.defaultModel ?? "",
+          upstreamChannelId: null,
+          thinkingType: null,
           enabled: true
         }
       ]
@@ -2249,6 +2300,14 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
           id: item.id,
           clientModel: item.clientModel.trim(),
           targetModel: item.targetModel.trim(),
+          upstreamChannelId:
+            typeof item.upstreamChannelId === "number" ? item.upstreamChannelId : null,
+          thinkingType:
+            item.thinkingType === "enabled" ||
+            item.thinkingType === "disabled" ||
+            item.thinkingType === "auto"
+              ? item.thinkingType
+              : null,
           enabled: item.enabled
         }))
         .filter((item) => item.clientModel && item.targetModel);
@@ -2403,20 +2462,21 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   }
 
   async function updateBoundChannelGlmThinkingThreshold(
-    targetModel: string,
+    mapping: KeyModelMapping,
     threshold: GlmCodexThinkingThreshold
   ) {
-    if (!selectedChannelForKey) {
+    const mappingChannel = resolveMappingChannel(mapping);
+    if (!mappingChannel) {
       notifyError(t("请先绑定上游渠道。", "Bind an upstream channel first."));
       return;
     }
 
-    const matchedProfile = findBoundChannelModelProfile(targetModel);
+    const matchedProfile = findChannelModelProfile(mappingChannel, mapping.targetModel);
     if (!matchedProfile) {
       notifyError(
         t(
-          "当前映射指向的内部模型不在绑定渠道模型池中，无法设置 GLM 深度思考阈值。",
-          "The mapped internal model is not in the bound channel model pool, so its GLM thinking threshold cannot be updated."
+          "当前映射指向的内部模型不在所选渠道模型池中，无法设置 GLM 深度思考阈值。",
+          "The mapped internal model is not in the selected channel model pool, so its GLM thinking threshold cannot be updated."
         )
       );
       return;
@@ -2424,7 +2484,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
 
     setSavingChannel(true);
     try {
-      const upstreamModels = selectedChannelForKey.upstreamModels.map((item) =>
+      const upstreamModels = mappingChannel.upstreamModels.map((item) =>
         item.id === matchedProfile.id
           ? {
               ...item,
@@ -2433,7 +2493,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
           : item
       );
 
-      const response = await fetch(`/api/upstreams/${selectedChannelForKey.id}`, {
+      const response = await fetch(`/api/upstreams/${mappingChannel.id}`, {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -2452,8 +2512,8 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       }
       notifySuccess(
         t(
-          `已更新 ${matchedProfile.model} 的 GLM 深度思考阈值。`,
-          `Updated GLM thinking threshold for ${matchedProfile.model}.`
+          `已更新「${mappingChannel.name}」中 ${matchedProfile.model} 的 GLM 深度思考阈值。`,
+          `Updated GLM thinking threshold for ${matchedProfile.model} in ${mappingChannel.name}.`
         )
       );
     } catch (err) {
@@ -3623,9 +3683,14 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                   {keyForm.modelMappings.length > 0 ? (
                     <div className="tc-model-list">
                       {keyForm.modelMappings.map((item, index) => {
-                        const targetProfile = findBoundChannelModelProfile(item.targetModel);
+                        const mappingChannel = resolveMappingChannel(item);
+                        const targetProfile = findChannelModelProfile(mappingChannel, item.targetModel);
+                        const showDoubaoThinkingControl = shouldShowDoubaoThinkingType(
+                          mappingChannel?.provider ?? "openai",
+                          targetProfile?.model ?? item.targetModel
+                        );
                         const showGlmThinkingControl = shouldShowGlmThinkingThreshold(
-                          selectedChannelForKey?.provider ?? "openai",
+                          mappingChannel?.provider ?? "openai",
                           targetProfile?.model ?? item.targetModel
                         );
 
@@ -3685,6 +3750,73 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                                 />
                               </label>
 
+                              <label className="tc-field">
+                                <span>
+                                  {t("绑定上游渠道（映射级）", "Bind Upstream (Mapping-level)")}
+                                </span>
+                                <Select
+                                  value={
+                                    typeof item.upstreamChannelId === "number"
+                                      ? String(item.upstreamChannelId)
+                                      : "__inherit__"
+                                  }
+                                  options={mappingBindChannelOptions}
+                                  onChange={(value) => {
+                                    const normalized = normalizeSelectValue(value);
+                                    const parsed = Number(normalized);
+                                    updateKeyModelMapping(item.id, (prev) => ({
+                                      ...prev,
+                                      upstreamChannelId:
+                                        normalized === "__inherit__" ||
+                                        !Number.isInteger(parsed) ||
+                                        parsed <= 0
+                                          ? null
+                                          : parsed
+                                    }));
+                                  }}
+                                />
+                              </label>
+
+                              {showDoubaoThinkingControl ? (
+                                <label className="tc-field">
+                                  <span>{t("豆包深度思考", "Doubao Thinking")}</span>
+                                  <Select
+                                    value={item.thinkingType ?? "__inherit__"}
+                                    options={[
+                                      {
+                                        value: "__inherit__",
+                                        label: t("继承请求参数", "Inherit request")
+                                      },
+                                      ...DOUBAO_THINKING_TYPES.map((thinkingType) => ({
+                                        value: thinkingType,
+                                        label: formatDoubaoThinkingTypeLabel(thinkingType)
+                                      }))
+                                    ]}
+                                    onChange={(value) => {
+                                      const normalized = normalizeSelectValue(value);
+                                      updateKeyModelMapping(item.id, (prev) => ({
+                                        ...prev,
+                                        thinkingType:
+                                          normalized === "enabled" ||
+                                          normalized === "disabled" ||
+                                          normalized === "auto"
+                                            ? normalized
+                                            : null
+                                      }));
+                                    }}
+                                  />
+                                </label>
+                              ) : null}
+
+                              {showDoubaoThinkingControl ? (
+                                <p className="tc-upstream-advice tc-field-wide">
+                                  {t(
+                                    "映射级可固定豆包 thinking.type（enabled/disabled/auto）。选择“继承请求参数”时，客户端传什么就透传什么；未传时按网关自动策略处理。",
+                                    "Mapping-level setting can pin Doubao thinking.type (enabled/disabled/auto). With 'Inherit request', client input is forwarded as-is; if absent, gateway auto strategy is used."
+                                  )}
+                                </p>
+                              ) : null}
+
                               {showGlmThinkingControl ? (
                                 <label className="tc-field">
                                   <span>
@@ -3701,7 +3833,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                                     }))}
                                     onChange={(value) =>
                                       void updateBoundChannelGlmThinkingThreshold(
-                                        item.targetModel,
+                                        item,
                                         normalizeGlmCodexThinkingThreshold(
                                           normalizeSelectValue(value)
                                         )
@@ -3711,27 +3843,36 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                                       loading ||
                                       savingKey ||
                                       savingChannel ||
-                                      !selectedChannelForKey ||
+                                      !mappingChannel ||
                                       !targetProfile
                                     }
                                   />
                                 </label>
                               ) : null}
 
-                              {showGlmThinkingControl && targetProfile ? (
+                              {showGlmThinkingControl && mappingChannel && targetProfile ? (
                                 <p className="tc-upstream-advice tc-field-wide">
                                   {t(
-                                    `当前映射会继承绑定渠道「${selectedChannelForKey?.name ?? ""}」中内部模型 ${targetProfile.model} 的思考阈值设置。达到该力度时，Codex 的 reasoning_effort 才会自动映射为 GLM thinking.enabled。`,
-                                    `This mapping inherits the thinking threshold from internal model ${targetProfile.model} in bound channel ${selectedChannelForKey?.name ?? ""}. Codex reasoning_effort only auto-maps to GLM thinking.enabled once the threshold is reached.`
+                                    `当前映射会继承渠道「${mappingChannel.name}」中内部模型 ${targetProfile.model} 的思考阈值设置。达到该力度时，Codex 的 reasoning_effort 才会自动映射为 GLM thinking.enabled。`,
+                                    `This mapping inherits the thinking threshold from internal model ${targetProfile.model} in channel ${mappingChannel.name}. Codex reasoning_effort only auto-maps to GLM thinking.enabled once the threshold is reached.`
                                   )}
                                 </p>
                               ) : null}
 
-                              {showGlmThinkingControl && !targetProfile ? (
+                              {showGlmThinkingControl && !mappingChannel ? (
                                 <p className="tc-tip err tc-field-wide">
                                   {t(
-                                    "这是一个 GLM 目标模型，但当前绑定渠道的模型池里还没有找到同名内部模型，所以暂时无法设置思考阈值。请先在上游渠道模型池中添加或修正该模型。",
-                                    "This is a GLM target model, but no matching internal model was found in the bound channel model pool yet, so the thinking threshold cannot be configured here. Add or fix the model in the upstream channel pool first."
+                                    "请先为该映射选择上游渠道，或让它继承 Key 绑定渠道。",
+                                    "Select an upstream channel for this mapping, or make it inherit the key-level channel first."
+                                  )}
+                                </p>
+                              ) : null}
+
+                              {showGlmThinkingControl && mappingChannel && !targetProfile ? (
+                                <p className="tc-tip err tc-field-wide">
+                                  {t(
+                                    "这是一个 GLM 目标模型，但当前映射渠道的模型池里还没有找到同名内部模型，所以暂时无法设置思考阈值。请先在对应上游渠道模型池中添加或修正该模型。",
+                                    "This is a GLM target model, but no matching internal model was found in the selected channel model pool yet, so the thinking threshold cannot be configured here. Add or fix the model in that upstream channel pool first."
                                   )}
                                 </p>
                               ) : null}

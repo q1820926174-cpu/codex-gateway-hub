@@ -16,7 +16,7 @@ import {
   serializeUpstreamModels,
   UPSTREAM_WIRE_APIS
 } from "@/lib/key-config";
-import { normalizeUpstreamModelCode, PROVIDERS } from "@/lib/providers";
+import { normalizeUpstreamModelCode, PROVIDERS, type ProviderName } from "@/lib/providers";
 import { clearGatewayKeyCache } from "@/lib/upstream";
 
 export const runtime = "nodejs";
@@ -98,14 +98,54 @@ export async function POST(req: Request) {
     }
 
     const defaultModel = (upstreamChannel?.defaultModel ?? payload.defaultModel).trim();
-    const effectiveProvider = (upstreamChannel?.provider ?? payload.provider) as (typeof PROVIDERS)[number];
+    const effectiveProvider = (upstreamChannel?.provider ?? payload.provider) as ProviderName;
     const effectiveWireApi = normalizeUpstreamWireApiValue(
       upstreamChannel?.upstreamWireApi ?? payload.upstreamWireApi
     ) as (typeof UPSTREAM_WIRE_APIS)[number];
-    const normalizedModelMappings = keyModelMappings.map((item) => ({
-      ...item,
-      targetModel: normalizeUpstreamModelCode(effectiveProvider, item.targetModel)
-    }));
+    const mappingChannelIds = Array.from(
+      new Set(
+        keyModelMappings
+          .map((item) => item.upstreamChannelId)
+          .filter(
+            (id): id is number =>
+              typeof id === "number" && Number.isInteger(id) && id > 0
+          )
+      )
+    );
+    const mappingChannels = mappingChannelIds.length
+      ? await prisma.upstreamChannel.findMany({
+          where: {
+            id: {
+              in: mappingChannelIds
+            }
+          }
+        })
+      : [];
+    const mappingChannelMap = new Map(mappingChannels.map((item) => [item.id, item]));
+    for (const channelId of mappingChannelIds) {
+      const channel = mappingChannelMap.get(channelId);
+      if (!channel || !channel.enabled) {
+        return NextResponse.json(
+          {
+            error: `Mapping upstream channel #${channelId} not found or disabled.`
+          },
+          { status: 400 }
+        );
+      }
+    }
+
+    const normalizedModelMappings = keyModelMappings.map((item) => {
+      const mappingChannel =
+        typeof item.upstreamChannelId === "number"
+          ? mappingChannelMap.get(item.upstreamChannelId) ?? null
+          : null;
+      const mappingProvider = (mappingChannel?.provider ?? effectiveProvider) as ProviderName;
+      return {
+        ...item,
+        targetModel: normalizeUpstreamModelCode(mappingProvider, item.targetModel),
+        upstreamChannelId: item.upstreamChannelId ?? null
+      };
+    });
     const fallbackVisionModel =
       (upstreamChannel?.visionModel ?? payload.visionModel)?.trim() || null;
     const normalizedPool = normalizeUpstreamModels(

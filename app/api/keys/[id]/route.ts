@@ -183,10 +183,49 @@ export async function PUT(
     payload.modelMappings !== undefined
       ? normalizeKeyModelMappings(payload.modelMappings)
       : normalizeKeyModelMappings(existing.modelMappingsJson);
-  const normalizedModelMappings = nextModelMappings.map((item) => ({
-    ...item,
-    targetModel: normalizeUpstreamModelCode(nextProvider, item.targetModel)
-  }));
+  const mappingChannelIds = Array.from(
+    new Set(
+      nextModelMappings
+        .map((item) => item.upstreamChannelId)
+        .filter(
+          (channelId): channelId is number =>
+            typeof channelId === "number" && Number.isInteger(channelId) && channelId > 0
+        )
+    )
+  );
+  const mappingChannels = mappingChannelIds.length
+    ? await prisma.upstreamChannel.findMany({
+        where: {
+          id: {
+            in: mappingChannelIds
+          }
+        }
+      })
+    : [];
+  const mappingChannelMap = new Map(mappingChannels.map((item) => [item.id, item]));
+  for (const channelId of mappingChannelIds) {
+    const channel = mappingChannelMap.get(channelId);
+    if (!channel || !channel.enabled) {
+      return NextResponse.json(
+        {
+          error: `Mapping upstream channel #${channelId} not found or disabled.`
+        },
+        { status: 400 }
+      );
+    }
+  }
+  const normalizedModelMappings = nextModelMappings.map((item) => {
+    const mappingChannel =
+      typeof item.upstreamChannelId === "number"
+        ? mappingChannelMap.get(item.upstreamChannelId) ?? null
+        : null;
+    const mappingProvider = (mappingChannel?.provider ?? nextProvider) as ProviderName;
+    return {
+      ...item,
+      targetModel: normalizeUpstreamModelCode(mappingProvider, item.targetModel),
+      upstreamChannelId: item.upstreamChannelId ?? null
+    };
+  });
 
   const fallbackWireApi = normalizeUpstreamWireApiValue(
     selectedChannel?.upstreamWireApi ?? payload.upstreamWireApi ?? existing.upstreamWireApi

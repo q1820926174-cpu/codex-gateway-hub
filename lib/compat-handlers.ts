@@ -41,9 +41,9 @@ import {
 } from "@/lib/upstream";
 import { prisma } from "@/lib/prisma";
 import {
-  mapModelByKeyMappings,
   normalizeGlmCodexThinkingThresholdValue,
   normalizeUpstreamModels,
+  pickModelFromPool,
   normalizeUpstreamWireApiValue,
   type GlmCodexThinkingThreshold
 } from "@/lib/key-config";
@@ -73,8 +73,53 @@ function pickRequestedModel(modelFromBody: string | undefined, key: ResolvedGate
   return modelFromBody ?? key.defaultModel;
 }
 
-function mapRequestedModelForKey(requestedModel: string, key: ResolvedGatewayKey) {
-  return mapModelByKeyMappings(requestedModel, key.modelMappings);
+type RequestedModelMappingResolution = {
+  mapping: ResolvedGatewayKey["modelMappings"][number] | null;
+  mappedModel: string;
+  candidateMappings: Array<ResolvedGatewayKey["modelMappings"][number] | null>;
+  roundRobinKey: string;
+};
+
+function normalizeMappingCompareKey(value: string | null | undefined) {
+  return value?.trim().toLowerCase() || "";
+}
+
+function resolveRequestedModelMapping(requestedModel: string, key: ResolvedGatewayKey) {
+  const requestedKey = normalizeMappingCompareKey(requestedModel);
+  const matchedMappings = key.modelMappings.filter(
+    (item) => normalizeMappingCompareKey(item.clientModel) === requestedKey
+  );
+  if (!matchedMappings.length) {
+    return {
+      mapping: null,
+      mappedModel: requestedModel,
+      candidateMappings: [null],
+      roundRobinKey: `${key.id}:${requestedKey}:direct`
+    } satisfies RequestedModelMappingResolution;
+  }
+
+  const enabledMappings = matchedMappings.filter((item) => item.enabled);
+  const preferredMappings = enabledMappings.length ? enabledMappings : matchedMappings;
+  const mapping = preferredMappings[0] ?? null;
+  const mappedModel = mapping?.targetModel ?? requestedModel;
+  const mappedModelKey = normalizeMappingCompareKey(mappedModel);
+  const sameModelMappings = mapping
+    ? preferredMappings.filter(
+        (item) => normalizeMappingCompareKey(item.targetModel) === mappedModelKey
+      )
+    : preferredMappings;
+  const candidateMappings = sameModelMappings.length
+    ? sameModelMappings
+    : mapping
+      ? [mapping]
+      : [null];
+
+  return {
+    mapping,
+    mappedModel,
+    candidateMappings,
+    roundRobinKey: `${key.id}:${requestedKey}:${mappedModelKey || "direct"}`
+  } satisfies RequestedModelMappingResolution;
 }
 
 function collectCustomToolNamesFromResponsesRequest(body: ResponsesRequest): Set<string> {
@@ -198,7 +243,7 @@ type VisionCaptionCacheEntry = {
 };
 
 const visionCaptionCache = new Map<string, VisionCaptionCacheEntry>();
-const AGENTS_MD_KEYWORD = "AGENTS.md";
+const AGENTS_MD_KEYWORDS = ["AGENTS.md", "AGENTS.MD", "agents.md"] as const;
 const CHINESE_REPLY_HINT = `
 You are a coding agent with access to the \`apply_patch\` tool.
 
@@ -273,8 +318,10 @@ Only send the patch text as the \`input\` to \`apply_patch\`.
 ### Delete a file
 *** Begin Patch
 *** Delete File: old_script.py
-*** End Patch
-Please reply in Chinese.
+*** End Patch \n
+You must use Chinese for both reasoning and responses.
+Do not think in or output any other language.
+Chinese is mandatory for all internal reasoning and external replies unless explicitly instructed otherwise. \n
 `;
 
 function parsePositiveIntEnv(
@@ -647,6 +694,372 @@ function resolveRuntimeModel(key: ResolvedGatewayKey, model: string): RuntimeMod
     clientModel: model,
     profile
   };
+}
+
+async function resolveMappingRuntimeKey(
+  key: ResolvedGatewayKey,
+  mapping: ResolvedGatewayKey["modelMappings"][number] | null
+) {
+  const mappingChannelId = mapping?.upstreamChannelId ?? null;
+  if (!mappingChannelId) {
+    return { ok: true as const, key };
+  }
+
+  const channel = await prisma.upstreamChannel.findUnique({
+    where: { id: mappingChannelId }
+  });
+  if (!channel || !channel.enabled) {
+    return {
+      ok: false as const,
+      status: 400,
+      body: {
+        error:
+          "Mapping upstream channel not found or disabled. Check modelMappings[].upstreamChannelId configuration."
+      }
+    };
+  }
+
+  const channelApiKey = channel.upstreamApiKey?.trim() || null;
+  if (!channelApiKey) {
+    return {
+      ok: false as const,
+      status: 400,
+      body: {
+        error:
+          "Mapping upstream channel has no upstream API key configured."
+      }
+    };
+  }
+
+  const channelWireApi = normalizeUpstreamWireApiValue(channel.upstreamWireApi);
+  const channelModels = normalizeUpstreamModels(channel.upstreamModelsJson, {
+    model: channel.defaultModel,
+    upstreamWireApi: channelWireApi,
+    supportsVision: channel.supportsVision,
+    visionModel: channel.visionModel
+  });
+  const defaultProfile =
+    pickModelFromPool(channelModels, channel.defaultModel) ??
+    channelModels[0] ??
+    null;
+  const resolvedSupportsVision = defaultProfile?.supportsVision ?? channel.supportsVision;
+  const resolvedVisionChannelId = resolvedSupportsVision
+    ? null
+    : defaultProfile?.visionChannelId ?? null;
+  const resolvedVisionModel = resolvedSupportsVision
+    ? null
+    : defaultProfile?.visionModel ?? channel.visionModel ?? null;
+
+  return {
+    ok: true as const,
+    key: {
+      ...key,
+      provider: channel.provider,
+      upstreamWireApi: channelWireApi,
+      upstreamBaseUrl: channel.upstreamBaseUrl,
+      upstreamApiKey: channelApiKey,
+      upstreamModels: channelModels,
+      defaultModel: defaultProfile?.model ?? channel.defaultModel,
+      supportsVision: resolvedSupportsVision,
+      visionChannelId: resolvedVisionChannelId,
+      visionModel: resolvedVisionModel,
+      timeoutMs: channel.timeoutMs
+    }
+  };
+}
+
+type ResolvedModelCandidate = RuntimeModelResolved & {
+  mapping: ResolvedGatewayKey["modelMappings"][number] | null;
+};
+
+const modelFailoverRoundRobinCursor = new Map<string, number>();
+
+function dedupeCandidateMappings(
+  mappings: Array<ResolvedGatewayKey["modelMappings"][number] | null>
+) {
+  const seen = new Set<string>();
+  const deduped: Array<ResolvedGatewayKey["modelMappings"][number] | null> = [];
+  for (const mapping of mappings) {
+    const key = mapping?.id?.trim() || "__inherit_key_upstream__";
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    deduped.push(mapping);
+  }
+  return deduped;
+}
+
+function rotateCandidatesForRoundRobin<T>(items: T[], key: string) {
+  if (items.length <= 1 || !key.trim()) {
+    return items;
+  }
+  const cursor = modelFailoverRoundRobinCursor.get(key) ?? 0;
+  const start = ((cursor % items.length) + items.length) % items.length;
+  modelFailoverRoundRobinCursor.set(key, (start + 1) % items.length);
+  if (start === 0) {
+    return items;
+  }
+  return [...items.slice(start), ...items.slice(0, start)];
+}
+
+function isFailoverRetryableStatus(status: number) {
+  return status === 408 || status === 409 || status === 425 || status === 429 || status >= 500;
+}
+
+function extractErrorMessage(error: unknown) {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return typeof error === "string" ? error : String(error);
+}
+
+function buildUpstreamNetworkErrorBody(error: unknown) {
+  return {
+    error: "Upstream request failed.",
+    detail: extractErrorMessage(error)
+  };
+}
+
+async function resolveModelCandidatesForRequest(params: {
+  baseKey: ResolvedGatewayKey;
+  requestedModel: string;
+  mappedModel: string;
+  promptTokensEstimate: number;
+  mappingResolution: RequestedModelMappingResolution;
+}) {
+  const dynamicPick = pickModelByContext(
+    params.mappedModel,
+    params.promptTokensEstimate,
+    params.baseKey
+  );
+  const clientModel = dynamicPick.switched ? dynamicPick.model : params.requestedModel;
+  const mappingCandidates = dedupeCandidateMappings(params.mappingResolution.candidateMappings);
+  const resolvedCandidates: ResolvedModelCandidate[] = [];
+  let firstFailure:
+    | {
+        status: number;
+        body: {
+          error: string;
+        };
+      }
+    | null = null;
+
+  for (const mappingCandidate of mappingCandidates) {
+    const mappedRuntimeKey = await resolveMappingRuntimeKey(
+      params.baseKey,
+      mappingCandidate
+    );
+    if (!mappedRuntimeKey.ok) {
+      if (!firstFailure) {
+        firstFailure = {
+          status: mappedRuntimeKey.status,
+          body: mappedRuntimeKey.body
+        };
+      }
+      continue;
+    }
+    const runtimeResolved = resolveRuntimeModel(
+      mappedRuntimeKey.key,
+      dynamicPick.model
+    );
+    resolvedCandidates.push({
+      ...runtimeResolved,
+      clientModel,
+      mapping: mappingCandidate
+    });
+  }
+
+  if (!resolvedCandidates.length) {
+    return {
+      ok: false as const,
+      status: firstFailure?.status ?? 400,
+      body: firstFailure?.body ?? {
+        error: "No available upstream candidate for this model mapping."
+      }
+    };
+  }
+
+  const roundRobinCandidates = rotateCandidatesForRoundRobin(
+    resolvedCandidates,
+    params.mappingResolution.roundRobinKey
+  );
+  const preferredWireApi = roundRobinCandidates[0]?.runtimeKey.upstreamWireApi;
+  const wireCompatibleCandidates = preferredWireApi
+    ? roundRobinCandidates.filter(
+        (item) => item.runtimeKey.upstreamWireApi === preferredWireApi
+      )
+    : roundRobinCandidates;
+
+  return {
+    ok: true as const,
+    candidates: wireCompatibleCandidates
+  };
+}
+
+type JsonLikeUpstreamResult = {
+  ok: boolean;
+  status: number;
+  body: unknown;
+};
+
+type JsonModelFailoverSuccess<T extends JsonLikeUpstreamResult> = {
+  ok: true;
+  candidate: ResolvedModelCandidate;
+  result: T & { ok: true };
+};
+
+type JsonModelFailoverFailure = {
+  ok: false;
+  candidate: ResolvedModelCandidate | null;
+  status: number;
+  body: unknown;
+};
+
+async function callJsonWithModelFailover<T extends JsonLikeUpstreamResult>(
+  candidates: ResolvedModelCandidate[],
+  caller: (candidate: ResolvedModelCandidate) => Promise<T>
+): Promise<JsonModelFailoverSuccess<T> | JsonModelFailoverFailure> {
+  if (!candidates.length) {
+    return {
+      ok: false,
+      candidate: null,
+      status: 400,
+      body: {
+        error: "No upstream candidate available."
+      }
+    };
+  }
+
+  for (let index = 0; index < candidates.length; index += 1) {
+    const candidate = candidates[index];
+    const hasNext = index < candidates.length - 1;
+    try {
+      const result = await caller(candidate);
+      if (result.ok) {
+        return {
+          ok: true,
+          candidate,
+          result: result as T & { ok: true }
+        };
+      }
+      if (hasNext && isFailoverRetryableStatus(result.status)) {
+        continue;
+      }
+      return {
+        ok: false,
+        candidate,
+        status: result.status,
+        body: result.body
+      };
+    } catch (error) {
+      if (hasNext) {
+        continue;
+      }
+      return {
+        ok: false,
+        candidate,
+        status: 502,
+        body: buildUpstreamNetworkErrorBody(error)
+      };
+    }
+  }
+
+  return {
+    ok: false,
+    candidate: candidates[candidates.length - 1] ?? null,
+    status: 502,
+    body: {
+      error: "All upstream candidates failed."
+    }
+  };
+}
+
+type StreamModelFailoverSuccess = {
+  ok: true;
+  candidate: ResolvedModelCandidate;
+  response: Response;
+};
+
+type StreamModelFailoverFailure = {
+  ok: false;
+  candidate: ResolvedModelCandidate | null;
+  status: number;
+  response: Response | null;
+  body: unknown;
+};
+
+async function callStreamWithModelFailover(
+  candidates: ResolvedModelCandidate[],
+  caller: (candidate: ResolvedModelCandidate) => Promise<Response>
+): Promise<StreamModelFailoverSuccess | StreamModelFailoverFailure> {
+  if (!candidates.length) {
+    return {
+      ok: false,
+      candidate: null,
+      status: 400,
+      response: null,
+      body: {
+        error: "No upstream candidate available."
+      }
+    };
+  }
+
+  for (let index = 0; index < candidates.length; index += 1) {
+    const candidate = candidates[index];
+    const hasNext = index < candidates.length - 1;
+    try {
+      const response = await caller(candidate);
+      if (response.ok) {
+        return {
+          ok: true,
+          candidate,
+          response
+        };
+      }
+      if (hasNext && isFailoverRetryableStatus(response.status)) {
+        continue;
+      }
+      return {
+        ok: false,
+        candidate,
+        status: response.status,
+        response,
+        body: {
+          error: "Upstream stream API error.",
+          status: response.status
+        }
+      };
+    } catch (error) {
+      if (hasNext) {
+        continue;
+      }
+      return {
+        ok: false,
+        candidate,
+        status: 502,
+        response: null,
+        body: buildUpstreamNetworkErrorBody(error)
+      };
+    }
+  }
+
+  return {
+    ok: false,
+    candidate: candidates[candidates.length - 1] ?? null,
+    status: 502,
+    response: null,
+    body: {
+      error: "All upstream candidates failed."
+    }
+  };
+}
+
+function streamFailoverFailureToResponse(failure: StreamModelFailoverFailure) {
+  if (failure.response) {
+    return failure.response;
+  }
+  return NextResponse.json(failure.body, { status: failure.status });
 }
 
 const SSE_RESPONSE_HEADERS = {
@@ -1231,7 +1644,13 @@ function normalizeOptionalString(value: unknown) {
 }
 
 function injectChineseReplyHintBeforeAgents(text: string) {
-  const agentsIndex = text.indexOf(AGENTS_MD_KEYWORD);
+  let agentsIndex = -1;
+  for (const keyword of AGENTS_MD_KEYWORDS) {
+    const index = text.indexOf(keyword);
+    if (index >= 0 && (agentsIndex < 0 || index < agentsIndex)) {
+      agentsIndex = index;
+    }
+  }
   if (agentsIndex < 0) {
     return text;
   }
@@ -1783,7 +2202,10 @@ function normalizeThinkingType(value: unknown) {
     return "";
   }
   const normalized = value.trim().toLowerCase();
-  if (normalized === "enabled" || normalized === "disabled" || normalized === "adaptive") {
+  if (normalized === "adaptive") {
+    return "auto";
+  }
+  if (normalized === "enabled" || normalized === "disabled" || normalized === "auto") {
     return normalized;
   }
   return "";
@@ -2015,7 +2437,8 @@ function shouldEnableGlmThinkingForEffort(
 function applyCodexThinkingModeForChat<T extends LegacyChatRequest>(
   payload: T,
   provider: string,
-  glmCodexThinkingThreshold?: GlmCodexThinkingThreshold | null
+  glmCodexThinkingThreshold?: GlmCodexThinkingThreshold | null,
+  preferredThinkingType?: "enabled" | "disabled" | "auto" | null
 ): T {
   const reasoningEffort = resolveReasoningEffortForChatPayload(payload);
   const reasoningSummary =
@@ -2037,6 +2460,7 @@ function applyCodexThinkingModeForChat<T extends LegacyChatRequest>(
   };
   // GLM chat/completions follows documented `thinking.type` only.
   const normalizedProvider = provider.trim().toLowerCase();
+  const preferredType = normalizeThinkingType(preferredThinkingType);
   if (normalizedProvider === "glm") {
     nextPayload.messages = sanitizeLegacyMessagesForGenericUpstream(payload.messages, {
       preserveReasoningContent: true
@@ -2044,7 +2468,11 @@ function applyCodexThinkingModeForChat<T extends LegacyChatRequest>(
     const threshold = normalizeGlmCodexThinkingThresholdValue(glmCodexThinkingThreshold);
     const existingThinking = payload.thinking && typeof payload.thinking === "object" ? payload.thinking : null;
     const incomingType = normalizeThinkingType(existingThinking ? (existingThinking as { type?: unknown }).type : undefined);
-    const type = incomingType
+    const type = preferredType
+      ? preferredType === "disabled"
+        ? "disabled"
+        : "enabled"
+      : incomingType
       ? incomingType === "disabled"
         ? "disabled"
         : "enabled"
@@ -2080,6 +2508,45 @@ function applyCodexThinkingModeForChat<T extends LegacyChatRequest>(
     };
     return nextPayload as T;
   }
+
+  if (normalizedProvider === "doubao") {
+    // Doubao chat/responses supports explicit thinking mode and reasoning_effort.
+    // Preserve reasoning_content history for multi-turn/tool-call scenarios.
+    nextPayload.messages = sanitizeLegacyMessagesForGenericUpstream(payload.messages, {
+      preserveReasoningContent: true
+    });
+    const existingThinking = payload.thinking && typeof payload.thinking === "object" ? payload.thinking : null;
+    const incomingType = normalizeThinkingType(
+      existingThinking ? (existingThinking as { type?: unknown }).type : undefined
+    );
+    const type = preferredType
+      ? preferredType
+      : incomingType
+      ? incomingType === "disabled"
+        ? "disabled"
+        : incomingType === "auto"
+          ? "auto"
+          : "enabled"
+      : reasoningEffort
+        ? isThinkingDisabledByEffort(reasoningEffort)
+          ? "disabled"
+          : "enabled"
+        : reasoningSummary || hasReasoningHistory
+          ? "enabled"
+          : "";
+
+    nextPayload.anthropic_output_config = undefined;
+    if (reasoningEffort) {
+      nextPayload.reasoning_effort = reasoningEffort;
+    }
+    if (!type) {
+      nextPayload.thinking = undefined;
+      return nextPayload as T;
+    }
+    nextPayload.thinking = { type };
+    return nextPayload as T;
+  }
+
   // `thinking` is Anthropic-specific. For generic chat/completions upstreams we normalize it
   // into reasoning_effort and remove unsupported fields.
   nextPayload.anthropic_output_config = undefined;
@@ -2087,6 +2554,53 @@ function applyCodexThinkingModeForChat<T extends LegacyChatRequest>(
   if (reasoningEffort) {
     nextPayload.reasoning_effort = reasoningEffort;
   }
+  return nextPayload as T;
+}
+
+function applyCodexThinkingModeForResponses<T extends ResponsesRequest>(
+  payload: T,
+  provider: string,
+  preferredThinkingType?: "enabled" | "disabled" | "auto" | null
+): T {
+  const normalizedProvider = provider.trim().toLowerCase();
+  if (normalizedProvider !== "doubao") {
+    return payload;
+  }
+
+  const nextPayload: ResponsesRequest = { ...payload };
+  const preferredType = normalizeThinkingType(preferredThinkingType);
+  const existingThinking =
+    nextPayload.thinking && typeof nextPayload.thinking === "object"
+      ? nextPayload.thinking
+      : null;
+  const incomingType = normalizeThinkingType(
+    existingThinking ? (existingThinking as { type?: unknown }).type : undefined
+  );
+  const reasoningEffort =
+    typeof nextPayload.reasoning_effort === "string" && nextPayload.reasoning_effort.trim()
+      ? nextPayload.reasoning_effort.trim()
+      : nextPayload.reasoning &&
+          typeof nextPayload.reasoning === "object" &&
+          typeof nextPayload.reasoning.effort === "string"
+        ? nextPayload.reasoning.effort.trim()
+        : "";
+  const type = preferredType
+    ? preferredType
+    : incomingType
+      ? incomingType
+      : reasoningEffort
+        ? isThinkingDisabledByEffort(reasoningEffort)
+          ? "disabled"
+          : "enabled"
+        : "";
+  if (!type) {
+    nextPayload.thinking = undefined;
+    return nextPayload as T;
+  }
+  nextPayload.thinking = {
+    ...(existingThinking ?? {}),
+    type
+  };
   return nextPayload as T;
 }
 
@@ -4755,18 +5269,21 @@ export async function handleLegacyChatCompletions(
   );
 
   const requestedModel = pickRequestedModel(body.model, resolved.key);
-  const mappedRequestedModel = mapRequestedModelForKey(requestedModel, resolved.key);
+  const modelMapping = resolveRequestedModelMapping(requestedModel, resolved.key);
+  const mappedRequestedModel = modelMapping.mappedModel;
   const promptTokensEstimate = estimateLegacyChatTokens(body, mappedRequestedModel);
-  const dynamicPick = pickModelByContext(
-    mappedRequestedModel,
+  const resolvedCandidates = await resolveModelCandidatesForRequest({
+    baseKey: resolved.key,
+    requestedModel,
+    mappedModel: mappedRequestedModel,
     promptTokensEstimate,
-    resolved.key
-  );
-  const runtimeResolved = resolveRuntimeModel(resolved.key, dynamicPick.model);
-  const modelResolved = {
-    ...runtimeResolved,
-    clientModel: dynamicPick.switched ? dynamicPick.model : requestedModel
-  };
+    mappingResolution: modelMapping
+  });
+  if (!resolvedCandidates.ok) {
+    return NextResponse.json(resolvedCandidates.body, { status: resolvedCandidates.status });
+  }
+  const modelCandidates = resolvedCandidates.candidates;
+  const modelResolved = modelCandidates[0];
   const runtimeKey = modelResolved.runtimeKey;
 
   const rewritten = await describeMediaWithVisionModel(body, runtimeKey, {
@@ -4781,29 +5298,35 @@ export async function handleLegacyChatCompletions(
 
   if (isStreamingRequest(body)) {
     if (runtimeKey.upstreamWireApi === "chat_completions") {
-      const upstreamPayload = applyCodexThinkingModeForChat(
-        {
-          ...rewritten.body,
-          model: modelResolved.upstreamModel,
-          stream: true
-        },
-        runtimeKey.provider,
-        modelResolved.profile?.glmCodexThinkingThreshold
+      const upstreamResult = await callStreamWithModelFailover(
+        modelCandidates,
+        async (candidate) =>
+          callChatCompletionsApiStream(
+            applyCodexThinkingModeForChat(
+              {
+                ...rewritten.body,
+                model: candidate.upstreamModel,
+                stream: true
+              },
+              candidate.runtimeKey.provider,
+              candidate.profile?.glmCodexThinkingThreshold,
+              candidate.mapping?.thinkingType ?? null
+            ),
+            candidate.runtimeKey
+          )
       );
-      const upstream = await callChatCompletionsApiStream(
-        upstreamPayload,
-        runtimeKey
-      );
-      if (!upstream.ok) {
-        return upstream;
+      if (!upstreamResult.ok) {
+        return streamFailoverFailureToResponse(upstreamResult);
       }
+      const activeCandidate = upstreamResult.candidate;
+      const upstream = upstreamResult.response;
       return trackUsageFromSse(upstream, "chat_completions", {
-        key: runtimeKey,
+        key: activeCandidate.runtimeKey,
         route,
         requestWireApi: "chat_completions",
         requestedModel,
-        clientModel: modelResolved.clientModel,
-        upstreamModel: modelResolved.upstreamModel,
+        clientModel: activeCandidate.clientModel,
+        upstreamModel: activeCandidate.upstreamModel,
         promptTokensEstimate,
         stream: true,
         systemPrompt: promptSnapshot.systemPrompt,
@@ -4812,92 +5335,120 @@ export async function handleLegacyChatCompletions(
       });
     }
     if (runtimeKey.upstreamWireApi === "anthropic_messages") {
-      const upstreamPayload = mapLegacyChatToAnthropicMessages(
-        {
-          ...rewritten.body,
-          model: modelResolved.upstreamModel,
-          stream: true
-        },
-        runtimeKey.defaultModel
+      const upstreamResult = await callStreamWithModelFailover(
+        modelCandidates,
+        async (candidate) => {
+          const upstreamPayload = mapLegacyChatToAnthropicMessages(
+            {
+              ...rewritten.body,
+              model: candidate.upstreamModel,
+              stream: true
+            },
+            candidate.runtimeKey.defaultModel
+          );
+          upstreamPayload.model = candidate.upstreamModel;
+          return callAnthropicMessagesApiStream(upstreamPayload, candidate.runtimeKey);
+        }
       );
-      upstreamPayload.model = modelResolved.upstreamModel;
-      const upstream = await callAnthropicMessagesApiStream(upstreamPayload, runtimeKey);
-      if (!upstream.ok) {
-        return upstream;
+      if (!upstreamResult.ok) {
+        return streamFailoverFailureToResponse(upstreamResult);
       }
+      const activeCandidate = upstreamResult.candidate;
+      const upstream = upstreamResult.response;
       const tracked = trackUsageFromSse(upstream, "anthropic_messages", {
-        key: runtimeKey,
+        key: activeCandidate.runtimeKey,
         route,
         requestWireApi: "chat_completions",
         requestedModel,
-        clientModel: modelResolved.clientModel,
-        upstreamModel: modelResolved.upstreamModel,
+        clientModel: activeCandidate.clientModel,
+        upstreamModel: activeCandidate.upstreamModel,
         promptTokensEstimate,
         stream: true,
         systemPrompt: promptSnapshot.systemPrompt,
         userPrompt: promptSnapshot.userPrompt,
         conversationTranscript: promptSnapshot.conversationTranscript
       });
-      const responsesStream = transformAnthropicStreamToResponses(tracked, modelResolved.clientModel, {
+      const responsesStream = transformAnthropicStreamToResponses(tracked, activeCandidate.clientModel, {
         promptTokensEstimate
       });
-      return transformResponsesStreamToLegacyChat(responsesStream, modelResolved.clientModel);
+      return transformResponsesStreamToLegacyChat(responsesStream, activeCandidate.clientModel);
     }
     const payload = mapLegacyChatToResponses(rewritten.body, runtimeKey.defaultModel, {
       allowVisionInput: runtimeKey.supportsVision
     });
-    payload.model = modelResolved.upstreamModel;
-    const upstream = await callResponsesApiStream(
-      {
-        ...payload,
-        model: modelResolved.upstreamModel,
-        stream: true
-      },
-      runtimeKey
+    const upstreamResult = await callStreamWithModelFailover(
+      modelCandidates,
+      async (candidate) => {
+        const candidatePayload = {
+          ...payload,
+          model: candidate.upstreamModel
+        };
+        const responsesPayload = applyCodexThinkingModeForResponses(
+          candidatePayload,
+          candidate.runtimeKey.provider,
+          candidate.mapping?.thinkingType ?? null
+        );
+        return callResponsesApiStream(
+          {
+            ...responsesPayload,
+            model: candidate.upstreamModel,
+            stream: true
+          },
+          candidate.runtimeKey
+        );
+      }
     );
-    if (!upstream.ok) {
-      return upstream;
+    if (!upstreamResult.ok) {
+      return streamFailoverFailureToResponse(upstreamResult);
     }
+    const activeCandidate = upstreamResult.candidate;
+    const upstream = upstreamResult.response;
     const tracked = trackUsageFromSse(upstream, "responses", {
-      key: runtimeKey,
+      key: activeCandidate.runtimeKey,
       route,
       requestWireApi: "chat_completions",
       requestedModel,
-      clientModel: modelResolved.clientModel,
-      upstreamModel: modelResolved.upstreamModel,
+      clientModel: activeCandidate.clientModel,
+      upstreamModel: activeCandidate.upstreamModel,
       promptTokensEstimate,
       stream: true,
       systemPrompt: promptSnapshot.systemPrompt,
       userPrompt: promptSnapshot.userPrompt,
       conversationTranscript: promptSnapshot.conversationTranscript
     });
-    return transformResponsesStreamToLegacyChat(tracked, modelResolved.clientModel);
+    return transformResponsesStreamToLegacyChat(tracked, activeCandidate.clientModel);
   }
 
   if (runtimeKey.upstreamWireApi === "chat_completions") {
-    const upstreamPayload = applyCodexThinkingModeForChat(
-      {
-        ...rewritten.body,
-        model: modelResolved.upstreamModel
-      },
-      runtimeKey.provider,
-      modelResolved.profile?.glmCodexThinkingThreshold
+    const upstreamResult = await callJsonWithModelFailover(
+      modelCandidates,
+      async (candidate) =>
+        callChatCompletionsApi(
+          applyCodexThinkingModeForChat(
+            {
+              ...rewritten.body,
+              model: candidate.upstreamModel
+            },
+            candidate.runtimeKey.provider,
+            candidate.profile?.glmCodexThinkingThreshold,
+            candidate.mapping?.thinkingType ?? null
+          ),
+          candidate.runtimeKey
+        )
     );
-    const upstream = await callChatCompletionsApi(
-      upstreamPayload,
-      runtimeKey
-    );
-    if (!upstream.ok) {
-      return NextResponse.json(upstream.body, { status: upstream.status });
+    if (!upstreamResult.ok) {
+      return NextResponse.json(upstreamResult.body, { status: upstreamResult.status });
     }
+    const activeCandidate = upstreamResult.candidate;
+    const upstream = upstreamResult.result;
     void persistUsageEvent(
       {
-        key: runtimeKey,
+        key: activeCandidate.runtimeKey,
         route,
         requestWireApi: "chat_completions",
         requestedModel,
-        clientModel: modelResolved.clientModel,
-        upstreamModel: modelResolved.upstreamModel,
+        clientModel: activeCandidate.clientModel,
+        upstreamModel: activeCandidate.upstreamModel,
         promptTokensEstimate,
         stream: false,
         systemPrompt: promptSnapshot.systemPrompt,
@@ -4912,26 +5463,33 @@ export async function handleLegacyChatCompletions(
   }
 
   if (runtimeKey.upstreamWireApi === "anthropic_messages") {
-    const upstreamPayload = mapLegacyChatToAnthropicMessages(
-      {
-        ...rewritten.body,
-        model: modelResolved.upstreamModel
-      },
-      runtimeKey.defaultModel
+    const upstreamResult = await callJsonWithModelFailover(
+      modelCandidates,
+      async (candidate) => {
+        const upstreamPayload = mapLegacyChatToAnthropicMessages(
+          {
+            ...rewritten.body,
+            model: candidate.upstreamModel
+          },
+          candidate.runtimeKey.defaultModel
+        );
+        upstreamPayload.model = candidate.upstreamModel;
+        return callAnthropicMessagesApi(upstreamPayload, candidate.runtimeKey);
+      }
     );
-    upstreamPayload.model = modelResolved.upstreamModel;
-    const upstream = await callAnthropicMessagesApi(upstreamPayload, runtimeKey);
-    if (!upstream.ok) {
-      return NextResponse.json(upstream.body, { status: upstream.status });
+    if (!upstreamResult.ok) {
+      return NextResponse.json(upstreamResult.body, { status: upstreamResult.status });
     }
+    const activeCandidate = upstreamResult.candidate;
+    const upstream = upstreamResult.result;
     void persistUsageEvent(
       {
-        key: runtimeKey,
+        key: activeCandidate.runtimeKey,
         route,
         requestWireApi: "chat_completions",
         requestedModel,
-        clientModel: modelResolved.clientModel,
-        upstreamModel: modelResolved.upstreamModel,
+        clientModel: activeCandidate.clientModel,
+        upstreamModel: activeCandidate.upstreamModel,
         promptTokensEstimate,
         stream: false,
         systemPrompt: promptSnapshot.systemPrompt,
@@ -4942,25 +5500,40 @@ export async function handleLegacyChatCompletions(
       extractAnthropicMessageText(upstream.body),
       extractAnthropicThinkingText(upstream.body)
     );
-    return NextResponse.json(mapAnthropicToLegacyChat(upstream.body, modelResolved.clientModel));
+    return NextResponse.json(mapAnthropicToLegacyChat(upstream.body, activeCandidate.clientModel));
   }
 
   const payload = mapLegacyChatToResponses(rewritten.body, runtimeKey.defaultModel, {
     allowVisionInput: runtimeKey.supportsVision
   });
-  payload.model = modelResolved.upstreamModel;
-  const upstream = await callResponsesApi(payload, runtimeKey);
-  if (!upstream.ok) {
-    return NextResponse.json(upstream.body, { status: upstream.status });
+  const upstreamResult = await callJsonWithModelFailover(
+    modelCandidates,
+    async (candidate) => {
+      const candidatePayload = {
+        ...payload,
+        model: candidate.upstreamModel
+      };
+      const responsesPayload = applyCodexThinkingModeForResponses(
+        candidatePayload,
+        candidate.runtimeKey.provider,
+        candidate.mapping?.thinkingType ?? null
+      );
+      return callResponsesApi(responsesPayload, candidate.runtimeKey);
+    }
+  );
+  if (!upstreamResult.ok) {
+    return NextResponse.json(upstreamResult.body, { status: upstreamResult.status });
   }
+  const activeCandidate = upstreamResult.candidate;
+  const upstream = upstreamResult.result;
   void persistUsageEvent(
     {
-      key: runtimeKey,
+      key: activeCandidate.runtimeKey,
       route,
       requestWireApi: "chat_completions",
       requestedModel,
-      clientModel: modelResolved.clientModel,
-      upstreamModel: modelResolved.upstreamModel,
+      clientModel: activeCandidate.clientModel,
+      upstreamModel: activeCandidate.upstreamModel,
       promptTokensEstimate,
       stream: false,
       systemPrompt: promptSnapshot.systemPrompt,
@@ -4972,7 +5545,7 @@ export async function handleLegacyChatCompletions(
     extractResponsesReasoningText(upstream.body)
   );
 
-  return NextResponse.json(mapResponsesToLegacyChat(upstream.body, modelResolved.clientModel));
+  return NextResponse.json(mapResponsesToLegacyChat(upstream.body, activeCandidate.clientModel));
 }
 
 export async function handleAnthropicMessages(
@@ -4998,18 +5571,27 @@ export async function handleAnthropicMessages(
   );
 
   const requestedModel = pickRequestedModel(body.model, resolved.key);
-  const mappedRequestedModel = mapRequestedModelForKey(requestedModel, resolved.key);
+  const modelMapping = resolveRequestedModelMapping(requestedModel, resolved.key);
+  const mappedRequestedModel = modelMapping.mappedModel;
   const promptTokensEstimate = estimateLegacyChatTokens(legacyBody, mappedRequestedModel);
-  const dynamicPick = pickModelByContext(
-    mappedRequestedModel,
+  const resolvedCandidates = await resolveModelCandidatesForRequest({
+    baseKey: resolved.key,
+    requestedModel,
+    mappedModel: mappedRequestedModel,
     promptTokensEstimate,
-    resolved.key
-  );
-  const runtimeResolved = resolveRuntimeModel(resolved.key, dynamicPick.model);
-  const modelResolved = {
-    ...runtimeResolved,
-    clientModel: dynamicPick.switched ? dynamicPick.model : requestedModel
-  };
+    mappingResolution: modelMapping
+  });
+  if (!resolvedCandidates.ok) {
+    return anthropicErrorResponse(
+      resolvedCandidates.status,
+      extractAnthropicUpstreamErrorMessage(
+        resolvedCandidates.body,
+        "No available upstream candidate for this model mapping."
+      )
+    );
+  }
+  const modelCandidates = resolvedCandidates.candidates;
+  const modelResolved = modelCandidates[0];
   const runtimeKey = modelResolved.runtimeKey;
 
   const rewritten = await describeMediaWithVisionModel(legacyBody, runtimeKey, {
@@ -5024,63 +5606,101 @@ export async function handleAnthropicMessages(
 
   if (body.stream === true) {
     if (runtimeKey.upstreamWireApi === "chat_completions") {
-      const upstreamPayload = applyCodexThinkingModeForChat(
-        {
-          ...rewritten.body,
-          model: modelResolved.upstreamModel,
-          stream: true
-        },
-        runtimeKey.provider,
-        modelResolved.profile?.glmCodexThinkingThreshold
+      const upstreamResult = await callStreamWithModelFailover(
+        modelCandidates,
+        async (candidate) =>
+          callChatCompletionsApiStream(
+            applyCodexThinkingModeForChat(
+              {
+                ...rewritten.body,
+                model: candidate.upstreamModel,
+                stream: true
+              },
+              candidate.runtimeKey.provider,
+              candidate.profile?.glmCodexThinkingThreshold,
+              candidate.mapping?.thinkingType ?? null
+            ),
+            candidate.runtimeKey
+          )
       );
-      const upstream = await callChatCompletionsApiStream(upstreamPayload, runtimeKey);
-      if (!upstream.ok) {
-        return anthropicErrorResponseFromStream(upstream, "Upstream chat/completions API error");
+      if (!upstreamResult.ok) {
+        if (upstreamResult.response) {
+          return anthropicErrorResponseFromStream(
+            upstreamResult.response,
+            "Upstream chat/completions API error"
+          );
+        }
+        return anthropicErrorResponse(
+          upstreamResult.status,
+          extractAnthropicUpstreamErrorMessage(
+            upstreamResult.body,
+            "Upstream chat/completions API error"
+          )
+        );
       }
+      const activeCandidate = upstreamResult.candidate;
+      const upstream = upstreamResult.response;
       const tracked = trackUsageFromSse(upstream, "chat_completions", {
-        key: runtimeKey,
+        key: activeCandidate.runtimeKey,
         route,
         requestWireApi: "anthropic_messages",
         requestedModel,
-        clientModel: modelResolved.clientModel,
-        upstreamModel: modelResolved.upstreamModel,
+        clientModel: activeCandidate.clientModel,
+        upstreamModel: activeCandidate.upstreamModel,
         promptTokensEstimate,
         stream: true,
         systemPrompt: promptSnapshot.systemPrompt,
         userPrompt: promptSnapshot.userPrompt,
         conversationTranscript: promptSnapshot.conversationTranscript
       });
-      return transformChatStreamToAnthropic(tracked, modelResolved.clientModel, {
+      return transformChatStreamToAnthropic(tracked, activeCandidate.clientModel, {
         promptTokensEstimate
       });
     }
 
     if (runtimeKey.upstreamWireApi === "anthropic_messages") {
-      const upstreamPayload = mapLegacyChatToAnthropicMessages(
-        {
-          ...rewritten.body,
-          model: modelResolved.upstreamModel,
-          stream: true
-        },
-        runtimeKey.defaultModel
-      );
-      upstreamPayload.model = modelResolved.upstreamModel;
-      const upstream = await callAnthropicMessagesApiStream(
-        upstreamPayload,
-        runtimeKey,
-        anthropicUpstreamHeaderOverrides
+      const upstreamResult = await callStreamWithModelFailover(
+        modelCandidates,
+        async (candidate) => {
+          const upstreamPayload = mapLegacyChatToAnthropicMessages(
+            {
+              ...rewritten.body,
+              model: candidate.upstreamModel,
+              stream: true
+            },
+            candidate.runtimeKey.defaultModel
+          );
+          upstreamPayload.model = candidate.upstreamModel;
+          return callAnthropicMessagesApiStream(
+            upstreamPayload,
+            candidate.runtimeKey,
+            anthropicUpstreamHeaderOverrides
+          );
+        }
       );
 
-      if (!upstream.ok) {
-        return anthropicErrorResponseFromStream(upstream, "Upstream anthropic messages API error");
+      if (!upstreamResult.ok) {
+        if (upstreamResult.response) {
+          return anthropicErrorResponseFromStream(
+            upstreamResult.response,
+            "Upstream anthropic messages API error"
+          );
+        }
+        return anthropicErrorResponse(
+          upstreamResult.status,
+          extractAnthropicUpstreamErrorMessage(
+            upstreamResult.body,
+            "Upstream anthropic messages API error"
+          )
+        );
       }
-      return trackUsageFromSse(upstream, "anthropic_messages", {
-        key: runtimeKey,
+      return trackUsageFromSse(upstreamResult.response, "anthropic_messages", {
+        key: upstreamResult.candidate.runtimeKey,
         route,
         requestWireApi: "anthropic_messages",
         requestedModel,
-        clientModel: modelResolved.clientModel,
-        upstreamModel: modelResolved.upstreamModel,
+        clientModel: upstreamResult.candidate.clientModel,
+        upstreamModel: upstreamResult.candidate.upstreamModel,
         promptTokensEstimate,
         stream: true,
         systemPrompt: promptSnapshot.systemPrompt,
@@ -5092,60 +5712,99 @@ export async function handleAnthropicMessages(
     const payload = mapLegacyChatToResponses(rewritten.body, runtimeKey.defaultModel, {
       allowVisionInput: runtimeKey.supportsVision
     });
-    payload.model = modelResolved.upstreamModel;
-    const upstream = await callResponsesApiStream(
-      {
-        ...payload,
-        model: modelResolved.upstreamModel,
-        stream: true
-      },
-      runtimeKey
+    const upstreamResult = await callStreamWithModelFailover(
+      modelCandidates,
+      async (candidate) => {
+        const candidatePayload = {
+          ...payload,
+          model: candidate.upstreamModel
+        };
+        const responsesPayload = applyCodexThinkingModeForResponses(
+          candidatePayload,
+          candidate.runtimeKey.provider,
+          candidate.mapping?.thinkingType ?? null
+        );
+        return callResponsesApiStream(
+          {
+            ...responsesPayload,
+            model: candidate.upstreamModel,
+            stream: true
+          },
+          candidate.runtimeKey
+        );
+      }
     );
-    if (!upstream.ok) {
-      return anthropicErrorResponseFromStream(upstream, "Upstream responses API error");
+    if (!upstreamResult.ok) {
+      if (upstreamResult.response) {
+        return anthropicErrorResponseFromStream(
+          upstreamResult.response,
+          "Upstream responses API error"
+        );
+      }
+      return anthropicErrorResponse(
+        upstreamResult.status,
+        extractAnthropicUpstreamErrorMessage(
+          upstreamResult.body,
+          "Upstream responses API error"
+        )
+      );
     }
+    const activeCandidate = upstreamResult.candidate;
+    const upstream = upstreamResult.response;
     const tracked = trackUsageFromSse(upstream, "responses", {
-      key: runtimeKey,
+      key: activeCandidate.runtimeKey,
       route,
       requestWireApi: "anthropic_messages",
       requestedModel,
-      clientModel: modelResolved.clientModel,
-      upstreamModel: modelResolved.upstreamModel,
+      clientModel: activeCandidate.clientModel,
+      upstreamModel: activeCandidate.upstreamModel,
       promptTokensEstimate,
       stream: true,
       systemPrompt: promptSnapshot.systemPrompt,
       userPrompt: promptSnapshot.userPrompt,
       conversationTranscript: promptSnapshot.conversationTranscript
     });
-    return transformResponsesStreamToAnthropic(tracked, modelResolved.clientModel, {
+    return transformResponsesStreamToAnthropic(tracked, activeCandidate.clientModel, {
       promptTokensEstimate
     });
   }
 
   if (runtimeKey.upstreamWireApi === "chat_completions") {
-    const upstreamPayload = applyCodexThinkingModeForChat(
-      {
-        ...rewritten.body,
-        model: modelResolved.upstreamModel
-      },
-      runtimeKey.provider,
-      modelResolved.profile?.glmCodexThinkingThreshold
+    const upstreamResult = await callJsonWithModelFailover(
+      modelCandidates,
+      async (candidate) =>
+        callChatCompletionsApi(
+          applyCodexThinkingModeForChat(
+            {
+              ...rewritten.body,
+              model: candidate.upstreamModel
+            },
+            candidate.runtimeKey.provider,
+            candidate.profile?.glmCodexThinkingThreshold,
+            candidate.mapping?.thinkingType ?? null
+          ),
+          candidate.runtimeKey
+        )
     );
-    const upstream = await callChatCompletionsApi(upstreamPayload, runtimeKey);
-    if (!upstream.ok) {
+    if (!upstreamResult.ok) {
       return anthropicErrorResponse(
-        upstream.status,
-        extractAnthropicUpstreamErrorMessage(upstream.body, "Upstream chat/completions API error")
+        upstreamResult.status,
+        extractAnthropicUpstreamErrorMessage(
+          upstreamResult.body,
+          "Upstream chat/completions API error"
+        )
       );
     }
+    const activeCandidate = upstreamResult.candidate;
+    const upstream = upstreamResult.result;
     void persistUsageEvent(
       {
-        key: runtimeKey,
+        key: activeCandidate.runtimeKey,
         route,
         requestWireApi: "anthropic_messages",
         requestedModel,
-        clientModel: modelResolved.clientModel,
-        upstreamModel: modelResolved.upstreamModel,
+        clientModel: activeCandidate.clientModel,
+        upstreamModel: activeCandidate.upstreamModel,
         promptTokensEstimate,
         stream: false,
         systemPrompt: promptSnapshot.systemPrompt,
@@ -5158,41 +5817,51 @@ export async function handleAnthropicMessages(
     );
     const responsesPayload = mapLegacyChatCompletionToResponses(
       upstream.body,
-      modelResolved.clientModel
+      activeCandidate.clientModel
     );
     return NextResponse.json(
-      mapResponsesToAnthropicMessage(responsesPayload, modelResolved.clientModel)
+      mapResponsesToAnthropicMessage(responsesPayload, activeCandidate.clientModel)
     );
   }
 
   if (runtimeKey.upstreamWireApi === "anthropic_messages") {
-    const upstreamPayload = mapLegacyChatToAnthropicMessages(
-      {
-        ...rewritten.body,
-        model: modelResolved.upstreamModel
-      },
-      runtimeKey.defaultModel
+    const upstreamResult = await callJsonWithModelFailover(
+      modelCandidates,
+      async (candidate) => {
+        const upstreamPayload = mapLegacyChatToAnthropicMessages(
+          {
+            ...rewritten.body,
+            model: candidate.upstreamModel
+          },
+          candidate.runtimeKey.defaultModel
+        );
+        upstreamPayload.model = candidate.upstreamModel;
+        return callAnthropicMessagesApi(
+          upstreamPayload,
+          candidate.runtimeKey,
+          anthropicUpstreamHeaderOverrides
+        );
+      }
     );
-    upstreamPayload.model = modelResolved.upstreamModel;
-    const upstream = await callAnthropicMessagesApi(
-      upstreamPayload,
-      runtimeKey,
-      anthropicUpstreamHeaderOverrides
-    );
-    if (!upstream.ok) {
+    if (!upstreamResult.ok) {
       return anthropicErrorResponse(
-        upstream.status,
-        extractAnthropicUpstreamErrorMessage(upstream.body, "Upstream anthropic messages API error")
+        upstreamResult.status,
+        extractAnthropicUpstreamErrorMessage(
+          upstreamResult.body,
+          "Upstream anthropic messages API error"
+        )
       );
     }
+    const activeCandidate = upstreamResult.candidate;
+    const upstream = upstreamResult.result;
     void persistUsageEvent(
       {
-        key: runtimeKey,
+        key: activeCandidate.runtimeKey,
         route,
         requestWireApi: "anthropic_messages",
         requestedModel,
-        clientModel: modelResolved.clientModel,
-        upstreamModel: modelResolved.upstreamModel,
+        clientModel: activeCandidate.clientModel,
+        upstreamModel: activeCandidate.upstreamModel,
         promptTokensEstimate,
         stream: false,
         systemPrompt: promptSnapshot.systemPrompt,
@@ -5209,22 +5878,40 @@ export async function handleAnthropicMessages(
   const payload = mapLegacyChatToResponses(rewritten.body, runtimeKey.defaultModel, {
     allowVisionInput: runtimeKey.supportsVision
   });
-  payload.model = modelResolved.upstreamModel;
-  const upstream = await callResponsesApi(payload, runtimeKey);
-  if (!upstream.ok) {
+  const upstreamResult = await callJsonWithModelFailover(
+    modelCandidates,
+    async (candidate) => {
+      const candidatePayload = {
+        ...payload,
+        model: candidate.upstreamModel
+      };
+      const responsesPayload = applyCodexThinkingModeForResponses(
+        candidatePayload,
+        candidate.runtimeKey.provider,
+        candidate.mapping?.thinkingType ?? null
+      );
+      return callResponsesApi(responsesPayload, candidate.runtimeKey);
+    }
+  );
+  if (!upstreamResult.ok) {
     return anthropicErrorResponse(
-      upstream.status,
-      extractAnthropicUpstreamErrorMessage(upstream.body, "Upstream responses API error")
+      upstreamResult.status,
+      extractAnthropicUpstreamErrorMessage(
+        upstreamResult.body,
+        "Upstream responses API error"
+      )
     );
   }
+  const activeCandidate = upstreamResult.candidate;
+  const upstream = upstreamResult.result;
   void persistUsageEvent(
     {
-      key: runtimeKey,
+      key: activeCandidate.runtimeKey,
       route,
       requestWireApi: "anthropic_messages",
       requestedModel,
-      clientModel: modelResolved.clientModel,
-      upstreamModel: modelResolved.upstreamModel,
+      clientModel: activeCandidate.clientModel,
+      upstreamModel: activeCandidate.upstreamModel,
       promptTokensEstimate,
       stream: false,
       systemPrompt: promptSnapshot.systemPrompt,
@@ -5236,7 +5923,7 @@ export async function handleAnthropicMessages(
   );
 
   return NextResponse.json(
-    mapResponsesToAnthropicMessage(upstream.body, modelResolved.clientModel)
+    mapResponsesToAnthropicMessage(upstream.body, activeCandidate.clientModel)
   );
 }
 
@@ -5256,40 +5943,49 @@ export async function handleLegacyCompletions(
   }
 
   const requestedModel = pickRequestedModel(body.model, resolved.key);
-  const mappedRequestedModel = mapRequestedModelForKey(requestedModel, resolved.key);
+  const modelMapping = resolveRequestedModelMapping(requestedModel, resolved.key);
+  const mappedRequestedModel = modelMapping.mappedModel;
   const promptTokensEstimate = estimateLegacyCompletionTokens(body, mappedRequestedModel);
-  const dynamicPick = pickModelByContext(
-    mappedRequestedModel,
+  const resolvedCandidates = await resolveModelCandidatesForRequest({
+    baseKey: resolved.key,
+    requestedModel,
+    mappedModel: mappedRequestedModel,
     promptTokensEstimate,
-    resolved.key
-  );
-  const runtimeResolved = resolveRuntimeModel(resolved.key, dynamicPick.model);
-  const modelResolved = {
-    ...runtimeResolved,
-    clientModel: dynamicPick.switched ? dynamicPick.model : requestedModel
-  };
+    mappingResolution: modelMapping
+  });
+  if (!resolvedCandidates.ok) {
+    return NextResponse.json(resolvedCandidates.body, { status: resolvedCandidates.status });
+  }
+  const modelCandidates = resolvedCandidates.candidates;
+  const modelResolved = modelCandidates[0];
   const runtimeKey = modelResolved.runtimeKey;
 
   if (isStreamingRequest(body)) {
     if (runtimeKey.upstreamWireApi === "chat_completions") {
-      const upstream = await callCompletionsApiStream(
-        {
-          ...body,
-          model: modelResolved.upstreamModel,
-          stream: true
-        },
-        runtimeKey
+      const upstreamResult = await callStreamWithModelFailover(
+        modelCandidates,
+        async (candidate) =>
+          callCompletionsApiStream(
+            {
+              ...body,
+              model: candidate.upstreamModel,
+              stream: true
+            },
+            candidate.runtimeKey
+          )
       );
-      if (!upstream.ok) {
-        return upstream;
+      if (!upstreamResult.ok) {
+        return streamFailoverFailureToResponse(upstreamResult);
       }
+      const activeCandidate = upstreamResult.candidate;
+      const upstream = upstreamResult.response;
       return trackUsageFromSse(upstream, "completions", {
-        key: runtimeKey,
+        key: activeCandidate.runtimeKey,
         route,
         requestWireApi: "completions",
         requestedModel,
-        clientModel: modelResolved.clientModel,
-        upstreamModel: modelResolved.upstreamModel,
+        clientModel: activeCandidate.clientModel,
+        upstreamModel: activeCandidate.upstreamModel,
         promptTokensEstimate,
         stream: true,
         systemPrompt: promptSnapshot.systemPrompt,
@@ -5299,85 +5995,120 @@ export async function handleLegacyCompletions(
     }
     if (runtimeKey.upstreamWireApi === "anthropic_messages") {
       const responsesPayload = mapLegacyCompletionToResponses(body, runtimeKey.defaultModel);
-      const upstreamPayload = mapResponsesRequestToAnthropicMessages(
-        {
-          ...responsesPayload,
-          model: modelResolved.upstreamModel,
-          stream: true
-        },
-        runtimeKey.defaultModel
+      const upstreamResult = await callStreamWithModelFailover(
+        modelCandidates,
+        async (candidate) => {
+          const candidatePayload = {
+            ...responsesPayload,
+            model: candidate.upstreamModel,
+            stream: true
+          };
+          const upstreamPayload = mapResponsesRequestToAnthropicMessages(
+            candidatePayload,
+            candidate.runtimeKey.defaultModel
+          );
+          upstreamPayload.model = candidate.upstreamModel;
+          return callAnthropicMessagesApiStream(
+            upstreamPayload,
+            candidate.runtimeKey
+          );
+        }
       );
-      upstreamPayload.model = modelResolved.upstreamModel;
-      const upstream = await callAnthropicMessagesApiStream(upstreamPayload, runtimeKey);
-      if (!upstream.ok) {
-        return upstream;
+      if (!upstreamResult.ok) {
+        return streamFailoverFailureToResponse(upstreamResult);
       }
+      const activeCandidate = upstreamResult.candidate;
+      const upstream = upstreamResult.response;
       const tracked = trackUsageFromSse(upstream, "anthropic_messages", {
-        key: runtimeKey,
+        key: activeCandidate.runtimeKey,
         route,
         requestWireApi: "completions",
         requestedModel,
-        clientModel: modelResolved.clientModel,
-        upstreamModel: modelResolved.upstreamModel,
+        clientModel: activeCandidate.clientModel,
+        upstreamModel: activeCandidate.upstreamModel,
         promptTokensEstimate,
         stream: true,
         systemPrompt: promptSnapshot.systemPrompt,
         userPrompt: promptSnapshot.userPrompt,
         conversationTranscript: promptSnapshot.conversationTranscript
       });
-      const responsesStream = transformAnthropicStreamToResponses(tracked, modelResolved.clientModel, {
+      const responsesStream = transformAnthropicStreamToResponses(tracked, activeCandidate.clientModel, {
         promptTokensEstimate
       });
-      return transformResponsesStreamToLegacyCompletion(responsesStream, modelResolved.clientModel);
+      return transformResponsesStreamToLegacyCompletion(
+        responsesStream,
+        activeCandidate.clientModel
+      );
     }
     const payload = mapLegacyCompletionToResponses(body, runtimeKey.defaultModel);
-    payload.model = modelResolved.upstreamModel;
-    const upstream = await callResponsesApiStream(
-      {
-        ...payload,
-        model: modelResolved.upstreamModel,
-        stream: true
-      },
-      runtimeKey
+    const upstreamResult = await callStreamWithModelFailover(
+      modelCandidates,
+      async (candidate) => {
+        const candidatePayload = {
+          ...payload,
+          model: candidate.upstreamModel
+        };
+        const responsesPayload = applyCodexThinkingModeForResponses(
+          candidatePayload,
+          candidate.runtimeKey.provider,
+          candidate.mapping?.thinkingType ?? null
+        );
+        return callResponsesApiStream(
+          {
+            ...responsesPayload,
+            model: candidate.upstreamModel,
+            stream: true
+          },
+          candidate.runtimeKey
+        );
+      }
     );
-    if (!upstream.ok) {
-      return upstream;
+    if (!upstreamResult.ok) {
+      return streamFailoverFailureToResponse(upstreamResult);
     }
+    const activeCandidate = upstreamResult.candidate;
+    const upstream = upstreamResult.response;
     const tracked = trackUsageFromSse(upstream, "responses", {
-      key: runtimeKey,
+      key: activeCandidate.runtimeKey,
       route,
       requestWireApi: "completions",
       requestedModel,
-      clientModel: modelResolved.clientModel,
-      upstreamModel: modelResolved.upstreamModel,
+      clientModel: activeCandidate.clientModel,
+      upstreamModel: activeCandidate.upstreamModel,
       promptTokensEstimate,
       stream: true,
       systemPrompt: promptSnapshot.systemPrompt,
       userPrompt: promptSnapshot.userPrompt,
       conversationTranscript: promptSnapshot.conversationTranscript
     });
-    return transformResponsesStreamToLegacyCompletion(tracked, modelResolved.clientModel);
+    return transformResponsesStreamToLegacyCompletion(tracked, activeCandidate.clientModel);
   }
 
   if (runtimeKey.upstreamWireApi === "chat_completions") {
-    const upstream = await callCompletionsApi(
-      {
-        ...body,
-        model: modelResolved.upstreamModel
-      },
-      runtimeKey
+    const upstreamResult = await callJsonWithModelFailover(
+      modelCandidates,
+      async (candidate) =>
+        callCompletionsApi(
+          {
+            ...body,
+            model: candidate.upstreamModel
+          },
+          candidate.runtimeKey
+        )
     );
-    if (!upstream.ok) {
-      return NextResponse.json(upstream.body, { status: upstream.status });
+    if (!upstreamResult.ok) {
+      return NextResponse.json(upstreamResult.body, { status: upstreamResult.status });
     }
+    const activeCandidate = upstreamResult.candidate;
+    const upstream = upstreamResult.result;
     void persistUsageEvent(
       {
-        key: runtimeKey,
+        key: activeCandidate.runtimeKey,
         route,
         requestWireApi: "completions",
         requestedModel,
-        clientModel: modelResolved.clientModel,
-        upstreamModel: modelResolved.upstreamModel,
+        clientModel: activeCandidate.clientModel,
+        upstreamModel: activeCandidate.upstreamModel,
         promptTokensEstimate,
         stream: false,
         systemPrompt: promptSnapshot.systemPrompt,
@@ -5392,26 +6123,34 @@ export async function handleLegacyCompletions(
 
   if (runtimeKey.upstreamWireApi === "anthropic_messages") {
     const responsesPayload = mapLegacyCompletionToResponses(body, runtimeKey.defaultModel);
-    const upstreamPayload = mapResponsesRequestToAnthropicMessages(
-      {
-        ...responsesPayload,
-        model: modelResolved.upstreamModel
-      },
-      runtimeKey.defaultModel
+    const upstreamResult = await callJsonWithModelFailover(
+      modelCandidates,
+      async (candidate) => {
+        const candidatePayload = {
+          ...responsesPayload,
+          model: candidate.upstreamModel
+        };
+        const upstreamPayload = mapResponsesRequestToAnthropicMessages(
+          candidatePayload,
+          candidate.runtimeKey.defaultModel
+        );
+        upstreamPayload.model = candidate.upstreamModel;
+        return callAnthropicMessagesApi(upstreamPayload, candidate.runtimeKey);
+      }
     );
-    upstreamPayload.model = modelResolved.upstreamModel;
-    const upstream = await callAnthropicMessagesApi(upstreamPayload, runtimeKey);
-    if (!upstream.ok) {
-      return NextResponse.json(upstream.body, { status: upstream.status });
+    if (!upstreamResult.ok) {
+      return NextResponse.json(upstreamResult.body, { status: upstreamResult.status });
     }
+    const activeCandidate = upstreamResult.candidate;
+    const upstream = upstreamResult.result;
     void persistUsageEvent(
       {
-        key: runtimeKey,
+        key: activeCandidate.runtimeKey,
         route,
         requestWireApi: "completions",
         requestedModel,
-        clientModel: modelResolved.clientModel,
-        upstreamModel: modelResolved.upstreamModel,
+        clientModel: activeCandidate.clientModel,
+        upstreamModel: activeCandidate.upstreamModel,
         promptTokensEstimate,
         stream: false,
         systemPrompt: promptSnapshot.systemPrompt,
@@ -5424,26 +6163,41 @@ export async function handleLegacyCompletions(
     );
     return NextResponse.json(
       mapResponsesToLegacyCompletion(
-        mapAnthropicToResponses(upstream.body, modelResolved.clientModel),
-        modelResolved.clientModel
+        mapAnthropicToResponses(upstream.body, activeCandidate.clientModel),
+        activeCandidate.clientModel
       )
     );
   }
 
   const payload = mapLegacyCompletionToResponses(body, runtimeKey.defaultModel);
-  payload.model = modelResolved.upstreamModel;
-  const upstream = await callResponsesApi(payload, runtimeKey);
-  if (!upstream.ok) {
-    return NextResponse.json(upstream.body, { status: upstream.status });
+  const upstreamResult = await callJsonWithModelFailover(
+    modelCandidates,
+    async (candidate) => {
+      const candidatePayload = {
+        ...payload,
+        model: candidate.upstreamModel
+      };
+      const responsesPayload = applyCodexThinkingModeForResponses(
+        candidatePayload,
+        candidate.runtimeKey.provider,
+        candidate.mapping?.thinkingType ?? null
+      );
+      return callResponsesApi(responsesPayload, candidate.runtimeKey);
+    }
+  );
+  if (!upstreamResult.ok) {
+    return NextResponse.json(upstreamResult.body, { status: upstreamResult.status });
   }
+  const activeCandidate = upstreamResult.candidate;
+  const upstream = upstreamResult.result;
   void persistUsageEvent(
     {
-      key: runtimeKey,
+      key: activeCandidate.runtimeKey,
       route,
       requestWireApi: "completions",
       requestedModel,
-      clientModel: modelResolved.clientModel,
-      upstreamModel: modelResolved.upstreamModel,
+      clientModel: activeCandidate.clientModel,
+      upstreamModel: activeCandidate.upstreamModel,
       promptTokensEstimate,
       stream: false,
       systemPrompt: promptSnapshot.systemPrompt,
@@ -5456,7 +6210,7 @@ export async function handleLegacyCompletions(
   );
 
   return NextResponse.json(
-    mapResponsesToLegacyCompletion(upstream.body, modelResolved.clientModel)
+    mapResponsesToLegacyCompletion(upstream.body, activeCandidate.clientModel)
   );
 }
 
@@ -5479,18 +6233,21 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
   const body = rewriteResponsesBodyForAgentsHint(rewrittenForFileIds.body);
 
   const requestedModel = pickRequestedModel(body.model, resolved.key);
-  const mappedRequestedModel = mapRequestedModelForKey(requestedModel, resolved.key);
+  const modelMapping = resolveRequestedModelMapping(requestedModel, resolved.key);
+  const mappedRequestedModel = modelMapping.mappedModel;
   const promptTokensEstimate = estimateResponsesRequestTokens(body, mappedRequestedModel);
-  const dynamicPick = pickModelByContext(
-    mappedRequestedModel,
+  const resolvedCandidates = await resolveModelCandidatesForRequest({
+    baseKey: resolved.key,
+    requestedModel,
+    mappedModel: mappedRequestedModel,
     promptTokensEstimate,
-    resolved.key
-  );
-  const runtimeResolved = resolveRuntimeModel(resolved.key, dynamicPick.model);
-  const modelResolved = {
-    ...runtimeResolved,
-    clientModel: dynamicPick.switched ? dynamicPick.model : requestedModel
-  };
+    mappingResolution: modelMapping
+  });
+  if (!resolvedCandidates.ok) {
+    return NextResponse.json(resolvedCandidates.body, { status: resolvedCandidates.status });
+  }
+  const modelCandidates = resolvedCandidates.candidates;
+  const modelResolved = modelCandidates[0];
   const runtimeKey = modelResolved.runtimeKey;
   const responseContextScope = String(resolved.key.id);
   const mappedPrompt = mapResponsesRequestToLegacyChat(body, body.model?.trim() || runtimeKey.defaultModel);
@@ -5515,24 +6272,37 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
       if (!rewrittenResponses.ok) {
         return NextResponse.json(rewrittenResponses.body, { status: rewrittenResponses.status });
       }
-      const upstream = await callResponsesApiStream(
-        {
-          ...rewrittenResponses.body,
-          model: modelResolved.upstreamModel,
-          stream: true
-        },
-        runtimeKey
+      const upstreamResult = await callStreamWithModelFailover(
+        modelCandidates,
+        async (candidate) =>
+          callResponsesApiStream(
+            {
+              ...applyCodexThinkingModeForResponses(
+                {
+                  ...rewrittenResponses.body,
+                  model: candidate.upstreamModel
+                },
+                candidate.runtimeKey.provider,
+                candidate.mapping?.thinkingType ?? null
+              ),
+              model: candidate.upstreamModel,
+              stream: true
+            },
+            candidate.runtimeKey
+          )
       );
-      if (!upstream.ok) {
-        return upstream;
+      if (!upstreamResult.ok) {
+        return streamFailoverFailureToResponse(upstreamResult);
       }
+      const activeCandidate = upstreamResult.candidate;
+      const upstream = upstreamResult.response;
       return trackUsageFromSse(upstream, "responses", {
-        key: runtimeKey,
+        key: activeCandidate.runtimeKey,
         route,
         requestWireApi: "responses",
         requestedModel,
-        clientModel: modelResolved.clientModel,
-        upstreamModel: modelResolved.upstreamModel,
+        clientModel: activeCandidate.clientModel,
+        upstreamModel: activeCandidate.upstreamModel,
         promptTokensEstimate,
         stream: true,
         systemPrompt: promptSnapshot.systemPrompt,
@@ -5562,35 +6332,49 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
         return NextResponse.json(rewritten.body, { status: rewritten.status });
       }
 
-      const legacyPayload = {
-        ...mapped,
-        model: modelResolved.upstreamModel,
-        messages: rewritten.body.messages,
-        stream: true
-      };
-      const anthropicPayload = mapLegacyChatToAnthropicMessages(legacyPayload, runtimeKey.defaultModel);
-      anthropicPayload.model = modelResolved.upstreamModel;
-      const upstream = await callAnthropicMessagesApiStream(anthropicPayload, runtimeKey);
-      if (!upstream.ok) {
-        return upstream;
+      let contextBaseMessages: LegacyChatMessage[] = [];
+      const upstreamResult = await callStreamWithModelFailover(
+        modelCandidates,
+        async (candidate) => {
+          const legacyPayload = {
+            ...mapped,
+            model: candidate.upstreamModel,
+            messages: rewritten.body.messages,
+            stream: true
+          };
+          const anthropicPayload = mapLegacyChatToAnthropicMessages(
+            legacyPayload,
+            candidate.runtimeKey.defaultModel
+          );
+          anthropicPayload.model = candidate.upstreamModel;
+          contextBaseMessages = normalizeLegacyMessages(
+            legacyPayload.messages as LegacyChatRequest["messages"]
+          );
+          return callAnthropicMessagesApiStream(
+            anthropicPayload,
+            candidate.runtimeKey
+          );
+        }
+      );
+      if (!upstreamResult.ok) {
+        return streamFailoverFailureToResponse(upstreamResult);
       }
+      const activeCandidate = upstreamResult.candidate;
+      const upstream = upstreamResult.response;
       const tracked = trackUsageFromSse(upstream, "anthropic_messages", {
-        key: runtimeKey,
+        key: activeCandidate.runtimeKey,
         route,
         requestWireApi: "responses",
         requestedModel,
-        clientModel: modelResolved.clientModel,
-        upstreamModel: modelResolved.upstreamModel,
+        clientModel: activeCandidate.clientModel,
+        upstreamModel: activeCandidate.upstreamModel,
         promptTokensEstimate,
         stream: true,
         systemPrompt: promptSnapshot.systemPrompt,
         userPrompt: promptSnapshot.userPrompt,
         conversationTranscript: promptSnapshot.conversationTranscript
       });
-      const contextBaseMessages = normalizeLegacyMessages(
-        legacyPayload.messages as LegacyChatRequest["messages"]
-      );
-      return transformAnthropicStreamToResponses(tracked, modelResolved.clientModel, {
+      return transformAnthropicStreamToResponses(tracked, activeCandidate.clientModel, {
         promptTokensEstimate,
         onCompleted: ({ responseId, assistantMessage }) => {
           const nextMessages = assistantMessage
@@ -5628,32 +6412,45 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
       messages: rewritten.body.messages,
       stream: true
     };
-    const upstreamPayload = applyCodexThinkingModeForChat(
-      legacyPayload,
-      runtimeKey.provider,
-      modelResolved.profile?.glmCodexThinkingThreshold
+    let contextBaseMessages: LegacyChatMessage[] = [];
+    const upstreamResult = await callStreamWithModelFailover(
+      modelCandidates,
+      async (candidate) => {
+        const candidateLegacyPayload = {
+          ...legacyPayload,
+          model: candidate.upstreamModel
+        };
+        const upstreamPayload = applyCodexThinkingModeForChat(
+          candidateLegacyPayload,
+          candidate.runtimeKey.provider,
+          candidate.profile?.glmCodexThinkingThreshold,
+          candidate.mapping?.thinkingType ?? null
+        );
+        contextBaseMessages = normalizeLegacyMessages(
+          upstreamPayload.messages as LegacyChatRequest["messages"]
+        );
+        return callChatCompletionsApiStream(upstreamPayload, candidate.runtimeKey);
+      }
     );
-    const upstream = await callChatCompletionsApiStream(upstreamPayload, runtimeKey);
-    if (!upstream.ok) {
-      return upstream;
+    if (!upstreamResult.ok) {
+      return streamFailoverFailureToResponse(upstreamResult);
     }
+    const activeCandidate = upstreamResult.candidate;
+    const upstream = upstreamResult.response;
     const tracked = trackUsageFromSse(upstream, "chat_completions", {
-      key: runtimeKey,
+      key: activeCandidate.runtimeKey,
       route,
       requestWireApi: "responses",
       requestedModel,
-      clientModel: modelResolved.clientModel,
-      upstreamModel: modelResolved.upstreamModel,
+      clientModel: activeCandidate.clientModel,
+      upstreamModel: activeCandidate.upstreamModel,
       promptTokensEstimate,
       stream: true,
       systemPrompt: promptSnapshot.systemPrompt,
       userPrompt: promptSnapshot.userPrompt,
       conversationTranscript: promptSnapshot.conversationTranscript
     });
-    const contextBaseMessages = normalizeLegacyMessages(
-      upstreamPayload.messages as LegacyChatRequest["messages"]
-    );
-    return transformChatStreamToResponses(tracked, modelResolved.clientModel, {
+    return transformChatStreamToResponses(tracked, activeCandidate.clientModel, {
       promptTokensEstimate,
       customToolNames,
       onCompleted: ({ responseId, assistantMessage }) => {
@@ -5675,24 +6472,37 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
     if (!rewrittenResponses.ok) {
       return NextResponse.json(rewrittenResponses.body, { status: rewrittenResponses.status });
     }
-    const upstream = await callResponsesApi(
-      {
-        ...rewrittenResponses.body,
-        model: modelResolved.upstreamModel
-      },
-      runtimeKey
+    const upstreamResult = await callJsonWithModelFailover(
+      modelCandidates,
+      async (candidate) =>
+        callResponsesApi(
+          {
+            ...applyCodexThinkingModeForResponses(
+              {
+                ...rewrittenResponses.body,
+                model: candidate.upstreamModel
+              },
+              candidate.runtimeKey.provider,
+              candidate.mapping?.thinkingType ?? null
+            ),
+            model: candidate.upstreamModel
+          },
+          candidate.runtimeKey
+        )
     );
-    if (!upstream.ok) {
-      return NextResponse.json(upstream.body, { status: upstream.status });
+    if (!upstreamResult.ok) {
+      return NextResponse.json(upstreamResult.body, { status: upstreamResult.status });
     }
+    const activeCandidate = upstreamResult.candidate;
+    const upstream = upstreamResult.result;
     void persistUsageEvent(
       {
-        key: runtimeKey,
+        key: activeCandidate.runtimeKey,
         route,
         requestWireApi: "responses",
         requestedModel,
-        clientModel: modelResolved.clientModel,
-        upstreamModel: modelResolved.upstreamModel,
+        clientModel: activeCandidate.clientModel,
+        upstreamModel: activeCandidate.upstreamModel,
         promptTokensEstimate,
         stream: false,
         systemPrompt: promptSnapshot.systemPrompt,
@@ -5726,25 +6536,42 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
       return NextResponse.json(rewritten.body, { status: rewritten.status });
     }
 
-    const legacyPayload = {
-      ...mapped,
-      model: modelResolved.upstreamModel,
-      messages: rewritten.body.messages
-    };
-    const anthropicPayload = mapLegacyChatToAnthropicMessages(legacyPayload, runtimeKey.defaultModel);
-    anthropicPayload.model = modelResolved.upstreamModel;
-    const upstream = await callAnthropicMessagesApi(anthropicPayload, runtimeKey);
-    if (!upstream.ok) {
-      return NextResponse.json(upstream.body, { status: upstream.status });
+    let baseMessages: LegacyChatMessage[] = [];
+    const upstreamResult = await callJsonWithModelFailover(
+      modelCandidates,
+      async (candidate) => {
+        const legacyPayload = {
+          ...mapped,
+          model: candidate.upstreamModel,
+          messages: rewritten.body.messages
+        };
+        const anthropicPayload = mapLegacyChatToAnthropicMessages(
+          legacyPayload,
+          candidate.runtimeKey.defaultModel
+        );
+        anthropicPayload.model = candidate.upstreamModel;
+        baseMessages = normalizeLegacyMessages(
+          legacyPayload.messages as LegacyChatRequest["messages"]
+        );
+        return callAnthropicMessagesApi(
+          anthropicPayload,
+          candidate.runtimeKey
+        );
+      }
+    );
+    if (!upstreamResult.ok) {
+      return NextResponse.json(upstreamResult.body, { status: upstreamResult.status });
     }
+    const activeCandidate = upstreamResult.candidate;
+    const upstream = upstreamResult.result;
     void persistUsageEvent(
       {
-        key: runtimeKey,
+        key: activeCandidate.runtimeKey,
         route,
         requestWireApi: "responses",
         requestedModel,
-        clientModel: modelResolved.clientModel,
-        upstreamModel: modelResolved.upstreamModel,
+        clientModel: activeCandidate.clientModel,
+        upstreamModel: activeCandidate.upstreamModel,
         promptTokensEstimate,
         stream: false,
         systemPrompt: promptSnapshot.systemPrompt,
@@ -5755,8 +6582,7 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
       extractAnthropicMessageText(upstream.body),
       extractAnthropicThinkingText(upstream.body)
     );
-    const mappedResponse = mapAnthropicToResponses(upstream.body, modelResolved.clientModel);
-    const baseMessages = normalizeLegacyMessages(legacyPayload.messages as LegacyChatRequest["messages"]);
+    const mappedResponse = mapAnthropicToResponses(upstream.body, activeCandidate.clientModel);
     const assistantMessage = extractAnthropicAssistantMessage(upstream.body);
     const nextMessages = assistantMessage ? [...baseMessages, assistantMessage] : baseMessages;
     writeResponseContext(responseContextScope, mappedResponse.id, nextMessages);
@@ -5790,23 +6616,39 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
     messages: rewritten.body.messages
   };
 
-  const upstreamPayload = applyCodexThinkingModeForChat(
-    legacyPayload,
-    runtimeKey.provider,
-    modelResolved.profile?.glmCodexThinkingThreshold
+  let baseMessages: LegacyChatMessage[] = [];
+  const upstreamResult = await callJsonWithModelFailover(
+    modelCandidates,
+    async (candidate) => {
+      const candidateLegacyPayload = {
+        ...legacyPayload,
+        model: candidate.upstreamModel
+      };
+      const upstreamPayload = applyCodexThinkingModeForChat(
+        candidateLegacyPayload,
+        candidate.runtimeKey.provider,
+        candidate.profile?.glmCodexThinkingThreshold,
+        candidate.mapping?.thinkingType ?? null
+      );
+      baseMessages = normalizeLegacyMessages(
+        upstreamPayload.messages as LegacyChatRequest["messages"]
+      );
+      return callChatCompletionsApi(upstreamPayload, candidate.runtimeKey);
+    }
   );
-  const upstream = await callChatCompletionsApi(upstreamPayload, runtimeKey);
-  if (!upstream.ok) {
-    return NextResponse.json(upstream.body, { status: upstream.status });
+  if (!upstreamResult.ok) {
+    return NextResponse.json(upstreamResult.body, { status: upstreamResult.status });
   }
+  const activeCandidate = upstreamResult.candidate;
+  const upstream = upstreamResult.result;
   void persistUsageEvent(
     {
-      key: runtimeKey,
+      key: activeCandidate.runtimeKey,
       route,
       requestWireApi: "responses",
       requestedModel,
-      clientModel: modelResolved.clientModel,
-      upstreamModel: modelResolved.upstreamModel,
+      clientModel: activeCandidate.clientModel,
+      upstreamModel: activeCandidate.upstreamModel,
       promptTokensEstimate,
       stream: false,
       systemPrompt: promptSnapshot.systemPrompt,
@@ -5818,10 +6660,13 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
     extractLegacyChatCompletionReasoning(upstream.body)
   );
 
-  const mappedResponse = mapLegacyChatCompletionToResponses(upstream.body, modelResolved.clientModel, {
-    customToolNames
-  });
-  const baseMessages = normalizeLegacyMessages(upstreamPayload.messages as LegacyChatRequest["messages"]);
+  const mappedResponse = mapLegacyChatCompletionToResponses(
+    upstream.body,
+    activeCandidate.clientModel,
+    {
+      customToolNames
+    }
+  );
   const assistantMessage = extractAssistantMessageFromLegacyChatPayload(upstream.body);
   const nextMessages = assistantMessage ? [...baseMessages, assistantMessage] : baseMessages;
   writeResponseContext(responseContextScope, mappedResponse.id, nextMessages);

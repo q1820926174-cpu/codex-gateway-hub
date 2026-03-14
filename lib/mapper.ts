@@ -67,6 +67,11 @@ export type ResponsesRequest = {
     summary?: string;
     [key: string]: unknown;
   };
+  thinking?: {
+    type?: string;
+    clear_thinking?: boolean;
+    [key: string]: unknown;
+  };
   text?: {
     verbosity?: string;
     [key: string]: unknown;
@@ -332,6 +337,10 @@ export function mapLegacyChatToResponses(
       : typeof body.verbosity === "string" && body.verbosity.trim()
         ? { verbosity: body.verbosity.trim() }
         : undefined;
+  const thinking =
+    body.thinking && typeof body.thinking === "object"
+      ? body.thinking
+      : undefined;
 
   return {
     model: body.model ?? defaultModel,
@@ -341,6 +350,7 @@ export function mapLegacyChatToResponses(
     max_output_tokens: body.max_tokens,
     top_p: body.top_p,
     ...(reasoning ? { reasoning } : {}),
+    ...(thinking ? { thinking } : {}),
     ...(textConfig ? { text: textConfig } : {})
   };
 }
@@ -790,6 +800,7 @@ export function mapResponsesRequestToLegacyChat(
     top_p: body.top_p,
     ...(body.reasoning && typeof body.reasoning === "object" ? { reasoning: body.reasoning } : {}),
     ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
+    ...(body.thinking && typeof body.thinking === "object" ? { thinking: body.thinking } : {}),
     ...(verbosity ? { verbosity } : {}),
     ...(tools ? { tools } : {}),
     ...(typeof body.parallel_tool_calls === "boolean"
