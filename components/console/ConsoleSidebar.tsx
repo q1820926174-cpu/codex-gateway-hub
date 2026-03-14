@@ -3,12 +3,12 @@
 import { useRouter } from "next/navigation";
 import { Menu } from "tdesign-react";
 import {
-  ApiIcon,
-  ControlPlatformIcon,
-  DashboardIcon,
-  TimeIcon,
-  UserCircleIcon
-} from "tdesign-icons-react";
+  LayoutDashboard,
+  Settings,
+  Clock,
+  UserCircle,
+  Code2
+} from "lucide-react";
 import { useLocale, type LocaleCode } from "@/components/locale-provider";
 import {
   MODULE_LABEL,
@@ -30,15 +30,15 @@ export function ConsoleSidebar({ activeModule, onModuleChange }: ConsoleSidebarP
   const lk = toLocaleKey(locale);
 
   const menuItems = [
-    { value: "access", label: MODULE_LABEL.access[lk], icon: <UserCircleIcon /> },
-    { value: "prompt", label: MODULE_LABEL.prompt[lk], icon: <ApiIcon /> },
-    { value: "export", label: MODULE_LABEL.export[lk], icon: <ApiIcon /> },
-    { value: "upstream", label: MODULE_LABEL.upstream[lk], icon: <ApiIcon /> },
-    { value: "runtime", label: MODULE_LABEL.runtime[lk], icon: <ControlPlatformIcon /> },
-    { value: "logs", label: MODULE_LABEL.logs[lk], icon: <TimeIcon /> },
-    { value: "calls", label: MODULE_LABEL.calls[lk], icon: <DashboardIcon /> },
-    { value: "usage", label: MODULE_LABEL.usage[lk], icon: <DashboardIcon /> },
-    { value: "docs", label: MODULE_LABEL.docs[lk], icon: <ApiIcon /> }
+    { value: "access", label: MODULE_LABEL.access[lk], icon: <UserCircle size={18} /> },
+    { value: "prompt", label: MODULE_LABEL.prompt[lk], icon: <Code2 size={18} /> },
+    { value: "export", label: MODULE_LABEL.export[lk], icon: <Code2 size={18} /> },
+    { value: "upstream", label: MODULE_LABEL.upstream[lk], icon: <Code2 size={18} /> },
+    { value: "runtime", label: MODULE_LABEL.runtime[lk], icon: <Settings size={18} /> },
+    { value: "logs", label: MODULE_LABEL.logs[lk], icon: <Clock size={18} /> },
+    { value: "calls", label: MODULE_LABEL.calls[lk], icon: <LayoutDashboard size={18} /> },
+    { value: "usage", label: MODULE_LABEL.usage[lk], icon: <LayoutDashboard size={18} /> },
+    { value: "docs", label: MODULE_LABEL.docs[lk], icon: <Code2 size={18} /> }
   ];
 
   const handleMenuChange = (value: unknown) => {

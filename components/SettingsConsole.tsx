@@ -7,12 +7,12 @@ import { ConsoleLayout } from "@/components/console/ConsoleLayout";
 import { WorkspaceHero } from "@/components/console/workspace-hero";
 import { ModuleSwitcherCards } from "@/components/console/module-switcher-cards";
 import {
-  ApiIcon,
-  ControlPlatformIcon,
-  DashboardIcon,
-  TimeIcon,
-  UserCircleIcon
-} from "tdesign-icons-react";
+  LayoutDashboard,
+  Settings,
+  Clock,
+  UserCircle,
+  Code2
+} from "lucide-react";
 import { Card, Tag } from "tdesign-react";
 import {
   MODULE_LABEL,
@@ -53,15 +53,15 @@ export function SettingsConsole({ module }: SettingsConsoleProps) {
   const upstreams = (upstreamsData as any)?.items || [];
 
   const moduleItems = [
-    { id: "access" as EditorModule, title: MODULE_LABEL.access[lk], description: MODULE_SUMMARY.access[lk], icon: <UserCircleIcon />, active: activeModule === "access", onSelect: (id: string) => handleModuleChange(id as EditorModule), value: keys.length ? `${keys.length} ` + t("个", "items") : undefined },
-    { id: "prompt" as EditorModule, title: MODULE_LABEL.prompt[lk], description: MODULE_SUMMARY.prompt[lk], icon: <ApiIcon />, active: activeModule === "prompt", onSelect: (id: string) => handleModuleChange(id as EditorModule) },
-    { id: "export" as EditorModule, title: MODULE_LABEL.export[lk], description: MODULE_SUMMARY.export[lk], icon: <ApiIcon />, active: activeModule === "export", onSelect: (id: string) => handleModuleChange(id as EditorModule), value: keys.length ? `${keys.length} ` + t("组可导出", "exportable") : undefined },
-    { id: "upstream" as EditorModule, title: MODULE_LABEL.upstream[lk], description: MODULE_SUMMARY.upstream[lk], icon: <ApiIcon />, active: activeModule === "upstream", onSelect: (id: string) => handleModuleChange(id as EditorModule), value: upstreams.length ? `${upstreams.length} ` + t("个", "items") : undefined },
-    { id: "runtime" as EditorModule, title: MODULE_LABEL.runtime[lk], description: MODULE_SUMMARY.runtime[lk], icon: <ControlPlatformIcon />, active: activeModule === "runtime", onSelect: (id: string) => handleModuleChange(id as EditorModule) },
-    { id: "logs" as EditorModule, title: MODULE_LABEL.logs[lk], description: MODULE_SUMMARY.logs[lk], icon: <TimeIcon />, active: activeModule === "logs", onSelect: (id: string) => handleModuleChange(id as EditorModule) },
-    { id: "calls" as EditorModule, title: MODULE_LABEL.calls[lk], description: MODULE_SUMMARY.calls[lk], icon: <DashboardIcon />, active: activeModule === "calls", onSelect: (id: string) => handleModuleChange(id as EditorModule) },
-    { id: "usage" as EditorModule, title: MODULE_LABEL.usage[lk], description: MODULE_SUMMARY.usage[lk], icon: <DashboardIcon />, active: activeModule === "usage", onSelect: (id: string) => handleModuleChange(id as EditorModule) },
-    { id: "docs" as EditorModule, title: MODULE_LABEL.docs[lk], description: MODULE_SUMMARY.docs[lk], icon: <ApiIcon />, active: activeModule === "docs", onSelect: (id: string) => handleModuleChange(id as EditorModule) }
+    { id: "access" as EditorModule, title: MODULE_LABEL.access[lk], description: MODULE_SUMMARY.access[lk], icon: <UserCircle size={18} />, active: activeModule === "access", onSelect: (id: string) => handleModuleChange(id as EditorModule), value: keys.length ? `${keys.length} ` + t("个", "items") : undefined },
+    { id: "prompt" as EditorModule, title: MODULE_LABEL.prompt[lk], description: MODULE_SUMMARY.prompt[lk], icon: <Code2 size={18} />, active: activeModule === "prompt", onSelect: (id: string) => handleModuleChange(id as EditorModule) },
+    { id: "export" as EditorModule, title: MODULE_LABEL.export[lk], description: MODULE_SUMMARY.export[lk], icon: <Code2 size={18} />, active: activeModule === "export", onSelect: (id: string) => handleModuleChange(id as EditorModule), value: keys.length ? `${keys.length} ` + t("组可导出", "exportable") : undefined },
+    { id: "upstream" as EditorModule, title: MODULE_LABEL.upstream[lk], description: MODULE_SUMMARY.upstream[lk], icon: <Code2 size={18} />, active: activeModule === "upstream", onSelect: (id: string) => handleModuleChange(id as EditorModule), value: upstreams.length ? `${upstreams.length} ` + t("个", "items") : undefined },
+    { id: "runtime" as EditorModule, title: MODULE_LABEL.runtime[lk], description: MODULE_SUMMARY.runtime[lk], icon: <Settings size={18} />, active: activeModule === "runtime", onSelect: (id: string) => handleModuleChange(id as EditorModule) },
+    { id: "logs" as EditorModule, title: MODULE_LABEL.logs[lk], description: MODULE_SUMMARY.logs[lk], icon: <Clock size={18} />, active: activeModule === "logs", onSelect: (id: string) => handleModuleChange(id as EditorModule) },
+    { id: "calls" as EditorModule, title: MODULE_LABEL.calls[lk], description: MODULE_SUMMARY.calls[lk], icon: <LayoutDashboard size={18} />, active: activeModule === "calls", onSelect: (id: string) => handleModuleChange(id as EditorModule) },
+    { id: "usage" as EditorModule, title: MODULE_LABEL.usage[lk], description: MODULE_SUMMARY.usage[lk], icon: <LayoutDashboard size={18} />, active: activeModule === "usage", onSelect: (id: string) => handleModuleChange(id as EditorModule) },
+    { id: "docs" as EditorModule, title: MODULE_LABEL.docs[lk], description: MODULE_SUMMARY.docs[lk], icon: <Code2 size={18} />, active: activeModule === "docs", onSelect: (id: string) => handleModuleChange(id as EditorModule) }
   ];
 
   const heroStats = [
