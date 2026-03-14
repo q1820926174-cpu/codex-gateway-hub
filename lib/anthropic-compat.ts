@@ -1044,7 +1044,7 @@ export function extractAnthropicMessageText(responseJson: unknown): string {
     .join("");
 }
 
-function extractAnthropicThinkingText(responseJson: unknown): string {
+export function extractAnthropicThinkingText(responseJson: unknown): string {
   if (!responseJson || typeof responseJson !== "object") {
     return "";
   }

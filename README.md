@@ -435,7 +435,7 @@ model = "gpt-4.1-mini"
 
 ## Third-party Codex apply_patch / 第三方 Codex apply_patch
 
-- 网关侧现有的 Responses 与工具调用映射已经足够；本项目这次补的是原生 Codex 导出侧的元数据与指令文件。 / The gateway-side Responses and tool-call mapping is already sufficient; this project now fills in the native Codex export metadata and instruction files.
+- 网关侧现有的 Responses 与工具调用映射已经足够；现在原生 Codex 导出还会通过 `http_headers` 给请求打上 Codex 标记，并在网关运行时把第三方提示词动态追加到当前用户消息。 / The gateway-side Responses and tool-call mapping is already sufficient; native Codex export now also tags requests via `http_headers` so the gateway can append third-party prompt rules to the active user message at runtime.
 - 要让第三方模型在原生 Codex 里稳定支持 `apply_patch`，不能只配 `base_url` 与 `wire_api`；还需要同时提供 `model_catalog_json` 与 `model_instructions_file`。 / Stable third-party `apply_patch` support in native Codex needs more than `base_url` and `wire_api`; it also requires both `model_catalog_json` and `model_instructions_file`.
 - 控制台 `Access` 页面新增了 `Native Codex CLI Export` 预览，可直接复制 `.env`、`config.toml` 片段、`model_catalog_json`、`instructions` 与可选 `AGENTS.md`。 / The `Access` console now includes a `Native Codex CLI Export` preview for copying the `.env`, `config.toml` snippet, `model_catalog_json`, `instructions`, and optional `AGENTS.md`.
 - 已保存的 Key 也可以调用 `GET /api/keys/:id/codex-export?applyPatchToolType=function|freeform` 获取同一份导出结果。 / Saved keys can also fetch the same export bundle from `GET /api/keys/:id/codex-export?applyPatchToolType=function|freeform`.
@@ -456,6 +456,7 @@ name = "gateway"
 base_url = "http://127.0.0.1:3000/v1"
 env_key = "OPENAI_API_KEY"
 wire_api = "responses"
+http_headers = { "x-codex-gateway-client" = "codex", "x-codex-apply-patch-tool-type" = "function" }
 ```
 
 最小探针验证 / Minimal probe validation:

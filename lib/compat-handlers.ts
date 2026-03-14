@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import {
   extractAnthropicAssistantMessage,
+  extractAnthropicThinkingText,
   extractAnthropicMessageText,
   mapAnthropicMessagesToLegacyChat,
   mapAnthropicToLegacyChat,
@@ -12,6 +13,7 @@ import {
 } from "@/lib/anthropic-compat";
 import {
   collectMediaInputs,
+  extractLegacyChatCompletionReasoning,
   extractLegacyChatCompletionText,
   extractResponseText,
   isStreamingRequest,
@@ -196,6 +198,84 @@ type VisionCaptionCacheEntry = {
 };
 
 const visionCaptionCache = new Map<string, VisionCaptionCacheEntry>();
+const AGENTS_MD_KEYWORD = "AGENTS.md";
+const CHINESE_REPLY_HINT = `
+You are a coding agent with access to the \`apply_patch\` tool.
+
+When you need to create, modify, rename, or delete files, you MUST use \`apply_patch\`.
+Never output patch text in a normal assistant message.
+Never use shell editors or ad-hoc file rewrite commands when \`apply_patch\` is available.
+
+## apply_patch rules
+
+1. Patch envelope
+Always wrap patches in this format:
+
+*** Begin Patch
+...patch body...
+*** End Patch
+
+2. File operations
+Use one of these headers:
+- *** Update File: relative/path/to/file
+- *** Add File: relative/path/to/file
+- *** Delete File: relative/path/to/file
+
+3. Paths
+Always use relative file paths.
+Never use absolute paths unless the tool specification explicitly requires them.
+
+4. Hunks
+For modifications, use hunks introduced by:
+@@
+
+Within a hunk:
+- Lines starting with a single space are context lines and MUST exactly match the current file content.
+- Lines starting with \`-\` are lines to remove and MUST exactly match the current file content.
+- Lines starting with \`+\` are lines to add.
+
+5. Matching discipline
+Do not guess old content.
+Before writing a patch, make sure the removed lines and context lines exactly match the current file.
+If patch application fails, re-read the file and regenerate the patch from the actual content.
+
+6. Minimality
+Only change the lines that are necessary.
+Keep enough surrounding context to make the patch unambiguous.
+
+7. No extra formatting
+Do not wrap the patch in Markdown code fences.
+Do not explain the patch outside the tool call.
+Only send the patch text as the \`input\` to \`apply_patch\`.
+
+## Examples
+
+### Update an existing file
+*** Begin Patch
+*** Update File: snake.html
+@@
+ body {
+-  display: flex;
+-  flex-direction: column;
++  display: flex; /* 使用弹性布局 */
++  flex-direction: column; /* 子元素垂直排列 */
+   align-items: center;
+ }
+*** End Patch
+
+### Add a new file
+*** Begin Patch
+*** Add File: utils/helper.py
++def hello() -> str:
++    return "hello"
+*** End Patch
+
+### Delete a file
+*** Begin Patch
+*** Delete File: old_script.py
+*** End Patch
+Please reply in Chinese.
+`;
 
 function parsePositiveIntEnv(
   value: string | undefined,
@@ -598,10 +678,12 @@ function normalizeUsageValues(
 async function persistUsageEvent(
   context: UsageTraceContext,
   explicitUsage: ReturnType<typeof extractTokenUsageFromPayload> | null,
-  completionText = ""
+  completionText = "",
+  reasoningText = ""
 ) {
-  const completionTokensEstimate = completionText
-    ? estimatePlainTextTokens(completionText, context.clientModel)
+  const combinedAssistantText = [reasoningText, completionText].filter(Boolean).join("\n\n");
+  const completionTokensEstimate = combinedAssistantText
+    ? estimatePlainTextTokens(combinedAssistantText, context.clientModel)
     : 0;
   const usage = normalizeUsageValues(
     explicitUsage,
@@ -639,6 +721,7 @@ async function persistUsageEvent(
       systemPrompt: context.systemPrompt,
       userPrompt: context.userPrompt,
       conversationTranscript: context.conversationTranscript,
+      assistantReasoning: clipLogText(reasoningText),
       assistantResponse: clipLogText(completionText),
       createdAt: new Date().toISOString()
     });
@@ -804,6 +887,45 @@ function extractChatReasoningDeltaFromChunk(payload: unknown): string {
     .join("");
 }
 
+function extractAnthropicThinkingDeltaFromChunk(payload: unknown): string {
+  if (!payload || typeof payload !== "object") {
+    return "";
+  }
+  const type = (payload as { type?: unknown }).type;
+  if (type !== "content_block_delta") {
+    return "";
+  }
+
+  const delta = (payload as { delta?: unknown }).delta;
+  if (!delta || typeof delta !== "object") {
+    return "";
+  }
+  const deltaType = (delta as { type?: unknown }).type;
+  if (deltaType !== "thinking_delta") {
+    return "";
+  }
+  const thinking = (delta as { thinking?: unknown }).thinking;
+  return typeof thinking === "string" ? thinking : "";
+}
+
+function extractResponsesTextDelta(payload: unknown): string {
+  if (!payload || typeof payload !== "object") {
+    return "";
+  }
+  const type = (payload as { type?: unknown }).type;
+  if (type !== "response.output_text.delta") {
+    return "";
+  }
+  const delta = (payload as { delta?: unknown }).delta;
+  if (typeof delta === "string") {
+    return delta;
+  }
+  if (delta && typeof delta === "object" && typeof (delta as { text?: unknown }).text === "string") {
+    return (delta as { text: string }).text;
+  }
+  return "";
+}
+
 function extractResponsesReasoningDelta(payload: unknown): string {
   if (!payload || typeof payload !== "object") {
     return "";
@@ -827,6 +949,59 @@ function extractResponsesReasoningDelta(payload: unknown): string {
     return typeof text === "string" ? text : "";
   }
   return "";
+}
+
+function extractResponsesReasoningText(payload: unknown): string {
+  if (!payload || typeof payload !== "object") {
+    return "";
+  }
+
+  const output = Array.isArray((payload as { output?: unknown }).output)
+    ? ((payload as {
+        output?: Array<{
+          type?: unknown;
+          content?: Array<{ type?: unknown; text?: unknown }>;
+          summary?: Array<{ type?: unknown; text?: unknown }>;
+        }>;
+      }).output ?? [])
+    : [];
+  const parts: string[] = [];
+
+  for (const item of output) {
+    if (!item || typeof item !== "object" || item.type !== "reasoning") {
+      continue;
+    }
+
+    const contentText = (Array.isArray(item.content) ? item.content : [])
+      .map((part) =>
+        part &&
+        typeof part === "object" &&
+        (part.type === "reasoning_text" || part.type === "summary_text") &&
+        typeof part.text === "string"
+          ? part.text
+          : ""
+      )
+      .filter(Boolean)
+      .join("\n")
+      .trim();
+    if (contentText) {
+      parts.push(contentText);
+      continue;
+    }
+
+    const summaryText = (Array.isArray(item.summary) ? item.summary : [])
+      .map((part) =>
+        part && typeof part === "object" && typeof part.text === "string" ? part.text : ""
+      )
+      .filter(Boolean)
+      .join("\n")
+      .trim();
+    if (summaryText) {
+      parts.push(summaryText);
+    }
+  }
+
+  return parts.join("\n\n").trim();
 }
 
 type ChatToolCallDelta = {
@@ -1053,6 +1228,149 @@ function normalizeLegacyMessages(messages: LegacyChatRequest["messages"] | undef
 
 function normalizeOptionalString(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+
+function injectChineseReplyHintBeforeAgents(text: string) {
+  const agentsIndex = text.indexOf(AGENTS_MD_KEYWORD);
+  if (agentsIndex < 0) {
+    return text;
+  }
+  if (text.slice(0, agentsIndex).includes(CHINESE_REPLY_HINT)) {
+    return text;
+  }
+  const prefix = agentsIndex > 0 && text[agentsIndex - 1] !== "\n" ? "\n" : "";
+  return (
+    text.slice(0, agentsIndex) +
+    `${prefix}${CHINESE_REPLY_HINT}\n` +
+    text.slice(agentsIndex)
+  );
+}
+
+function rewriteUserTextPartForAgentsHint(part: unknown): unknown {
+  if (typeof part === "string") {
+    return injectChineseReplyHintBeforeAgents(part);
+  }
+  if (!part || typeof part !== "object") {
+    return deepCloneUnknown(part);
+  }
+
+  const cloned = deepCloneUnknown(part);
+  if (!cloned || typeof cloned !== "object") {
+    return cloned;
+  }
+
+  const nextPart = cloned as Record<string, unknown>;
+  const type = normalizeOptionalString(nextPart.type).toLowerCase();
+  if ((type === "text" || type === "input_text") && typeof nextPart.text === "string") {
+    nextPart.text = injectChineseReplyHintBeforeAgents(nextPart.text);
+  }
+  return nextPart;
+}
+
+function rewriteLegacyContentForAgentsHint(content: unknown): unknown {
+  if (typeof content === "string") {
+    return injectChineseReplyHintBeforeAgents(content);
+  }
+  if (Array.isArray(content)) {
+    return content.map((part) => rewriteUserTextPartForAgentsHint(part));
+  }
+  return content;
+}
+
+function rewriteLegacyBodyForAgentsHint(body: LegacyChatRequest): LegacyChatRequest {
+  const messages = normalizeLegacyMessages(body.messages);
+  if (!messages.length) {
+    return body;
+  }
+
+  return {
+    ...body,
+    messages: messages.map((message) =>
+      message.role === "user"
+        ? {
+            ...message,
+            content: rewriteLegacyContentForAgentsHint(message.content)
+          }
+        : message
+    )
+  };
+}
+
+function isResponsesUserInputEntry(entry: unknown) {
+  if (typeof entry === "string") {
+    return true;
+  }
+  if (!entry || typeof entry !== "object") {
+    return false;
+  }
+
+  const explicitType = normalizeOptionalString((entry as { type?: unknown }).type).toLowerCase();
+  if (
+    explicitType === "function_call" ||
+    explicitType === "custom_tool_call" ||
+    explicitType === "function_call_output" ||
+    explicitType === "custom_tool_call_output"
+  ) {
+    return false;
+  }
+
+  const role = normalizeOptionalString((entry as { role?: unknown }).role).toLowerCase();
+  return role !== "assistant" && role !== "tool" && role !== "system" && role !== "developer";
+}
+
+function rewriteResponsesUserEntryForAgentsHint(entry: unknown): unknown {
+  if (typeof entry === "string") {
+    return injectChineseReplyHintBeforeAgents(entry);
+  }
+  if (!entry || typeof entry !== "object") {
+    return entry;
+  }
+
+  const cloned = deepCloneUnknown(entry);
+  if (!cloned || typeof cloned !== "object") {
+    return entry;
+  }
+
+  const nextEntry = cloned as Record<string, unknown>;
+  const content = nextEntry.content;
+  if (typeof content === "string") {
+    nextEntry.content = injectChineseReplyHintBeforeAgents(content);
+  } else if (Array.isArray(content)) {
+    nextEntry.content = content.map((part) => rewriteUserTextPartForAgentsHint(part));
+  }
+
+  return nextEntry;
+}
+
+function rewriteResponsesBodyForAgentsHint(body: ResponsesRequest): ResponsesRequest {
+  if (typeof body.input === "string") {
+    return {
+      ...body,
+      input: injectChineseReplyHintBeforeAgents(body.input)
+    };
+  }
+
+  if (Array.isArray(body.input)) {
+    return {
+      ...body,
+      input: body.input.map((entry) =>
+        isResponsesUserInputEntry(entry)
+          ? rewriteResponsesUserEntryForAgentsHint(entry)
+          : deepCloneUnknown(entry)
+      )
+    };
+  }
+
+  if (body.input && typeof body.input === "object") {
+    return {
+      ...body,
+      input: isResponsesUserInputEntry(body.input)
+        ? rewriteResponsesUserEntryForAgentsHint(body.input)
+        : deepCloneUnknown(body.input)
+    };
+  }
+
+  return body;
 }
 
 function pickImageDetailFromPart(part: Record<string, unknown>) {
@@ -1842,6 +2160,7 @@ function trackUsageFromSse(
   const reader = upstream.body.getReader();
   let parseBuffer = "";
   let completionText = "";
+  let reasoningText = "";
   let explicitUsage: ReturnType<typeof extractTokenUsageFromPayload> | null = null;
 
   const absorbPayload = (payload: unknown) => {
@@ -1857,20 +2176,25 @@ function trackUsageFromSse(
       if (!payload || typeof payload !== "object") {
         return;
       }
-      const type = (payload as { type?: unknown }).type;
-      if (type === "response.output_text.delta") {
-        const delta = (payload as { delta?: unknown }).delta;
-        if (typeof delta === "string" && delta) {
-          completionText += delta;
-        }
+      const textDelta = extractResponsesTextDelta(payload);
+      if (textDelta) {
+        completionText += textDelta;
+      }
+      const responseReasoningDelta = extractResponsesReasoningDelta(payload);
+      if (responseReasoningDelta) {
+        reasoningText += responseReasoningDelta;
       }
       return;
     }
 
     if (streamWireApi === "anthropic_messages") {
-      const delta = extractAnthropicTextDeltaFromChunk(payload);
-      if (delta) {
-        completionText += delta;
+      const anthropicTextDelta = extractAnthropicTextDeltaFromChunk(payload);
+      if (anthropicTextDelta) {
+        completionText += anthropicTextDelta;
+      }
+      const anthropicThinkingDelta = extractAnthropicThinkingDeltaFromChunk(payload);
+      if (anthropicThinkingDelta) {
+        reasoningText += anthropicThinkingDelta;
       }
       return;
     }
@@ -1891,7 +2215,7 @@ function trackUsageFromSse(
 
     const reasoningDelta = extractChatReasoningDeltaFromChunk(payload);
     if (reasoningDelta) {
-      completionText += reasoningDelta;
+      reasoningText += reasoningDelta;
     }
   };
 
@@ -1932,7 +2256,7 @@ function trackUsageFromSse(
           }
         }
         parseBuffer = "";
-        void persistUsageEvent(context, explicitUsage, completionText);
+        void persistUsageEvent(context, explicitUsage, completionText, reasoningText);
         controller.close();
         return;
       }
@@ -4314,6 +4638,12 @@ async function describeMediaWithVisionModel(
         : captionTransportWireApi === "anthropic_messages"
           ? extractAnthropicMessageText(captionResp.body).trim()
           : extractLegacyChatCompletionText(captionResp.body).trim();
+    const captionReasoning =
+      captionTransportWireApi === "responses"
+        ? extractResponsesReasoningText(captionResp.body).trim()
+        : captionTransportWireApi === "anthropic_messages"
+          ? extractAnthropicThinkingText(captionResp.body).trim()
+          : extractLegacyChatCompletionReasoning(captionResp.body).trim();
     const finalCaption = caption || (media.kind === "video" ? "Video content provided." : "Image content provided.");
     writeVisionCaptionCache(captionCacheKey, finalCaption);
     captions.push(finalCaption);
@@ -4335,6 +4665,7 @@ async function describeMediaWithVisionModel(
         `[user]\n${captionPrompt}\n[${media.kind}_input]`,
         MAX_LOG_TRANSCRIPT_CHARS
       ),
+      assistantReasoning: clipLogText(captionReasoning),
       assistantResponse: clipLogText(finalCaption),
       images: [mediaSnapshot],
       createdAt: new Date().toISOString()
@@ -4418,7 +4749,7 @@ export async function handleLegacyChatCompletions(
     return NextResponse.json(rewrittenForFileIds.body, { status: rewrittenForFileIds.status });
   }
 
-  const body = rewrittenForFileIds.body;
+  const body = rewriteLegacyBodyForAgentsHint(rewrittenForFileIds.body);
   const promptSnapshot = extractPromptSnapshotFromLegacyMessages(
     normalizeLegacyMessages(body.messages as LegacyChatRequest["messages"])
   );
@@ -4574,7 +4905,8 @@ export async function handleLegacyChatCompletions(
         conversationTranscript: promptSnapshot.conversationTranscript
       },
       extractTokenUsageFromPayload(upstream.body),
-      extractLegacyChatCompletionText(upstream.body)
+      extractLegacyChatCompletionText(upstream.body),
+      extractLegacyChatCompletionReasoning(upstream.body)
     );
     return NextResponse.json(upstream.body);
   }
@@ -4607,7 +4939,8 @@ export async function handleLegacyChatCompletions(
         conversationTranscript: promptSnapshot.conversationTranscript
       },
       extractTokenUsageFromPayload(upstream.body),
-      extractAnthropicMessageText(upstream.body)
+      extractAnthropicMessageText(upstream.body),
+      extractAnthropicThinkingText(upstream.body)
     );
     return NextResponse.json(mapAnthropicToLegacyChat(upstream.body, modelResolved.clientModel));
   }
@@ -4635,7 +4968,8 @@ export async function handleLegacyChatCompletions(
       conversationTranscript: promptSnapshot.conversationTranscript
     },
     extractTokenUsageFromPayload(upstream.body),
-    extractResponseText(upstream.body)
+    extractResponseText(upstream.body),
+    extractResponsesReasoningText(upstream.body)
   );
 
   return NextResponse.json(mapResponsesToLegacyChat(upstream.body, modelResolved.clientModel));
@@ -4656,7 +4990,9 @@ export async function handleAnthropicMessages(
     return anthropicErrorResponse(resolved.status, resolved.body.error);
   }
 
-  const legacyBody = mapAnthropicMessagesToLegacyChat(body, resolved.key.defaultModel);
+  const legacyBody = rewriteLegacyBodyForAgentsHint(
+    mapAnthropicMessagesToLegacyChat(body, resolved.key.defaultModel)
+  );
   const promptSnapshot = extractPromptSnapshotFromLegacyMessages(
     normalizeLegacyMessages(legacyBody.messages as LegacyChatRequest["messages"])
   );
@@ -4817,7 +5153,8 @@ export async function handleAnthropicMessages(
         conversationTranscript: promptSnapshot.conversationTranscript
       },
       extractTokenUsageFromPayload(upstream.body),
-      extractLegacyChatCompletionText(upstream.body)
+      extractLegacyChatCompletionText(upstream.body),
+      extractLegacyChatCompletionReasoning(upstream.body)
     );
     const responsesPayload = mapLegacyChatCompletionToResponses(
       upstream.body,
@@ -4863,7 +5200,8 @@ export async function handleAnthropicMessages(
         conversationTranscript: promptSnapshot.conversationTranscript
       },
       extractTokenUsageFromPayload(upstream.body),
-      extractAnthropicMessageText(upstream.body)
+      extractAnthropicMessageText(upstream.body),
+      extractAnthropicThinkingText(upstream.body)
     );
     return NextResponse.json(upstream.body);
   }
@@ -5081,7 +5419,8 @@ export async function handleLegacyCompletions(
         conversationTranscript: promptSnapshot.conversationTranscript
       },
       extractTokenUsageFromPayload(upstream.body),
-      extractAnthropicMessageText(upstream.body)
+      extractAnthropicMessageText(upstream.body),
+      extractAnthropicThinkingText(upstream.body)
     );
     return NextResponse.json(
       mapResponsesToLegacyCompletion(
@@ -5112,7 +5451,8 @@ export async function handleLegacyCompletions(
       conversationTranscript: promptSnapshot.conversationTranscript
     },
     extractTokenUsageFromPayload(upstream.body),
-    extractResponseText(upstream.body)
+    extractResponseText(upstream.body),
+    extractResponsesReasoningText(upstream.body)
   );
 
   return NextResponse.json(
@@ -5136,7 +5476,7 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
     return NextResponse.json(rewrittenForFileIds.body, { status: rewrittenForFileIds.status });
   }
 
-  const body = rewrittenForFileIds.body;
+  const body = rewriteResponsesBodyForAgentsHint(rewrittenForFileIds.body);
 
   const requestedModel = pickRequestedModel(body.model, resolved.key);
   const mappedRequestedModel = mapRequestedModelForKey(requestedModel, resolved.key);
@@ -5412,7 +5752,8 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
         conversationTranscript: promptSnapshot.conversationTranscript
       },
       extractTokenUsageFromPayload(upstream.body),
-      extractAnthropicMessageText(upstream.body)
+      extractAnthropicMessageText(upstream.body),
+      extractAnthropicThinkingText(upstream.body)
     );
     const mappedResponse = mapAnthropicToResponses(upstream.body, modelResolved.clientModel);
     const baseMessages = normalizeLegacyMessages(legacyPayload.messages as LegacyChatRequest["messages"]);
@@ -5473,7 +5814,8 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
       conversationTranscript: promptSnapshot.conversationTranscript
     },
     extractTokenUsageFromPayload(upstream.body),
-    extractLegacyChatCompletionText(upstream.body)
+    extractLegacyChatCompletionText(upstream.body),
+    extractLegacyChatCompletionReasoning(upstream.body)
   );
 
   const mappedResponse = mapLegacyChatCompletionToResponses(upstream.body, modelResolved.clientModel, {

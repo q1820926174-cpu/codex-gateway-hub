@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { memo, startTransition, useDeferredValue, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import ReactMarkdown from "react-markdown";
@@ -351,6 +351,7 @@ type AiCallLogEntry = {
   systemPrompt: string;
   userPrompt: string;
   conversationTranscript?: string;
+  assistantReasoning?: string;
   assistantResponse: string;
   images?: Array<{
     sourceType: "data_url" | "remote_url" | "unsupported";
@@ -877,18 +878,39 @@ function normalizeModelCode(provider: ProviderName, model: string) {
   return trimmed;
 }
 
-function MarkdownLogBlock({ value }: { value: string }) {
+const LOG_MARKDOWN_PLUGINS = [remarkGfm];
+const LOG_MARKDOWN_SIGNAL_RE =
+  /(^|\n)\s*(#{1,6}\s|[-*+]\s|\d+\.\s|>\s|```|~~~)|\[[^\]]+\]\([^)]+\)|\|.+\|/m;
+const LARGE_LOG_BLOCK_THRESHOLD = 12000;
+
+const MarkdownLogBlock = memo(function MarkdownLogBlock({ value }: { value: string }) {
   const normalized = value.trim();
   if (!normalized) {
     return <div className="tc-log-markdown tc-log-markdown-empty">[empty]</div>;
   }
+  const shouldUseMarkdown =
+    normalized.length <= LARGE_LOG_BLOCK_THRESHOLD && LOG_MARKDOWN_SIGNAL_RE.test(normalized);
+  if (!shouldUseMarkdown) {
+    return <pre className="tc-log-markdown tc-log-markdown-plain">{normalized}</pre>;
+  }
   return (
     <div className="tc-log-markdown">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>
+      <ReactMarkdown remarkPlugins={LOG_MARKDOWN_PLUGINS} skipHtml>
         {normalized}
       </ReactMarkdown>
     </div>
   );
+});
+
+function summarizeLogPreview(...values: string[]) {
+  for (const value of values) {
+    const normalized = value.trim();
+    if (!normalized) {
+      continue;
+    }
+    return normalized.length > 220 ? `${normalized.slice(0, 220)}...` : normalized;
+  }
+  return "";
 }
 
 export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
@@ -927,8 +949,9 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   const [logLimit, setLogLimit] = useState(100);
   const [aiCallLogs, setAiCallLogs] = useState<AiCallLogEntry[]>([]);
   const [loadingAiCallLogs, setLoadingAiCallLogs] = useState(false);
-  const [autoRefreshAiCallLogs, setAutoRefreshAiCallLogs] = useState(true);
-  const [aiCallLogLimit, setAiCallLogLimit] = useState(100);
+  const [autoRefreshAiCallLogs, setAutoRefreshAiCallLogs] = useState(false);
+  const [aiCallLogLimit, setAiCallLogLimit] = useState(50);
+  const [expandedAiCallLogIds, setExpandedAiCallLogIds] = useState<string[]>([]);
   const [aiCallKeyFilter, setAiCallKeyFilter] = useState<number | null>(null);
   const [aiCallDateRange, setAiCallDateRange] = useState<string[]>([]);
   const [aiCallKeywordFilter, setAiCallKeywordFilter] = useState("");
@@ -946,6 +969,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   );
   const [aiCallStats, setAiCallStats] = useState<AiCallLogStats>(EMPTY_AI_CALL_STATS);
   const [previewImage, setPreviewImage] = useState<{ url: string; title: string } | null>(null);
+  const deferredAiCallLogs = useDeferredValue(aiCallLogs);
   const [usageReport, setUsageReport] = useState<UsageReport | null>(null);
   const [loadingUsage, setLoadingUsage] = useState(false);
   const [autoRefreshUsage, setAutoRefreshUsage] = useState(true);
@@ -1315,6 +1339,10 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     ],
     [t]
   );
+  const expandedAiCallLogIdSet = useMemo(
+    () => new Set(expandedAiCallLogIds),
+    [expandedAiCallLogIds]
+  );
 
   const resolvedUsageBucketMinutes = useMemo(
     () => resolveUsageBucketMinutes(usageMinutes, usageBucketMode),
@@ -1651,6 +1679,20 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     setAiCallTypeFilter("");
   }
 
+  function toggleAiCallLogExpanded(id: string) {
+    setExpandedAiCallLogIds((prev) =>
+      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
+    );
+  }
+
+  function expandVisibleAiCallLogs() {
+    setExpandedAiCallLogIds(aiCallLogs.map((item) => item.id));
+  }
+
+  function collapseVisibleAiCallLogs() {
+    setExpandedAiCallLogIds([]);
+  }
+
   useEffect(() => {
     void bootstrap();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1689,7 +1731,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     }
     const timer = window.setInterval(() => {
       void loadAiCallLogs(true);
-    }, 3000);
+    }, 8000);
     return () => window.clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
@@ -1925,14 +1967,18 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
         stats?: AiCallLogStats;
       };
       const normalizedFilterOptions = normalizeAiCallFilterOptions(body.filterOptions);
-      setAiCallLogs(Array.isArray(body.items) ? body.items : []);
-      setAiCallModelOptions(
-        Array.isArray(body.models)
-          ? body.models
-          : normalizedFilterOptions.upstreamModels
-      );
-      setAiCallFilterOptions(normalizedFilterOptions);
-      setAiCallStats(body.stats ?? EMPTY_AI_CALL_STATS);
+      const nextItems = Array.isArray(body.items) ? body.items : [];
+      startTransition(() => {
+        setAiCallLogs(nextItems);
+        setAiCallModelOptions(
+          Array.isArray(body.models)
+            ? body.models
+            : normalizedFilterOptions.upstreamModels
+        );
+        setAiCallFilterOptions(normalizedFilterOptions);
+        setAiCallStats(body.stats ?? EMPTY_AI_CALL_STATS);
+        setExpandedAiCallLogIds((prev) => prev.filter((id) => nextItems.some((item) => item.id === id)));
+      });
     } catch (err) {
       if (!silent) {
         notifyError(err instanceof Error ? err.message : "加载 AI 调用日志失败");
@@ -1956,6 +2002,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       setAiCallModelOptions([]);
       setAiCallFilterOptions(EMPTY_AI_CALL_FILTER_OPTIONS);
       setAiCallStats(EMPTY_AI_CALL_STATS);
+      setExpandedAiCallLogIds([]);
       notifySuccess("AI 调用日志已清空。");
     } catch (err) {
       notifyError(err instanceof Error ? err.message : "清空 AI 调用日志失败");
@@ -4582,7 +4629,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                   <div className="tc-log-toolbar">
                     <div className="tc-log-toolbar-group">
                       <label className="tc-switchline">
-                        <span>{t("自动刷新（3秒）", "Auto Refresh (3s)")}</span>
+                        <span>{t("自动刷新（8秒）", "Auto Refresh (8s)")}</span>
                         <Switch
                           value={autoRefreshAiCallLogs}
                           onChange={(value) => setAutoRefreshAiCallLogs(Boolean(value))}
@@ -4813,6 +4860,20 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                       </label>
                     </div>
                     <div className="tc-log-toolbar-group tc-log-toolbar-actions">
+                      <Button
+                        variant="outline"
+                        onClick={expandVisibleAiCallLogs}
+                        disabled={aiCallLogs.length === 0}
+                      >
+                        {t("展开全部", "Expand All")}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        onClick={collapseVisibleAiCallLogs}
+                        disabled={expandedAiCallLogIds.length === 0}
+                      >
+                        {t("收起全部", "Collapse All")}
+                      </Button>
                       <Button variant="outline" onClick={resetAiCallFilters}>
                         {t("重置筛选", "Reset Filters")}
                       </Button>
@@ -4857,12 +4918,27 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                     ) : null}
                   </div>
 
-                  {aiCallLogs.length === 0 ? (
+                  {deferredAiCallLogs.length === 0 ? (
                     <p className="tc-upstream-advice">{t("暂无 AI 调用日志。先发起一次模型请求后再查看。", "No AI call logs yet. Send one model request first.")}</p>
                   ) : (
                     <div className="tc-log-list">
-                      {aiCallLogs.map((item) => (
-                        <article className="tc-log-item tc-log-item-ok" key={`${item.id}-${item.createdAt}`}>
+                      {deferredAiCallLogs.map((item) => {
+                        const assistantReasoning = item.assistantReasoning?.trim() || "";
+                        const assistantResponse = item.assistantResponse?.trim() || "";
+                        const displayAssistantResponse =
+                          assistantReasoning && assistantReasoning === assistantResponse
+                            ? ""
+                            : item.assistantResponse || "";
+                        const expanded = expandedAiCallLogIdSet.has(item.id);
+                        const previewText = summarizeLogPreview(
+                          displayAssistantResponse,
+                          assistantReasoning,
+                          item.userPrompt || "",
+                          item.conversationTranscript || ""
+                        );
+
+                        return (
+                          <article className="tc-log-item tc-log-item-ok" key={`${item.id}-${item.createdAt}`}>
                           <div className="tc-log-head">
                             <div className="tc-log-head-main">
                               <div className="tc-log-tags">
@@ -4886,7 +4962,16 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                                   {item.stream ? "stream" : "non-stream"}
                                 </Tag>
                               </div>
-                              <span className="tc-log-time">{formatCnDate(item.createdAt)}</span>
+                              <div className="tc-log-head-actions">
+                                <span className="tc-log-time">{formatCnDate(item.createdAt)}</span>
+                                <Button
+                                  size="small"
+                                  variant="text"
+                                  onClick={() => toggleAiCallLogExpanded(item.id)}
+                                >
+                                  {expanded ? t("收起详情", "Collapse") : t("展开详情", "Expand")}
+                                </Button>
+                              </div>
                             </div>
                             <div className="tc-log-subline">
                               <code className="tc-log-path">
@@ -4895,81 +4980,100 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                               <span className="tc-log-id">log#{item.id}</span>
                             </div>
                           </div>
-                          {item.conversationTranscript?.trim() ? (
-                            <div className="tc-log-panels">
-                              <div className="tc-log-panel tc-log-panel-full">
-                                <strong>完整上下文</strong>
-                                <MarkdownLogBlock value={item.conversationTranscript} />
-                              </div>
-                            </div>
-                          ) : null}
-                          <div className="tc-log-panels">
-                            <div className="tc-log-panel">
-                              <strong>系统提示词</strong>
-                              <MarkdownLogBlock value={item.systemPrompt || ""} />
-                            </div>
-                            <div className="tc-log-panel">
-                              <strong>用户提问</strong>
-                              <MarkdownLogBlock value={item.userPrompt || ""} />
-                            </div>
-                          </div>
-                          {Array.isArray(item.images) && item.images.length > 0 ? (
-                            <div className="tc-log-panels">
-                              <div className="tc-log-panel tc-log-panel-full">
-                                <strong>图片快照</strong>
-                                <div className="tc-log-image-grid">
-                                  {item.images.map((image, idx) => (
-                                    <article
-                                      className="tc-log-image-card"
-                                      key={`${item.id}-image-${idx}-${image.savedUrl ?? image.source}`}
-                                    >
-                                      {image.savedUrl ? (
-                                        <button
-                                          type="button"
-                                          className="tc-log-image-zoom-btn"
-                                          onClick={() =>
-                                            setPreviewImage({
-                                              url: image.savedUrl!,
-                                              title: `log#${item.id} · 图片 ${idx + 1}`
-                                            })
-                                          }
-                                        >
-                                          <img
-                                            src={image.savedUrl}
-                                            alt={`log-${item.id}-image-${idx + 1}`}
-                                            className="tc-log-image-thumb"
-                                            loading="lazy"
-                                          />
-                                        </button>
-                                      ) : (
-                                        <div className="tc-log-image-missing">图片保存失败</div>
-                                      )}
-                                      <div className="tc-log-image-meta">
-                                        <span>来源：{image.sourceType}</span>
-                                        <span>地址：{image.source}</span>
-                                        <span>类型：{image.mimeType || "-"}</span>
-                                        <span>
-                                          大小：
-                                          {typeof image.sizeBytes === "number"
-                                            ? `${formatNumber(image.sizeBytes)} bytes`
-                                            : "-"}
-                                        </span>
-                                        {image.error ? <span className="tc-log-image-error">{image.error}</span> : null}
-                                      </div>
-                                    </article>
-                                  ))}
+                          {expanded ? (
+                            <>
+                              {item.conversationTranscript?.trim() ? (
+                                <div className="tc-log-panels">
+                                  <div className="tc-log-panel tc-log-panel-full">
+                                    <strong>完整上下文</strong>
+                                    <MarkdownLogBlock value={item.conversationTranscript} />
+                                  </div>
+                                </div>
+                              ) : null}
+                              <div className="tc-log-panels">
+                                <div className="tc-log-panel">
+                                  <strong>系统提示词</strong>
+                                  <MarkdownLogBlock value={item.systemPrompt || ""} />
+                                </div>
+                                <div className="tc-log-panel">
+                                  <strong>用户提问</strong>
+                                  <MarkdownLogBlock value={item.userPrompt || ""} />
                                 </div>
                               </div>
+                              {assistantReasoning ? (
+                                <div className="tc-log-panels">
+                                  <div className="tc-log-panel tc-log-panel-full">
+                                    <strong>{t("深度思考", "Deep Thinking")}</strong>
+                                    <MarkdownLogBlock value={assistantReasoning} />
+                                  </div>
+                                </div>
+                              ) : null}
+                              {Array.isArray(item.images) && item.images.length > 0 ? (
+                                <div className="tc-log-panels">
+                                  <div className="tc-log-panel tc-log-panel-full">
+                                    <strong>图片快照</strong>
+                                    <div className="tc-log-image-grid">
+                                      {item.images.map((image, idx) => (
+                                        <article
+                                          className="tc-log-image-card"
+                                          key={`${item.id}-image-${idx}-${image.savedUrl ?? image.source}`}
+                                        >
+                                          {image.savedUrl ? (
+                                            <button
+                                              type="button"
+                                              className="tc-log-image-zoom-btn"
+                                              onClick={() =>
+                                                setPreviewImage({
+                                                  url: image.savedUrl!,
+                                                  title: `log#${item.id} · 图片 ${idx + 1}`
+                                                })
+                                              }
+                                            >
+                                              <img
+                                                src={image.savedUrl}
+                                                alt={`log-${item.id}-image-${idx + 1}`}
+                                                className="tc-log-image-thumb"
+                                                loading="lazy"
+                                              />
+                                            </button>
+                                          ) : (
+                                            <div className="tc-log-image-missing">图片保存失败</div>
+                                          )}
+                                          <div className="tc-log-image-meta">
+                                            <span>来源：{image.sourceType}</span>
+                                            <span>地址：{image.source}</span>
+                                            <span>类型：{image.mimeType || "-"}</span>
+                                            <span>
+                                              大小：
+                                              {typeof image.sizeBytes === "number"
+                                                ? `${formatNumber(image.sizeBytes)} bytes`
+                                                : "-"}
+                                            </span>
+                                            {image.error ? <span className="tc-log-image-error">{image.error}</span> : null}
+                                          </div>
+                                        </article>
+                                      ))}
+                                    </div>
+                                  </div>
+                                </div>
+                              ) : null}
+                              {displayAssistantResponse ? (
+                                <div className="tc-log-panels">
+                                  <div className="tc-log-panel tc-log-panel-full">
+                                    <strong>模型回答</strong>
+                                    <MarkdownLogBlock value={displayAssistantResponse} />
+                                  </div>
+                                </div>
+                              ) : null}
+                            </>
+                          ) : (
+                            <div className="tc-log-preview">
+                              {previewText || t("详情已折叠，点击“展开详情”查看完整日志。", "Details collapsed. Click Expand to render the full log.")}
                             </div>
-                          ) : null}
-                          <div className="tc-log-panels">
-                            <div className="tc-log-panel tc-log-panel-full">
-                              <strong>模型回答</strong>
-                              <MarkdownLogBlock value={item.assistantResponse || ""} />
-                            </div>
-                          </div>
-                        </article>
-                      ))}
+                          )}
+                          </article>
+                        );
+                      })}
                     </div>
                   )}
                 </section>

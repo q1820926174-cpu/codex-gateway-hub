@@ -1031,7 +1031,7 @@ export function extractLegacyChatCompletionText(responseJson: unknown): string {
   return "";
 }
 
-function extractLegacyChatCompletionReasoning(responseJson: unknown): string {
+export function extractLegacyChatCompletionReasoning(responseJson: unknown): string {
   if (!responseJson || typeof responseJson !== "object") {
     return "";
   }

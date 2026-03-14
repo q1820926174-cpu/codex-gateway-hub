@@ -669,6 +669,8 @@ body {
   padding: 12px;
   background: var(--tc-surface);
   box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+  content-visibility: auto;
+  contain-intrinsic-size: 520px;
 }
 
 .tc-log-item-ok {
@@ -706,6 +708,13 @@ body {
   color: #64748b;
   font-size: 12px;
   white-space: nowrap;
+}
+
+.tc-log-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
 }
 
 .tc-log-subline {
@@ -782,6 +791,18 @@ body {
 .tc-log-toolbar .tc-field {
   min-height: auto;
   margin: 0;
+}
+
+.tc-log-preview {
+  border: 1px dashed #dbe4f2;
+  border-radius: 6px;
+  background: #f8fafc;
+  padding: 10px 12px;
+  color: #475569;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .tc-log-panels {
@@ -968,6 +989,12 @@ body {
 
 .tc-log-markdown-empty {
   color: #64748b;
+}
+
+.tc-log-markdown-plain {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "JetBrains Mono", "Consolas", "Courier New", monospace;
 }
 
 .tc-image-preview-wrap {
@@ -1216,6 +1243,11 @@ body {
   .tc-log-subline {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .tc-log-head-actions {
+    width: 100%;
+    justify-content: space-between;
   }
 
   .tc-log-toolbar-actions {

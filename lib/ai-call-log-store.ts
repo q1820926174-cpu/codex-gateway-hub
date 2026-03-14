@@ -27,6 +27,7 @@ export type AiCallLogEntry = {
   systemPrompt: string;
   userPrompt: string;
   conversationTranscript?: string;
+  assistantReasoning?: string;
   assistantResponse: string;
   images?: AiCallLogImage[];
   createdAt: string;
@@ -207,6 +208,10 @@ export async function readAiCallLogEntries(query: ReadAiCallLogQuery) {
 
       const parsed: AiCallLogEntry = {
         ...parsedRaw,
+        assistantReasoning:
+          typeof parsedRaw.assistantReasoning === "string" && parsedRaw.assistantReasoning.trim()
+            ? parsedRaw.assistantReasoning
+            : "",
         conversationTranscript:
           typeof parsedRaw.conversationTranscript === "string" &&
           parsedRaw.conversationTranscript.trim()
@@ -283,6 +288,7 @@ export async function readAiCallLogEntries(query: ReadAiCallLogQuery) {
           parsed.systemPrompt,
           parsed.userPrompt,
           parsed.conversationTranscript,
+          parsed.assistantReasoning,
           parsed.assistantResponse
         ]
           .filter(Boolean)

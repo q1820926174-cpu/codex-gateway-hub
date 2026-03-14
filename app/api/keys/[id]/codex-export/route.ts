@@ -4,6 +4,7 @@ import { withApiLog } from "@/lib/api-log";
 import { requireConsoleApiAuth } from "@/lib/console-api-auth";
 import {
   createCodexExportBundle,
+  parseCodexApplyPatchToolType,
   type CodexApplyPatchToolType
 } from "@/lib/codex-export";
 import { gatewayKeyDto } from "@/lib/key-config";
@@ -40,13 +41,10 @@ function parseId(idParam: string) {
 function parseApplyPatchToolType(
   value: string | null
 ): CodexApplyPatchToolType | null {
-  if (value === null || value === "function") {
+  if (value === null) {
     return "function";
   }
-  if (value === "freeform") {
-    return "freeform";
-  }
-  return null;
+  return parseCodexApplyPatchToolType(value);
 }
 
 export async function GET(

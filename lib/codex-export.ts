@@ -1,5 +1,18 @@
 export type CodexApplyPatchToolType = "function" | "freeform";
 
+export function parseCodexApplyPatchToolType(
+  value: string | null | undefined
+): CodexApplyPatchToolType | null {
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === "function") {
+    return "function";
+  }
+  if (normalized === "freeform") {
+    return "freeform";
+  }
+  return null;
+}
+
 export type CodexExportModelProfile = {
   model: string;
   aliasModel: string | null;
@@ -209,99 +222,6 @@ function resolveCatalogModels(context: CodexExportContext) {
   return models;
 }
 
-function buildToolModeLine(toolType: CodexApplyPatchToolType) {
-  if (toolType === "function") {
-    return 'The `apply_patch` tool in this provider uses function mode. Call it with JSON and place the full patch in the `"input"` field.';
-  }
-  return "The `apply_patch` tool in this provider uses freeform mode. Send only the raw patch text and do not wrap it in JSON.";
-}
-
-/**
- * 构建 Codex / Gateway Hub 场景下的系统指令正文。
- *
- * 设计目标：
- * 1. 保持系统提示词整体为英文，降低多语言混杂带来的行为漂移。
- * 2. 明确 apply_patch 的唯一编辑职责，避免模型擅自输出补丁文本或改用其他编辑方式。
- * 3. 将“用户回复语言”单独放入 Language 区块，减少与工具规则相互干扰。
- * 4. 增加 instruction priority，提升多规则并存时的稳定性。
- *
- * 注意：
- * - 这里假设 `buildToolModeLine(toolType)` 已在你的项目中存在。
- * - `CodexApplyPatchToolType` 也沿用你现有的类型定义。
- */
-function buildInstructionBody(toolType: CodexApplyPatchToolType) {
-  return [
-    "You are a coding agent running inside Codex CLI through a Codex Gateway Hub provider.",
-    "",
-    "## Instruction Priority",
-    "- Safety and platform constraints always apply.",
-    "- Tool-use and file-editing rules override style preferences.",
-    "- If the user explicitly requests a language, follow the user's language choice.",
-    "- Otherwise, default to Chinese for user-facing replies.",
-    "",
-    "## Language",
-    "- If the user specifies a language, reply in that language.",
-    "- Otherwise, reply in Chinese.",
-    "- Never translate tool names, patch headers, file paths, code, identifiers, or command names unless the user explicitly asks for translation.",
-    "",
-    "## File Editing",
-    "- When you need to create, modify, rename, or delete files, you MUST use the `apply_patch` tool.",
-    "- Never print patch text in a normal assistant message.",
-    "- Never use `applypatch` or `apply-patch`.",
-    "- Use only relative file paths inside patches.",
-    "- Do not use shell editors for normal code edits when `apply_patch` is available.",
-    "",
-    "## Tool Mode",
-    buildToolModeLine(toolType),
-    "",
-    "## Patch Format",
-    "*** Begin Patch",
-    "*** Add File: relative/path",
-    "+file contents",
-    "*** Update File: relative/path",
-    "@@",
-    "-old text",
-    "+new text",
-    "*** Delete File: relative/path",
-    "*** End Patch",
-    "",
-    "## Patch Rules",
-    "- Always include one file action header for each file.",
-    "- Prefix every added line in a new file with `+`.",
-    "- For updates, include enough surrounding context to uniquely match the target.",
-    "- If a patch fails, inspect the file and retry with a smaller, more specific hunk.",
-    "- Keep edits minimal and targeted to the requested task.",
-    "- Preserve existing style unless the user asks for a refactor or formatting change.",
-    "",
-    "## Completion",
-    "- After successful edits, briefly summarize which files changed.",
-    "- Keep the final user-facing summary concise and do not include raw patch text unless the user explicitly asks for it."
-  ].join("\n");
-}
-
-function buildAgentsInstructions(toolType: CodexApplyPatchToolType) {
-  return [
-    "## File editing rules",
-    "",
-    "When you need to create, modify, rename, or delete files, you MUST use the `apply_patch` tool.",
-    "Do NOT print patch text in a normal assistant message.",
-    "Do NOT use `applypatch` or `apply-patch`; the only valid name is `apply_patch`.",
-    "Use only relative file paths.",
-    "",
-    buildToolModeLine(toolType),
-    "",
-    "For `apply_patch`:",
-    "- Wrap every patch in `*** Begin Patch` and `*** End Patch`.",
-    "- Use exactly one of `*** Add File: <relative/path>`, `*** Update File: <relative/path>`, or `*** Delete File: <relative/path>` for each file.",
-    "- Prefix every newly added line with `+`.",
-    "- For updates, use `@@` hunks with enough surrounding context to uniquely locate the change.",
-    "- If the first patch attempt fails, read the file again and retry with a smaller, more specific hunk.",
-    "",
-    "Never use `sed`, `perl -pi`, Python one-liners, or here-doc overwrites for normal code edits when `apply_patch` is available.",
-    "After a successful edit, briefly summarize which files changed."
-  ].join("\n");
-}
-
 function buildConfigTomlSnippet(context: CodexExportContext) {
   const providerKey = sanitizeKey(context.providerName);
   const fileBase = sanitizeFileBase(`${context.providerName}_${context.selectedModel}`);
@@ -329,7 +249,7 @@ function buildConfigTomlSnippet(context: CodexExportContext) {
 }
 
 function buildModelCatalogJson(context: CodexExportContext) {
-  const baseInstructions = buildInstructionBody(context.applyPatchToolType);
+  const baseInstructions = "";
   const models = resolveCatalogModels(context).map((item, index) => ({
     slug: item.publicModel,
     display_name: item.publicModel,
@@ -411,11 +331,11 @@ export function buildCodexExportBundle(
       },
       modelInstructionsMd: {
         targetPath: `${CODEX_OUTPUT_DIR}/${fileBase}.instructions.md`,
-        content: `${buildInstructionBody(context.applyPatchToolType)}\n`
+        content: ""
       },
       agentsMd: {
         targetPath: "./AGENTS.md",
-        content: `${buildAgentsInstructions(context.applyPatchToolType)}\n`
+        content: ""
       }
     }
   };
