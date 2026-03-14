@@ -1,11 +1,21 @@
 import { z } from "zod";
 import { defaultBaseUrlForProvider, PROVIDERS, sanitizeBaseUrl, type ProviderName } from "@/lib/providers";
 
+// List of supported upstream wire API types
+// 支持的上游 wire API 类型列表
 export const UPSTREAM_WIRE_APIS = ["responses", "chat_completions", "anthropic_messages"] as const;
+// Type definition for upstream wire API
+// 上游 wire API 的类型定义
 export type UpstreamWireApi = (typeof UPSTREAM_WIRE_APIS)[number];
+// GLM Codex thinking threshold options
+// GLM Codex 思考阈值选项
 export const GLM_CODEX_THINKING_THRESHOLDS = ["off", "low", "medium", "high"] as const;
+// Type definition for GLM Codex thinking threshold
+// GLM Codex 思考阈值的类型定义
 export type GlmCodexThinkingThreshold = (typeof GLM_CODEX_THINKING_THRESHOLDS)[number];
 
+// Normalize upstream wire API value to valid enum
+// 将上游 wire API 值标准化为有效枚举
 export function normalizeUpstreamWireApiValue(value: string | null | undefined): UpstreamWireApi {
   if (value === "chat_completions") {
     return "chat_completions";
@@ -16,6 +26,8 @@ export function normalizeUpstreamWireApiValue(value: string | null | undefined):
   return "responses";
 }
 
+// Normalize GLM Codex thinking threshold value
+// 标准化 GLM Codex 思考阈值
 export function normalizeGlmCodexThinkingThresholdValue(
   value: string | null | undefined
 ): GlmCodexThinkingThreshold {
@@ -31,12 +43,22 @@ export function normalizeGlmCodexThinkingThresholdValue(
   return "low";
 }
 
+// Maximum number of upstream models allowed
+// 允许的上游模型最大数量
 const MAX_UPSTREAM_MODELS = 64;
+// Maximum number of key model mappings allowed
+// 允许的密钥模型映射最大数量
 const MAX_KEY_MODEL_MAPPINGS = 128;
+// Regex pattern for OpenAI-style local keys
+// OpenAI 风格本地密钥的正则表达式
 export const OPENAI_STYLE_LOCAL_KEY_REGEX = /^sk-(?:proj-)?[A-Za-z0-9_-]{20,}$/;
+// Validation message for OpenAI-style local keys
+// OpenAI 风格本地密钥的验证消息
 export const OPENAI_STYLE_LOCAL_KEY_MESSAGE =
   "localKey must follow OpenAI style, e.g. sk-... or sk-proj-...";
 
+// Zod schema for upstream model configuration
+// 上游模型配置的 Zod 验证 schema
 const upstreamModelSchema = z
   .object({
     id: z.string().min(1).max(64).optional(),
@@ -55,6 +77,8 @@ const upstreamModelSchema = z
     enabled: z.boolean().default(true)
   })
   .superRefine((value, ctx) => {
+    // Validate that visionModel is provided when supportsVision is false
+    // 当 supportsVision 为 false 时验证是否提供了 visionModel
     if (!value.supportsVision && !(value.visionModel && value.visionModel.trim())) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -64,6 +88,8 @@ const upstreamModelSchema = z
     }
   });
 
+// Zod schema for key model mapping configuration
+// 密钥模型映射配置的 Zod 验证 schema
 const keyModelMappingSchema = z.object({
   id: z.string().min(1).max(64).optional(),
   clientModel: z.string().min(1).max(256),
@@ -344,7 +370,7 @@ export const createGatewayKeySchema = z.object({
   upstreamModels: z.array(upstreamModelSchema).min(1).max(MAX_UPSTREAM_MODELS).optional(),
   dynamicModelSwitch: z.boolean().default(false),
   contextSwitchThreshold: z.number().int().min(256).max(2_000_000).default(12000),
-  contextOverflowModel: z.string().min(1).max(256).optional(),
+  contextOverflowModel: z.string().min(1).max(512).optional(),
   activeModelOverride: z.string().min(1).max(256).optional(),
   modelMappings: z.array(keyModelMappingSchema).max(MAX_KEY_MODEL_MAPPINGS).optional(),
   timeoutMs: z.number().int().min(1000).max(300000).default(60000),
@@ -387,7 +413,7 @@ export const updateGatewayKeySchema = z.object({
   upstreamModels: z.array(upstreamModelSchema).min(1).max(MAX_UPSTREAM_MODELS).optional(),
   dynamicModelSwitch: z.boolean().optional(),
   contextSwitchThreshold: z.number().int().min(256).max(2_000_000).optional(),
-  contextOverflowModel: z.string().min(1).max(256).optional(),
+  contextOverflowModel: z.string().min(1).max(512).optional(),
   clearContextOverflowModel: z.boolean().optional(),
   activeModelOverride: z.string().min(1).max(256).optional(),
   clearActiveModelOverride: z.boolean().optional(),

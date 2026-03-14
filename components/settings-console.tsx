@@ -6,15 +6,15 @@ import dynamic from "next/dynamic";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
-  WorkspaceHero,
-  type WorkspaceHeroAction,
-  type WorkspaceHeroStat
-} from "@/components/console/workspace-hero";
-import {
   createCodexExportBundle,
   type CodexApplyPatchToolType,
   type CodexExportBundle
 } from "@/lib/codex-export";
+import { CodeBlock } from "@/components/code-block";
+import {
+  parseOverflowModelSelection,
+  serializeOverflowModelSelection
+} from "@/lib/overflow-model";
 import { JsonViewer } from "@/components/json-viewer";
 import { useLocale, type LocaleCode } from "@/components/locale-provider";
 import {
@@ -29,6 +29,7 @@ import {
   Menu,
   Select,
   Switch,
+  Textarea,
   Tabs,
   Tag
 } from "tdesign-react";
@@ -139,13 +140,15 @@ const LOCALE_OPTIONS: Array<{ label: string; value: LocaleCode }> = [
   { label: "English", value: "en-US" }
 ];
 
-export type EditorModule = "access" | "upstream" | "runtime" | "logs" | "calls" | "usage" | "docs";
+export type EditorModule = "access" | "prompt" | "export" | "upstream" | "runtime" | "logs" | "calls" | "usage" | "docs";
 type SettingsConsoleProps = {
   module?: EditorModule;
 };
 
 const MODULE_LABEL: Record<EditorModule, { zh: string; en: string }> = {
   access: { zh: "基础接入", en: "Access" },
+  prompt: { zh: "提示词配置", en: "Prompt Config" },
+  export: { zh: "配置导出", en: "Export" },
   upstream: { zh: "上游渠道", en: "Upstreams" },
   runtime: { zh: "运行时调度", en: "Runtime" },
   logs: { zh: "请求日志", en: "Request Logs" },
@@ -158,6 +161,14 @@ const MODULE_SUMMARY: Record<EditorModule, { zh: string; en: string }> = {
   access: {
     zh: "管理本地 Key 鉴权、映射策略和调用方入口。",
     en: "Manage local key auth, mappings, and client-facing entry points."
+  },
+  prompt: {
+    zh: "维护网关默认注入提示词与 AGENTS 关键词匹配规则。",
+    en: "Manage gateway-injected default prompts and AGENTS keyword matching rules."
+  },
+  export: {
+    zh: "集中查看 Codex / Claude 导入配置与原生导出片段。",
+    en: "Review Codex / Claude import configs and native export snippets in one place."
   },
   upstream: {
     zh: "维护上游供应商、模型池和视觉兜底通道。",
@@ -221,8 +232,8 @@ const API_DOC_GATEWAY_ENDPOINTS: ApiDocEndpoint[] = [
 
 const API_DOC_MANAGEMENT_ENDPOINTS: ApiDocEndpoint[] = [
   { method: "GET", path: "/api/health", zh: "健康检查", en: "Health check" },
-  { method: "GET", path: "/api/config", zh: "配置摘要", en: "Config summary" },
-  { method: "PUT", path: "/api/config", zh: "已废弃（返回 410）", en: "Deprecated (returns 410)" },
+  { method: "GET", path: "/api/config", zh: "配置摘要与全局提示词配置", en: "Config summary and global prompt config" },
+  { method: "PUT", path: "/api/config", zh: "更新全局提示词配置", en: "Update global prompt config" },
   { method: "GET", path: "/api/keys", zh: "Key 列表", en: "List keys" },
   { method: "POST", path: "/api/keys", zh: "创建 Key", en: "Create key" },
   { method: "GET", path: "/api/keys/:id", zh: "查询 Key", en: "Get key" },
@@ -323,6 +334,25 @@ type ChannelsResponse = {
   items: UpstreamChannel[];
   providers: ProviderName[];
   upstreamWireApis: UpstreamWireApi[];
+};
+
+type CompatPromptConfig = {
+  agentsMdKeywords: string[];
+  chineseReplyHint: string;
+};
+
+type ConfigSummaryResponse = {
+  wireApi: string;
+  totalKeys: number;
+  enabledKeys: number;
+  totalChannels: number;
+  enabledChannels: number;
+  manageKeysApi: string;
+  manageUpstreamsApi: string;
+  usageReportApi: string;
+  aiCallLogApi: string;
+  compatPromptConfig: CompatPromptConfig;
+  compatPromptDefaults: CompatPromptConfig;
 };
 
 type ApiLogEntry = {
@@ -781,6 +811,21 @@ function buildRecentDateRange(minutes: number): [string, string] {
   return [formatDateTimeInput(start), formatDateTimeInput(end)];
 }
 
+function formatCompatPromptKeywordsInput(keywords: string[]) {
+  return keywords.join("\n");
+}
+
+function parseCompatPromptKeywordsInput(value: string) {
+  return Array.from(
+    new Set(
+      value
+        .split(/\r?\n/)
+        .map((item) => item.trim())
+        .filter(Boolean)
+    )
+  );
+}
+
 function resolveThinkingTokens(contextWindow: number | null) {
   if (!contextWindow || !Number.isFinite(contextWindow) || contextWindow <= 0) {
     return 8192;
@@ -1013,8 +1058,14 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   const [loading, setLoading] = useState(false);
   const [savingKey, setSavingKey] = useState(false);
   const [savingChannel, setSavingChannel] = useState(false);
+  const [savingCompatPromptConfig, setSavingCompatPromptConfig] = useState(false);
   const [switchingModel, setSwitchingModel] = useState(false);
   const [testingUpstream, setTestingUpstream] = useState(false);
+  const [compatPromptKeywordsInput, setCompatPromptKeywordsInput] = useState("");
+  const [compatPromptHintInput, setCompatPromptHintInput] = useState("");
+  const [compatPromptDefaults, setCompatPromptDefaults] = useState<CompatPromptConfig | null>(
+    null
+  );
 
   const selectedKey = useMemo(
     () => keys.find((item) => item.id === selectedKeyId) ?? null,
@@ -1670,18 +1721,42 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   );
 
   const keyOverflowModelOptions = useMemo(() => {
-    if (!selectedChannelForKey) {
-      return [];
-    }
-    return selectedChannelForKey.upstreamModels
+    const prioritizedChannels = [...channels]
       .filter((item) => item.enabled)
-      .map((item) => ({
-        label: item.aliasModel
-          ? `${item.name} · ${item.aliasModel} -> ${item.model}${item.contextWindow ? ` · ctx=${formatNumber(item.contextWindow)}` : ""}`
-          : `${item.name} · ${item.model}${item.contextWindow ? ` · ctx=${formatNumber(item.contextWindow)}` : ""}`,
-        value: item.model
-      }));
-  }, [selectedChannelForKey]);
+      .sort((a, b) => {
+        if (a.id === keyForm.upstreamChannelId) {
+          return -1;
+        }
+        if (b.id === keyForm.upstreamChannelId) {
+          return 1;
+        }
+        return a.name.localeCompare(b.name, "zh-CN");
+      });
+
+    const options = prioritizedChannels.flatMap((channel) =>
+      channel.upstreamModels
+        .filter((item) => item.enabled)
+        .map((item) => ({
+          label: item.aliasModel
+            ? `${channel.name} · ${PROVIDER_META[channel.provider].label} · ${item.name} · ${item.aliasModel} -> ${item.model}${item.contextWindow ? ` · ctx=${formatNumber(item.contextWindow)}` : ""}`
+            : `${channel.name} · ${PROVIDER_META[channel.provider].label} · ${item.name} · ${item.model}${item.contextWindow ? ` · ctx=${formatNumber(item.contextWindow)}` : ""}`,
+          value: serializeOverflowModelSelection(item.model, channel.id)
+        }))
+    );
+
+    const currentValue = keyForm.contextOverflowModel.trim();
+    if (currentValue && !options.some((item) => item.value === currentValue)) {
+      const parsed = parseOverflowModelSelection(currentValue);
+      options.unshift({
+        label: parsed?.upstreamChannelId
+          ? `${t("当前已保存", "Saved Selection")} · channel=${parsed.upstreamChannelId} · ${parsed.model}`
+          : `${t("当前已保存", "Saved Selection")} · ${parsed?.model ?? currentValue}`,
+        value: currentValue
+      });
+    }
+
+    return options;
+  }, [channels, keyForm.contextOverflowModel, keyForm.upstreamChannelId, t]);
 
   const visionChannelOptions = useMemo(
     () => [
@@ -1865,11 +1940,72 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   async function bootstrap() {
     setLoading(true);
     try {
-      await Promise.all([loadChannels(), loadKeys()]);
+      await Promise.all([loadChannels(), loadKeys(), loadGatewayConfig()]);
     } catch (err) {
       notifyError(err instanceof Error ? err.message : "初始化失败");
     } finally {
       setLoading(false);
+    }
+  }
+
+  function applyCompatPromptConfig(config: CompatPromptConfig) {
+    setCompatPromptKeywordsInput(formatCompatPromptKeywordsInput(config.agentsMdKeywords));
+    setCompatPromptHintInput(config.chineseReplyHint);
+  }
+
+  async function loadGatewayConfig() {
+    const response = await fetch("/api/config", { cache: "no-store" });
+    if (!response.ok) {
+      throw new Error(`加载网关配置失败 (${response.status})`);
+    }
+    const data = (await response.json()) as ConfigSummaryResponse;
+    setCompatPromptDefaults(data.compatPromptDefaults);
+    applyCompatPromptConfig(data.compatPromptConfig);
+  }
+
+  async function saveGatewayCompatPromptConfig() {
+    const agentsMdKeywords = parseCompatPromptKeywordsInput(compatPromptKeywordsInput);
+    const chineseReplyHint = compatPromptHintInput.trim();
+
+    if (!agentsMdKeywords.length) {
+      notifyError(t("至少保留一个 AGENTS 关键词。", "Keep at least one AGENTS keyword."));
+      return;
+    }
+    if (!chineseReplyHint) {
+      notifyError(t("默认提示词不能为空。", "Default hint cannot be empty."));
+      return;
+    }
+
+    setSavingCompatPromptConfig(true);
+    try {
+      const response = await fetch("/api/config", {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          compatPromptConfig: {
+            agentsMdKeywords,
+            chineseReplyHint
+          }
+        })
+      });
+      if (!response.ok) {
+        const body = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(body.error ?? `保存网关配置失败 (${response.status})`);
+      }
+      const data = (await response.json()) as ConfigSummaryResponse;
+      setCompatPromptDefaults(data.compatPromptDefaults);
+      applyCompatPromptConfig(data.compatPromptConfig);
+      notifySuccess(t("网关默认提示词配置已保存。", "Gateway default prompt config saved."));
+    } catch (err) {
+      notifyError(
+        err instanceof Error
+          ? err.message
+          : t("保存网关配置失败", "Failed to save gateway config")
+      );
+    } finally {
+      setSavingCompatPromptConfig(false);
     }
   }
 
@@ -2670,6 +2806,8 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   function handleMenuRoute(next: string) {
     if (
       next === "access" ||
+      next === "prompt" ||
+      next === "export" ||
       next === "upstream" ||
       next === "runtime" ||
       next === "logs" ||
@@ -3101,110 +3239,10 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     "请先填写本地 Key 后查看原生 Codex 配置预览。",
     "Fill local key to preview native Codex config."
   );
+  const compatPromptKeywordCount = parseCompatPromptKeywordsInput(compatPromptKeywordsInput).length;
+  const compatPromptHintLength = compatPromptHintInput.trim().length;
   const routeModuleTitle = t(MODULE_LABEL[routeModule].zh, MODULE_LABEL[routeModule].en);
   const routeModuleSummary = t(MODULE_SUMMARY[routeModule].zh, MODULE_SUMMARY[routeModule].en);
-  const workspaceHeroStats: WorkspaceHeroStat[] = [
-    {
-      id: "keys",
-      label: t("本地 Key", "Local Keys"),
-      value: `${enabledKeyCount}/${keys.length}`,
-      note: t("启用 / 总数", "Enabled / Total"),
-      tone: "accent"
-    },
-    {
-      id: "upstreams",
-      label: t("上游渠道", "Upstreams"),
-      value: `${enabledChannelCount}/${channels.length}`,
-      note: t("启用 / 总数", "Enabled / Total"),
-      tone: "success"
-    },
-    {
-      id: "calls",
-      label: t("最近匹配调用", "Matched Calls"),
-      value: formatNumber(aiCallStats.matched),
-      note: t("来自 AI 调用日志筛选结果", "From current AI call filters"),
-      tone: routeModule === "calls" ? "accent" : "default"
-    },
-    {
-      id: "tokens",
-      label: "Total Token",
-      value: formatCompactNumber(usageReport?.summary.totalTokens ?? 0),
-      note: usageRangeTagLabel,
-      tone: routeModule === "usage" ? "warning" : "default"
-    }
-  ];
-  const workspaceHeroActions: WorkspaceHeroAction[] = [
-    {
-      id: "refresh-core",
-      label: t("刷新核心配置", "Refresh Core Data"),
-      note: t("同步本地 Key 与上游渠道", "Sync local keys and upstream channels"),
-      onClick: () => void bootstrap(),
-      disabled: loading
-    }
-  ];
-
-  if (routeModule === "access" || routeModule === "runtime") {
-    workspaceHeroActions.push({
-      id: "new-key",
-      label: t("新建本地 Key", "Create Local Key"),
-      note: t("生成新的鉴权入口并配置映射", "Generate an auth entry with model mapping"),
-      onClick: createNewKeyDraft,
-      disabled: loading
-    });
-  }
-
-  if (routeModule === "upstream") {
-    workspaceHeroActions.push({
-      id: "new-upstream",
-      label: t("新建上游渠道", "Create Upstream"),
-      note: t("新增供应商配置与模型池", "Add provider settings and model pool"),
-      onClick: createNewChannelDraft,
-      disabled: loading
-    });
-  }
-
-  if (routeModule === "logs") {
-    workspaceHeroActions.push({
-      id: "refresh-logs",
-      label: t("刷新请求日志", "Refresh Request Logs"),
-      note: t("按当前筛选条件重新拉取", "Reload with current filters"),
-      onClick: () => void loadApiLogs(),
-      disabled: loadingLogs
-    });
-  }
-
-  if (routeModule === "calls") {
-    workspaceHeroActions.push({
-      id: "refresh-calls",
-      label: t("刷新调用日志", "Refresh AI Call Logs"),
-      note: t("核对真实模型与调用类型", "Check actual model routes and call types"),
-      onClick: () => void loadAiCallLogs(),
-      disabled: loadingAiCallLogs
-    });
-  }
-
-  if (routeModule === "usage") {
-    workspaceHeroActions.push({
-      id: "refresh-usage",
-      label: t("刷新用量报表", "Refresh Usage"),
-      note: t("按时间窗重新统计 Token", "Recalculate token usage by range"),
-      onClick: () => void loadUsageReport(),
-      disabled: loadingUsage
-    });
-  }
-
-  if (routeModule === "docs") {
-    workspaceHeroActions.push({
-      id: "copy-base-url",
-      label: t("复制网关地址", "Copy Gateway Base URL"),
-      note: gatewayV1Endpoint,
-      onClick: () =>
-        void copyTextToClipboard(
-          gatewayV1Endpoint,
-          t("网关 Base URL 已复制。", "Gateway base URL copied.")
-        )
-    });
-  }
 
   return (
     <div className="tc-console">
@@ -3227,6 +3265,12 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
             <Menu.SubMenu value="key-mgmt" title={t("Key 管理", "Key Management")} icon={<ControlPlatformIcon />}>
               <Menu.MenuItem value="access" icon={<UserIcon />}>
                 {t("基础接入", "Access")}
+              </Menu.MenuItem>
+              <Menu.MenuItem value="prompt" icon={<ApiIcon />}>
+                {t("提示词配置", "Prompt Config")}
+              </Menu.MenuItem>
+              <Menu.MenuItem value="export" icon={<ApiIcon />}>
+                {t("配置导出", "Export")}
               </Menu.MenuItem>
               <Menu.MenuItem value="upstream" icon={<ApiIcon />}>
                 {t("上游渠道", "Upstreams")}
@@ -3286,6 +3330,8 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
               onChange={(value) => handleMenuRoute(String(value))}
             >
               <Tabs.TabPanel value="access" label={t("基础接入", "Access")} />
+              <Tabs.TabPanel value="prompt" label={t("提示词配置", "Prompt Config")} />
+              <Tabs.TabPanel value="export" label={t("配置导出", "Export")} />
               <Tabs.TabPanel value="upstream" label={t("上游渠道", "Upstreams")} />
               <Tabs.TabPanel value="runtime" label={t("运行时调度", "Runtime")} disabled={keys.length === 0} />
               <Tabs.TabPanel value="logs" label={t("请求日志", "Request Logs")} />
@@ -3296,21 +3342,6 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
           </div>
 
           <Layout.Content className="tc-content">
-            <div className="tc-overview-zone">
-              <WorkspaceHero
-                title={t("网关工作台", "Gateway Workspace")}
-                subtitle={routeModuleSummary}
-                stats={workspaceHeroStats}
-                actions={workspaceHeroActions}
-                rightSlot={
-                  <div className="tc-workspace-hero-tags">
-                    <Tag variant="light-outline">{routeModuleTitle}</Tag>
-                    <Tag variant="light-outline">wire_api={wireApi}</Tag>
-                  </div>
-                }
-              />
-            </div>
-
             <Card className="tc-panel" bordered>
               <div className="tc-toolbar">
                 {routeModule === "logs" ? (
@@ -3348,6 +3379,15 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                     <Tag variant="light-outline">{t("网关路由", "Gateway Routes")} {API_DOC_GATEWAY_ENDPOINTS.length}</Tag>
                     <Tag variant="light-outline">{t("管理路由", "Management Routes")} {API_DOC_MANAGEMENT_ENDPOINTS.length}</Tag>
                     <Tag variant="light-outline">{t("基础地址", "Base URL")} {gatewayV1Endpoint}</Tag>
+                  </div>
+                ) : routeModule === "prompt" ? (
+                  <div className="tc-toolbar-left">
+                    <span className="tc-label">{t("提示词配置", "Prompt Config")}</span>
+                    <Tag variant="light-outline">keywords={compatPromptKeywordCount}</Tag>
+                    <Tag variant="light-outline">hint_chars={compatPromptHintLength}</Tag>
+                    {savingCompatPromptConfig ? (
+                      <Tag theme="warning" variant="light-outline">{t("保存中", "Saving")}</Tag>
+                    ) : null}
                   </div>
                 ) : routeModule === "upstream" ? (
                   <div className="tc-toolbar-left">
@@ -3420,7 +3460,16 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                         {t("新建渠道", "New Upstream")}
                       </Button>
                     </>
-                  ) : routeModule === "access" || routeModule === "runtime" ? (
+                  ) : routeModule === "prompt" ? (
+                    <Button
+                      variant="outline"
+                      theme="default"
+                      onClick={() => void loadGatewayConfig()}
+                      disabled={loading || savingCompatPromptConfig}
+                    >
+                      {t("刷新配置", "Refresh Config")}
+                    </Button>
+                  ) : routeModule === "access" || routeModule === "export" || routeModule === "runtime" ? (
                     <>
                       <Button
                         variant="outline"
@@ -3517,6 +3566,12 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                     <Tag variant="light-outline">gateway_base={gatewayV1Endpoint}</Tag>
                     <Tag variant="light-outline">runtime_switch={runtimeSwitchEndpoint}</Tag>
                     <Tag variant="light-outline">auth=Authorization Bearer / x-api-key</Tag>
+                  </>
+                ) : routeModule === "prompt" ? (
+                  <>
+                    <Tag variant="light-outline">keywords={compatPromptKeywordCount}</Tag>
+                    <Tag variant="light-outline">hint_chars={compatPromptHintLength}</Tag>
+                    <Tag variant="light-outline">defaults={compatPromptDefaults ? "loaded" : "pending"}</Tag>
                   </>
                 ) : routeModule === "upstream" ? (
                   <>
@@ -3655,7 +3710,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                           <Select
                             value={keyForm.contextOverflowModel || undefined}
                             options={keyOverflowModelOptions}
-                            placeholder={t("请选择渠道中的模型", "Select a model from upstream")}
+                            placeholder={t("可跨上游选择任意已启用模型", "Select any enabled model across upstreams")}
                             onChange={(value) =>
                               setKeyForm((prev) => ({
                                 ...prev,
@@ -3664,6 +3719,12 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                             }
                           />
                         </label>
+                        <p className="tc-upstream-advice tc-field-wide">
+                          {t(
+                            "溢出模型支持跨上游选择。超阈值后会直接切到你选定的渠道与模型，而不再限制为当前绑定渠道。",
+                            "Overflow model supports cross-upstream selection. Once the threshold is exceeded, requests switch directly to the selected channel and model instead of being limited to the currently bound upstream."
+                          )}
+                        </p>
                       </>
                     ) : null}
                   </div>
@@ -3891,19 +3952,24 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                   )}
 
                   {selectedChannelForKey ? (
-                    <div className="tc-meta-row">
-                      <Tag theme="primary" variant="light-outline">
-                        {t("渠道供应商", "Upstream Provider")}: {PROVIDER_META[selectedChannelForKey.provider].label}
-                      </Tag>
-                      <Tag variant="light-outline">
-                        {t("默认模型", "Default Model")}: {selectedChannelForKey.defaultModel}
-                      </Tag>
-                      <Tag variant="light-outline">
-                        {t("协议", "Wire API")}: {selectedChannelForKey.upstreamWireApi}
-                      </Tag>
-                      <Tag variant="light-outline">
-                        {t("上游地址", "Upstream URL")}: {selectedChannelForKey.upstreamBaseUrl}
-                      </Tag>
+                    <div className="tc-channel-summary">
+                      <div className="tc-meta-row">
+                        <Tag theme="primary" variant="light-outline">
+                          {t("渠道供应商", "Upstream Provider")}: {PROVIDER_META[selectedChannelForKey.provider].label}
+                        </Tag>
+                        <Tag variant="light-outline">
+                          {t("默认模型", "Default Model")}: {selectedChannelForKey.defaultModel}
+                        </Tag>
+                        <Tag variant="light-outline">
+                          {t("协议", "Wire API")}: {selectedChannelForKey.upstreamWireApi}
+                        </Tag>
+                      </div>
+                      <div className="tc-channel-endpoint">
+                        <span className="tc-channel-endpoint-label">
+                          {t("上游地址", "Upstream URL")}
+                        </span>
+                        <code>{selectedChannelForKey.upstreamBaseUrl}</code>
+                      </div>
                     </div>
                   ) : (
                     <p className="tc-tip err">{t("请先在「上游渠道」创建渠道，再回来绑定本地 Key。", "Create an upstream first, then bind local key here.")}</p>
@@ -3912,6 +3978,106 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                   <p className="tc-upstream-advice">
                     {t("保存入口统一在本页底部，仅保留一个", "Save action is unified at bottom with one button")}「
                     {isNewKey ? t("创建 Key", "Create Key") : t("保存 Key", "Save Key")}」。
+                  </p>
+                  <p className="tc-tip">
+                    {t(
+                      "导入预览与原生 Codex 导出已单独放到「配置导出」页面，便于专门查看和复制。",
+                      "Import previews and native Codex export have moved to the dedicated Export page for cleaner access."
+                    )}
+                  </p>
+                </section>
+              ) : null}
+
+              {routeModule === "access" ? (
+                <section className="tc-section">
+                  <h3>{t("提示词配置已迁移", "Prompt Config Has Moved")}</h3>
+                  <p className="tc-upstream-advice">
+                    {t(
+                      "检测 AGENTS.md 时自动注入的默认提示词与关键词规则，已经拆到独立的「提示词配置」页面，便于单独维护。",
+                      "The default injected prompt and AGENTS keyword rules used for AGENTS.md detection have moved to the dedicated Prompt Config page."
+                    )}
+                  </p>
+                  <div className="tc-actions-row">
+                    <Button theme="primary" onClick={() => handleMenuRoute("prompt")}>
+                      {t("前往提示词配置", "Open Prompt Config")}
+                    </Button>
+                  </div>
+                </section>
+              ) : null}
+
+              {routeModule === "prompt" ? (
+                <section className="tc-section">
+                  <h3>{t("网关默认提示词配置", "Gateway Default Prompt Config")}</h3>
+                  <p className="tc-upstream-advice">
+                    {t(
+                      "这里控制在检测到 AGENTS.md 相关提示时，网关自动插入的默认中文回复与 `apply_patch` 约束。保存后会影响后续请求。",
+                      "This controls the default Chinese reply and `apply_patch` rules automatically injected when AGENTS.md-style prompts are detected. Changes affect future requests."
+                    )}
+                  </p>
+
+                  <div className="tc-form-grid">
+                    <label className="tc-field">
+                      <span>{t("AGENTS 关键词（每行一个）", "AGENTS Keywords (one per line)")}</span>
+                      <Textarea
+                        value={compatPromptKeywordsInput}
+                        onChange={(value) => setCompatPromptKeywordsInput(value)}
+                        autosize={{ minRows: 4, maxRows: 8 }}
+                        placeholder={"AGENTS.md\nAGENTS.MD\nagents.md"}
+                      />
+                    </label>
+
+                    <label className="tc-field">
+                      <span>{t("默认提示词正文", "Default Prompt Body")}</span>
+                      <Textarea
+                        value={compatPromptHintInput}
+                        onChange={(value) => setCompatPromptHintInput(value)}
+                        autosize={{ minRows: 10, maxRows: 18 }}
+                        placeholder={t("请输入自动注入的默认提示词", "Enter the default injected prompt")}
+                      />
+                    </label>
+                  </div>
+
+                  <div className="tc-actions-row">
+                    <Button
+                      theme="primary"
+                      loading={savingCompatPromptConfig}
+                      onClick={() => void saveGatewayCompatPromptConfig()}
+                      disabled={loading}
+                    >
+                      {t("保存全局提示词配置", "Save Global Prompt Config")}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      theme="default"
+                      onClick={() => {
+                        if (!compatPromptDefaults) {
+                          return;
+                        }
+                        applyCompatPromptConfig(compatPromptDefaults);
+                      }}
+                      disabled={!compatPromptDefaults || savingCompatPromptConfig}
+                    >
+                      {t("恢复默认草稿", "Reset to Defaults")}
+                    </Button>
+                  </div>
+
+                  <p className="tc-tip">
+                    {t(
+                      "说明：关键词用于定位 AGENTS.md 段落前的插入位置；默认提示词会原样注入，所以你可以按自己的工作流调整语言、补丁规范和行为约束。",
+                      "Keywords locate the insertion point before AGENTS.md sections; the default hint is injected as-is, so you can tailor language, patch rules, and behavior for your own workflow."
+                    )}
+                  </p>
+                </section>
+              ) : null}
+
+              {routeModule === "export" ? (
+                <section className="tc-section">
+                  <h3>{t("配置导出与导入", "Export and Import")}</h3>
+                  <p className="tc-upstream-advice">
+                    {t(
+                      "这里集中展示 CC Switch 导入配置、原生 Codex 导出片段和 Claude Code 预览，不再和 Key 编辑表单混在一起。",
+                      "This page centralizes CC Switch import configs, native Codex export snippets, and Claude Code previews instead of mixing them into the key editor."
+                    )}
                   </p>
                   <p className="tc-tip">
                     {t(
@@ -3932,9 +4098,13 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                         {t("一键复制 auth.json（含密钥）", "Copy auth.json (with key)")}
                       </Button>
                     </div>
-                    <pre className="tc-json-fallback">
-                      {codexAuthJsonPreview || t("请先填写本地 Key 后查看配置预览。", "Fill local key to preview config.")}
-                    </pre>
+                    <CodeBlock
+                      value={
+                        codexAuthJsonPreview ||
+                        t("请先填写本地 Key 后查看配置预览。", "Fill local key to preview config.")
+                      }
+                      language="json"
+                    />
                     <p className="tc-upstream-advice">
                       {t(
                         "说明：这里对应 CC Switch 的 auth.json；预览与复制都会显示完整真实密钥。",
@@ -3952,9 +4122,13 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                         {t("一键复制 config.toml", "Copy config.toml")}
                       </Button>
                     </div>
-                    <pre className="tc-json-fallback">
-                      {codexConfigTomlPreview || t("请先填写本地 Key 后查看配置预览。", "Fill local key to preview config.")}
-                    </pre>
+                    <CodeBlock
+                      value={
+                        codexConfigTomlPreview ||
+                        t("请先填写本地 Key 后查看配置预览。", "Fill local key to preview config.")
+                      }
+                      language="toml"
+                    />
 
                     <div className="tc-runtime-doc-head">
                       <h4>{t("原生 Codex CLI 导出", "Native Codex CLI Export")}</h4>
@@ -4035,9 +4209,10 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                         {t("复制 .env 片段", "Copy .env Snippet")}
                       </Button>
                     </div>
-                    <pre className="tc-json-fallback">
-                      {nativeCodexExportBundle?.files.envSnippet.content || nativeCodexEmptyState}
-                    </pre>
+                    <CodeBlock
+                      value={nativeCodexExportBundle?.files.envSnippet.content || nativeCodexEmptyState}
+                      language="dotenv"
+                    />
                     <p className="tc-upstream-advice">
                       {t("建议路径", "Suggested path")}:{" "}
                       {nativeCodexExportBundle?.files.envSnippet.targetPath ?? "~/.codex/.env"}
@@ -4063,9 +4238,12 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                         {t("复制原生 config.toml", "Copy Native config.toml")}
                       </Button>
                     </div>
-                    <pre className="tc-json-fallback">
-                      {nativeCodexExportBundle?.files.configTomlSnippet.content || nativeCodexEmptyState}
-                    </pre>
+                    <CodeBlock
+                      value={
+                        nativeCodexExportBundle?.files.configTomlSnippet.content || nativeCodexEmptyState
+                      }
+                      language="toml"
+                    />
                     <p className="tc-upstream-advice">
                       {t("建议路径", "Suggested path")}:{" "}
                       {nativeCodexExportBundle?.files.configTomlSnippet.targetPath ?? "~/.codex/config.toml"}
@@ -4094,9 +4272,13 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                         {t("复制 model_catalog_json", "Copy model_catalog_json")}
                       </Button>
                     </div>
-                    <pre className="tc-json-fallback">
-                      {nativeCodexExportBundle?.files.modelCatalogJson.content || nativeCodexEmptyState}
-                    </pre>
+                    <CodeBlock
+                      value={
+                        nativeCodexExportBundle?.files.modelCatalogJson.content || nativeCodexEmptyState
+                      }
+                      language="json"
+                      maxHeight={260}
+                    />
                     <p className="tc-upstream-advice">
                       {t("建议路径", "Suggested path")}:{" "}
                       {nativeCodexExportBundle?.files.modelCatalogJson.targetPath ??
@@ -4123,9 +4305,13 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                         {t("复制 instructions", "Copy instructions")}
                       </Button>
                     </div>
-                    <pre className="tc-json-fallback">
-                      {nativeCodexExportBundle?.files.modelInstructionsMd.content || nativeCodexEmptyState}
-                    </pre>
+                    <CodeBlock
+                      value={
+                        nativeCodexExportBundle?.files.modelInstructionsMd.content || nativeCodexEmptyState
+                      }
+                      language="markdown"
+                      maxHeight={260}
+                    />
                     <p className="tc-upstream-advice">
                       {t("建议路径", "Suggested path")}:{" "}
                       {nativeCodexExportBundle?.files.modelInstructionsMd.targetPath ??
@@ -4149,9 +4335,11 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                         {t("复制 AGENTS.md", "Copy AGENTS.md")}
                       </Button>
                     </div>
-                    <pre className="tc-json-fallback">
-                      {nativeCodexExportBundle?.files.agentsMd.content || nativeCodexEmptyState}
-                    </pre>
+                    <CodeBlock
+                      value={nativeCodexExportBundle?.files.agentsMd.content || nativeCodexEmptyState}
+                      language="markdown"
+                      maxHeight={260}
+                    />
                     <p className="tc-upstream-advice">
                       {t("建议路径", "Suggested path")}:{" "}
                       {nativeCodexExportBundle?.files.agentsMd.targetPath ?? "./AGENTS.md"}
@@ -4168,9 +4356,14 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                         {t("一键复制 Claude 配置（含密钥）", "Copy Claude Config (with key)")}
                       </Button>
                     </div>
-                    <pre className="tc-json-fallback">
-                      {claudeConfigPreview || t("请先填写本地 Key 后查看配置预览。", "Fill local key to preview config.")}
-                    </pre>
+                    <CodeBlock
+                      value={
+                        claudeConfigPreview ||
+                        t("请先填写本地 Key 后查看配置预览。", "Fill local key to preview config.")
+                      }
+                      language="json"
+                      maxHeight={260}
+                    />
                     <p className="tc-upstream-advice">
                       {t(
                         "说明：这里对应 CC Switch 的 Claude env 配置；预览与复制都会显示完整真实密钥。",

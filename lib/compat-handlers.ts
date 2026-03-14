@@ -60,6 +60,7 @@ import {
   extractTokenUsageFromPayload,
   recordTokenUsageEvent
 } from "@/lib/usage-report";
+import { getCompatPromptConfig } from "@/lib/compat-config";
 import { appendAiCallLogEntry } from "@/lib/ai-call-log-store";
 import { persistAiCallImage } from "@/lib/ai-call-image-store";
 import { readResponseContext, writeResponseContext } from "@/lib/response-context-store";
@@ -243,86 +244,6 @@ type VisionCaptionCacheEntry = {
 };
 
 const visionCaptionCache = new Map<string, VisionCaptionCacheEntry>();
-const AGENTS_MD_KEYWORDS = ["AGENTS.md", "AGENTS.MD", "agents.md"] as const;
-const CHINESE_REPLY_HINT = `
-You are a coding agent with access to the \`apply_patch\` tool.
-
-When you need to create, modify, rename, or delete files, you MUST use \`apply_patch\`.
-Never output patch text in a normal assistant message.
-Never use shell editors or ad-hoc file rewrite commands when \`apply_patch\` is available.
-
-## apply_patch rules
-
-1. Patch envelope
-Always wrap patches in this format:
-
-*** Begin Patch
-...patch body...
-*** End Patch
-
-2. File operations
-Use one of these headers:
-- *** Update File: relative/path/to/file
-- *** Add File: relative/path/to/file
-- *** Delete File: relative/path/to/file
-
-3. Paths
-Always use relative file paths.
-Never use absolute paths unless the tool specification explicitly requires them.
-
-4. Hunks
-For modifications, use hunks introduced by:
-@@
-
-Within a hunk:
-- Lines starting with a single space are context lines and MUST exactly match the current file content.
-- Lines starting with \`-\` are lines to remove and MUST exactly match the current file content.
-- Lines starting with \`+\` are lines to add.
-
-5. Matching discipline
-Do not guess old content.
-Before writing a patch, make sure the removed lines and context lines exactly match the current file.
-If patch application fails, re-read the file and regenerate the patch from the actual content.
-
-6. Minimality
-Only change the lines that are necessary.
-Keep enough surrounding context to make the patch unambiguous.
-
-7. No extra formatting
-Do not wrap the patch in Markdown code fences.
-Do not explain the patch outside the tool call.
-Only send the patch text as the \`input\` to \`apply_patch\`.
-
-## Examples
-
-### Update an existing file
-*** Begin Patch
-*** Update File: snake.html
-@@
- body {
--  display: flex;
--  flex-direction: column;
-+  display: flex; /* 使用弹性布局 */
-+  flex-direction: column; /* 子元素垂直排列 */
-   align-items: center;
- }
-*** End Patch
-
-### Add a new file
-*** Begin Patch
-*** Add File: utils/helper.py
-+def hello() -> str:
-+    return "hello"
-*** End Patch
-
-### Delete a file
-*** Begin Patch
-*** Delete File: old_script.py
-*** End Patch \n
-You must use Chinese for both reasoning and responses.
-Do not think in or output any other language.
-Chinese is mandatory for all internal reasoning and external replies unless explicitly instructed otherwise. \n
-`;
 
 function parsePositiveIntEnv(
   value: string | undefined,
@@ -632,6 +553,11 @@ function normalizeModelForCompare(provider: string, model: string | null | undef
   return normalized.toLowerCase();
 }
 
+function isGptFamilyModel(provider: string, model: string | null | undefined) {
+  const normalized = normalizeModelForCompare(provider, model);
+  return normalized === "gpt" || normalized.startsWith("gpt-");
+}
+
 function resolveRuntimeModel(key: ResolvedGatewayKey, model: string): RuntimeModelResolved {
   const requestedModel = model.trim();
   const requestedNormalized = normalizeUpstreamModelCode(key.provider, requestedModel);
@@ -700,21 +626,33 @@ async function resolveMappingRuntimeKey(
   key: ResolvedGatewayKey,
   mapping: ResolvedGatewayKey["modelMappings"][number] | null
 ) {
-  const mappingChannelId = mapping?.upstreamChannelId ?? null;
-  if (!mappingChannelId) {
+  return resolveRuntimeKeyFromChannel(
+    key,
+    mapping?.upstreamChannelId ?? null,
+    "Mapping upstream channel not found or disabled. Check modelMappings[].upstreamChannelId configuration.",
+    "Mapping upstream channel has no upstream API key configured."
+  );
+}
+
+async function resolveRuntimeKeyFromChannel(
+  key: ResolvedGatewayKey,
+  channelId: number | null,
+  missingChannelMessage: string,
+  missingApiKeyMessage: string
+) {
+  if (!channelId) {
     return { ok: true as const, key };
   }
 
   const channel = await prisma.upstreamChannel.findUnique({
-    where: { id: mappingChannelId }
+    where: { id: channelId }
   });
   if (!channel || !channel.enabled) {
     return {
       ok: false as const,
       status: 400,
       body: {
-        error:
-          "Mapping upstream channel not found or disabled. Check modelMappings[].upstreamChannelId configuration."
+        error: missingChannelMessage
       }
     };
   }
@@ -725,8 +663,7 @@ async function resolveMappingRuntimeKey(
       ok: false as const,
       status: 400,
       body: {
-        error:
-          "Mapping upstream channel has no upstream API key configured."
+        error: missingApiKeyMessage
       }
     };
   }
@@ -834,6 +771,30 @@ async function resolveModelCandidatesForRequest(params: {
     params.baseKey
   );
   const clientModel = dynamicPick.switched ? dynamicPick.model : params.requestedModel;
+  if (dynamicPick.upstreamChannelId) {
+    const explicitRuntimeKey = await resolveRuntimeKeyFromChannel(
+      params.baseKey,
+      dynamicPick.upstreamChannelId,
+      "Overflow upstream channel not found or disabled. Check dynamicModelSwitch overflow target configuration.",
+      "Overflow upstream channel has no upstream API key configured."
+    );
+    if (!explicitRuntimeKey.ok) {
+      return explicitRuntimeKey;
+    }
+
+    const runtimeResolved = resolveRuntimeModel(explicitRuntimeKey.key, dynamicPick.model);
+    return {
+      ok: true as const,
+      candidates: [
+        {
+          ...runtimeResolved,
+          clientModel,
+          mapping: null
+        }
+      ]
+    };
+  }
+
   const mappingCandidates = dedupeCandidateMappings(params.mappingResolution.candidateMappings);
   const resolvedCandidates: ResolvedModelCandidate[] = [];
   let firstFailure:
@@ -1644,8 +1605,9 @@ function normalizeOptionalString(value: unknown) {
 }
 
 function injectChineseReplyHintBeforeAgents(text: string) {
+  const compatPromptConfig = getCompatPromptConfig();
   let agentsIndex = -1;
-  for (const keyword of AGENTS_MD_KEYWORDS) {
+  for (const keyword of compatPromptConfig.agentsMdKeywords) {
     const index = text.indexOf(keyword);
     if (index >= 0 && (agentsIndex < 0 || index < agentsIndex)) {
       agentsIndex = index;
@@ -1654,13 +1616,13 @@ function injectChineseReplyHintBeforeAgents(text: string) {
   if (agentsIndex < 0) {
     return text;
   }
-  if (text.slice(0, agentsIndex).includes(CHINESE_REPLY_HINT)) {
+  if (text.slice(0, agentsIndex).includes(compatPromptConfig.chineseReplyHint)) {
     return text;
   }
   const prefix = agentsIndex > 0 && text[agentsIndex - 1] !== "\n" ? "\n" : "";
   return (
     text.slice(0, agentsIndex) +
-    `${prefix}${CHINESE_REPLY_HINT}\n` +
+    `${prefix}${compatPromptConfig.chineseReplyHint}\n` +
     text.slice(agentsIndex)
   );
 }
@@ -5263,20 +5225,18 @@ export async function handleLegacyChatCompletions(
     return NextResponse.json(rewrittenForFileIds.body, { status: rewrittenForFileIds.status });
   }
 
-  const body = rewriteLegacyBodyForAgentsHint(rewrittenForFileIds.body);
-  const promptSnapshot = extractPromptSnapshotFromLegacyMessages(
-    normalizeLegacyMessages(body.messages as LegacyChatRequest["messages"])
-  );
-
-  const requestedModel = pickRequestedModel(body.model, resolved.key);
+  const requestedModel = pickRequestedModel(rewrittenForFileIds.body.model, resolved.key);
   const modelMapping = resolveRequestedModelMapping(requestedModel, resolved.key);
   const mappedRequestedModel = modelMapping.mappedModel;
-  const promptTokensEstimate = estimateLegacyChatTokens(body, mappedRequestedModel);
+  const preliminaryPromptTokensEstimate = estimateLegacyChatTokens(
+    rewrittenForFileIds.body,
+    mappedRequestedModel
+  );
   const resolvedCandidates = await resolveModelCandidatesForRequest({
     baseKey: resolved.key,
     requestedModel,
     mappedModel: mappedRequestedModel,
-    promptTokensEstimate,
+    promptTokensEstimate: preliminaryPromptTokensEstimate,
     mappingResolution: modelMapping
   });
   if (!resolvedCandidates.ok) {
@@ -5285,6 +5245,13 @@ export async function handleLegacyChatCompletions(
   const modelCandidates = resolvedCandidates.candidates;
   const modelResolved = modelCandidates[0];
   const runtimeKey = modelResolved.runtimeKey;
+  const body = isGptFamilyModel(runtimeKey.provider, modelResolved.upstreamModel)
+    ? rewrittenForFileIds.body
+    : rewriteLegacyBodyForAgentsHint(rewrittenForFileIds.body);
+  const promptSnapshot = extractPromptSnapshotFromLegacyMessages(
+    normalizeLegacyMessages(body.messages as LegacyChatRequest["messages"])
+  );
+  const promptTokensEstimate = estimateLegacyChatTokens(body, mappedRequestedModel);
 
   const rewritten = await describeMediaWithVisionModel(body, runtimeKey, {
     route,
@@ -6230,17 +6197,18 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
     return NextResponse.json(rewrittenForFileIds.body, { status: rewrittenForFileIds.status });
   }
 
-  const body = rewriteResponsesBodyForAgentsHint(rewrittenForFileIds.body);
-
-  const requestedModel = pickRequestedModel(body.model, resolved.key);
+  const requestedModel = pickRequestedModel(rewrittenForFileIds.body.model, resolved.key);
   const modelMapping = resolveRequestedModelMapping(requestedModel, resolved.key);
   const mappedRequestedModel = modelMapping.mappedModel;
-  const promptTokensEstimate = estimateResponsesRequestTokens(body, mappedRequestedModel);
+  const preliminaryPromptTokensEstimate = estimateResponsesRequestTokens(
+    rewrittenForFileIds.body,
+    mappedRequestedModel
+  );
   const resolvedCandidates = await resolveModelCandidatesForRequest({
     baseKey: resolved.key,
     requestedModel,
     mappedModel: mappedRequestedModel,
-    promptTokensEstimate,
+    promptTokensEstimate: preliminaryPromptTokensEstimate,
     mappingResolution: modelMapping
   });
   if (!resolvedCandidates.ok) {
@@ -6249,6 +6217,10 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
   const modelCandidates = resolvedCandidates.candidates;
   const modelResolved = modelCandidates[0];
   const runtimeKey = modelResolved.runtimeKey;
+  const body = isGptFamilyModel(runtimeKey.provider, modelResolved.upstreamModel)
+    ? rewrittenForFileIds.body
+    : rewriteResponsesBodyForAgentsHint(rewrittenForFileIds.body);
+  const promptTokensEstimate = estimateResponsesRequestTokens(body, mappedRequestedModel);
   const responseContextScope = String(resolved.key.id);
   const mappedPrompt = mapResponsesRequestToLegacyChat(body, body.model?.trim() || runtimeKey.defaultModel);
   const previousPromptMessages = readResponseContext(responseContextScope, body.previous_response_id);

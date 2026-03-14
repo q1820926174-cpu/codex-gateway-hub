@@ -1,8 +1,9 @@
 import { notFound } from "next/navigation";
-import { SettingsConsole, type EditorModule } from "@/components/settings-console";
+import { ModuleRouter } from "@/components/console/modules/ModuleRouter";
+import type { EditorModule } from "@/components/console/types";
 import { ensureEntryAccess } from "@/lib/entry-secret";
 
-const CONSOLE_MODULES = ["access", "upstream", "runtime", "logs", "calls", "usage", "docs"] as const;
+const CONSOLE_MODULES = ["access", "prompt", "export", "upstream", "runtime", "logs", "calls", "usage", "docs"] as const;
 
 function isConsoleModule(value: string): value is EditorModule {
   return (CONSOLE_MODULES as readonly string[]).includes(value);
@@ -17,5 +18,5 @@ export default async function ConsoleModulePage(
   }
 
   await ensureEntryAccess(`/console/${module}`);
-  return <SettingsConsole module={module} />;
+  return <ModuleRouter module={module} />;
 }
