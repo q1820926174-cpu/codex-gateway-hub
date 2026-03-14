@@ -95,8 +95,19 @@ const keyModelMappingSchema = z.object({
   clientModel: z.string().min(1).max(256),
   targetModel: z.string().min(1).max(256),
   upstreamChannelId: z.number().int().positive().nullable().optional(),
-  thinkingType: z.enum(["enabled", "disabled", "auto"]).nullable().optional(),
-  enabled: z.boolean().default(true)
+ thinkingType: z.enum(["enabled", "disabled", "auto"]).nullable().optional(),
+  enabled: z.boolean().default(true),
+  dynamicModelSwitch: z.boolean().default(false).optional(),
+  contextSwitchThreshold: z.number().int().min(256).max(2_000_000).default(128000).optional(),
+  contextOverflowModel: z.string().min(1).max(512).optional()
+}).superRefine((value, ctx) => {
+  if (value.dynamicModelSwitch && !(value.contextOverflowModel && value.contextOverflowModel.trim())) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["contextOverflowModel"],
+      message: "contextOverflowModel is required when dynamicModelSwitch is true."
+    });
+  }
 });
 
 type ParsedUpstreamModel = z.infer<typeof upstreamModelSchema>;
@@ -122,6 +133,9 @@ export type KeyModelMapping = {
   upstreamChannelId: number | null;
   thinkingType: "enabled" | "disabled" | "auto" | null;
   enabled: boolean;
+  dynamicModelSwitch: boolean;
+  contextSwitchThreshold: number;
+  contextOverflowModel: string | null;
 };
 
 type UpstreamModelFallback = {
@@ -308,9 +322,12 @@ export function normalizeKeyModelMappings(raw: unknown): KeyModelMapping[] {
       targetModel,
       upstreamChannelId: item.upstreamChannelId ?? null,
       thinkingType: item.thinkingType ?? null,
-      enabled: item.enabled
-    });
-  }
+      enabled: item.enabled,
+      dynamicModelSwitch: item.dynamicModelSwitch ?? false,
+      contextSwitchThreshold: item.contextSwitchThreshold ?? 128000,
+      contextOverflowModel: item.contextOverflowModel?.trim() || null
+   });
+ }
 
   const usedIds = new Set<string>();
   return parsed.slice(0, MAX_KEY_MODEL_MAPPINGS).map((item) => {
@@ -367,11 +384,11 @@ export const createGatewayKeySchema = z.object({
   defaultModel: z.string().min(1).max(256).default("gpt-4.1-mini"),
   supportsVision: z.boolean().default(true),
   visionModel: z.string().min(1).max(256).optional(),
-  upstreamModels: z.array(upstreamModelSchema).min(1).max(MAX_UPSTREAM_MODELS).optional(),
+ upstreamModels: z.array(upstreamModelSchema).min(1).max(MAX_UPSTREAM_MODELS).optional(),
   dynamicModelSwitch: z.boolean().default(false),
-  contextSwitchThreshold: z.number().int().min(256).max(2_000_000).default(12000),
+  contextSwitchThreshold: z.number().int().min(256).max(2_000_000).default(128000),
   contextOverflowModel: z.string().min(1).max(512).optional(),
-  activeModelOverride: z.string().min(1).max(256).optional(),
+ activeModelOverride: z.string().min(1).max(256).optional(),
   modelMappings: z.array(keyModelMappingSchema).max(MAX_KEY_MODEL_MAPPINGS).optional(),
   timeoutMs: z.number().int().min(1000).max(300000).default(60000),
   enabled: z.boolean().default(true)

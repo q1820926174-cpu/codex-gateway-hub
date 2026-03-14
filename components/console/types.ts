@@ -124,6 +124,9 @@ export type KeyModelMapping = {
   upstreamChannelId: number | null;
   thinkingType: DoubaoThinkingType | null;
   enabled: boolean;
+  dynamicModelSwitch: boolean;
+  contextSwitchThreshold: number;
+  contextOverflowModel: string | null;
 };
 
 export type GatewayKey = {

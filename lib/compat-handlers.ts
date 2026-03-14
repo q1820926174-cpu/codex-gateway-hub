@@ -768,7 +768,8 @@ async function resolveModelCandidatesForRequest(params: {
   const dynamicPick = pickModelByContext(
     params.mappedModel,
     params.promptTokensEstimate,
-    params.baseKey
+    params.baseKey,
+    params.mappingResolution.mapping
   );
   const clientModel = dynamicPick.switched ? dynamicPick.model : params.requestedModel;
   if (dynamicPick.upstreamChannelId) {
@@ -6627,6 +6628,7 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
       userPrompt: promptSnapshot.userPrompt,
       conversationTranscript: promptSnapshot.conversationTranscript
     },
+    // Preserve usage accounting plus the visible answer/reasoning extracted from the legacy payload.
     extractTokenUsageFromPayload(upstream.body),
     extractLegacyChatCompletionText(upstream.body),
     extractLegacyChatCompletionReasoning(upstream.body)

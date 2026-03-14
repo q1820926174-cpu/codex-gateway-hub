@@ -15,6 +15,10 @@ import {
   parseOverflowModelSelection,
   serializeOverflowModelSelection
 } from "@/lib/overflow-model";
+import {
+  quickExportModels,
+  quickImportModels
+} from "@/lib/quick-import-export";
 import { JsonViewer } from "@/components/json-viewer";
 import { useLocale, type LocaleCode } from "@/components/locale-provider";
 import {
@@ -289,6 +293,9 @@ type KeyModelMapping = {
   upstreamChannelId: number | null;
   thinkingType: DoubaoThinkingType | null;
   enabled: boolean;
+  dynamicModelSwitch: boolean;
+  contextSwitchThreshold: number;
+  contextOverflowModel: string | null;
 };
 
 type GatewayKey = {
@@ -606,7 +613,7 @@ function createEmptyKeyFormState(localKey = ""): KeyFormState {
     upstreamChannelId: null,
     modelMappings: [],
     dynamicModelSwitch: false,
-    contextSwitchThreshold: 12000,
+    contextSwitchThreshold: 128000,
     contextOverflowModel: "",
     enabled: true
   };
@@ -666,7 +673,10 @@ function toKeyForm(key: GatewayKey): KeyFormState {
           item.thinkingType === "auto"
             ? item.thinkingType
             : null,
-        enabled: item.enabled
+        enabled: item.enabled,
+        dynamicModelSwitch: item.dynamicModelSwitch ?? false,
+        contextSwitchThreshold: item.contextSwitchThreshold ?? 128000,
+        contextOverflowModel: item.contextOverflowModel ?? null
       })) ?? [],
     dynamicModelSwitch: key.dynamicModelSwitch,
     contextSwitchThreshold: key.contextSwitchThreshold,
@@ -1021,6 +1031,11 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
 
   const [keyForm, setKeyForm] = useState<KeyFormState>(() => createEmptyKeyFormState());
   const [channelForm, setChannelForm] = useState<ChannelFormState>(() => createEmptyChannelFormState());
+
+  const [quickImportJson, setQuickImportJson] = useState("");
+  const [quickImportDialogVisible, setQuickImportDialogVisible] = useState(false);
+  const [quickExportDialogVisible, setQuickExportDialogVisible] = useState(false);
+  const [quickExportJson, setQuickExportJson] = useState("");
 
   const [runtimeModel, setRuntimeModel] = useState("");
   const [syncDefaultModel, setSyncDefaultModel] = useState(false);
@@ -1768,6 +1783,25 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     return options;
   }, [channels, keyForm.contextOverflowModel, keyForm.upstreamChannelId, t]);
 
+  const mappingOverflowModelOptions = useMemo(() => {
+    const prioritizedChannels = [...channels]
+      .filter((item) => item.enabled)
+      .sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
+
+    const options = prioritizedChannels.flatMap((channel) =>
+      channel.upstreamModels
+        .filter((m) => m.enabled)
+        .map((m) => ({
+          label: m.aliasModel
+            ? `${channel.name} · ${PROVIDER_META[channel.provider].label} · ${m.name} · ${m.aliasModel} -> ${m.model}`
+            : `${channel.name} · ${PROVIDER_META[channel.provider].label} · ${m.name} · ${m.model}`,
+          value: serializeOverflowModelSelection(m.model, channel.id)
+        }))
+    );
+
+    return options;
+  }, [channels, t]);
+
   const visionChannelOptions = useMemo(
     () => [
       { label: "当前渠道", value: "__self__" },
@@ -2402,7 +2436,10 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
           targetModel: selectedChannelForKey?.defaultModel ?? "",
           upstreamChannelId: null,
           thinkingType: null,
-          enabled: true
+          enabled: true,
+          dynamicModelSwitch: false,
+          contextSwitchThreshold: 128000,
+          contextOverflowModel: null
         }
       ]
     }));
@@ -2441,6 +2478,11 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       if (keyForm.dynamicModelSwitch && !overflowModel) {
         throw new Error("启用动态切模时，必须设置溢出模型。");
       }
+      for (const m of keyForm.modelMappings) {
+        if (m.dynamicModelSwitch && !(m.contextOverflowModel?.trim())) {
+          throw new Error(`映射「${m.clientModel}」启用了动态切模但未设置溢出模型。`);
+        }
+      }
       const modelMappings = keyForm.modelMappings
         .map((item) => ({
           id: item.id,
@@ -2454,7 +2496,10 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
             item.thinkingType === "auto"
               ? item.thinkingType
               : null,
-          enabled: item.enabled
+          enabled: item.enabled,
+          dynamicModelSwitch: item.dynamicModelSwitch,
+          contextSwitchThreshold: item.contextSwitchThreshold,
+          contextOverflowModel: item.contextOverflowModel?.trim() || undefined
         }))
         .filter((item) => item.clientModel && item.targetModel);
 
@@ -2811,6 +2856,85 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
 
   async function copyLocalKey() {
     await copyTextToClipboard(keyForm.localKey, "本地 Key 已复制。");
+  }
+
+  function handleQuickExportModels() {
+    const exported = quickExportModels(channelForm.upstreamModels);
+    setQuickExportJson(exported);
+    setQuickExportDialogVisible(true);
+  }
+
+  async function handleQuickCopyModels() {
+    await copyTextToClipboard(
+      quickExportModels(channelForm.upstreamModels),
+      t("模型池已复制到剪贴板。", "Model pool copied to clipboard.")
+    );
+  }
+
+  function handleOpenQuickImportDialog() {
+    setQuickImportJson("");
+    setQuickImportDialogVisible(true);
+  }
+
+  function handleQuickImportConfirm() {
+    const result = quickImportModels(quickImportJson);
+    if (!result.ok) {
+      notifyError(result.error);
+      return;
+    }
+    setChannelForm((prev) => {
+      const incoming = result.models.map((m) =>
+        createUpstreamModelDraft({
+          name: m.name,
+          aliasModel: m.aliasModel,
+          model: m.model,
+          contextWindow: m.contextWindow,
+          upstreamWireApi: m.upstreamWireApi as "responses" | "chat_completions" | "anthropic_messages",
+          glmCodexThinkingThreshold: m.glmCodexThinkingThreshold as "off" | "low" | "medium" | "high",
+          supportsVision: m.supportsVision,
+          visionChannelId: m.visionChannelId,
+          visionModel: m.visionModel,
+          enabled: m.enabled
+        })
+      );
+      return syncChannelFormWithModelPool({
+        ...prev,
+        upstreamModels: [...prev.upstreamModels, ...incoming]
+      });
+    });
+    setQuickImportDialogVisible(false);
+    notifySuccess(result.note);
+  }
+
+  function handleQuickImportReplace() {
+    const result = quickImportModels(quickImportJson);
+    if (!result.ok) {
+      notifyError(result.error);
+      return;
+    }
+    setChannelForm((prev) => {
+      const incoming = result.models.map((m) =>
+        createUpstreamModelDraft({
+          name: m.name,
+          aliasModel: m.aliasModel,
+          model: m.model,
+          contextWindow: m.contextWindow,
+          upstreamWireApi: m.upstreamWireApi as "responses" | "chat_completions" | "anthropic_messages",
+          glmCodexThinkingThreshold: m.glmCodexThinkingThreshold as "off" | "low" | "medium" | "high",
+          supportsVision: m.supportsVision,
+          visionChannelId: m.visionChannelId,
+          visionModel: m.visionModel,
+          enabled: m.enabled
+        })
+      );
+      return syncChannelFormWithModelPool({
+        ...prev,
+        upstreamModels: incoming,
+        defaultModel: incoming[0]?.model ?? prev.defaultModel
+      });
+    });
+    setQuickImportDialogVisible(false);
+    notifySuccess(result.note);
   }
 
   function handleMenuRoute(next: string) {
@@ -3770,6 +3894,17 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                             <div className="tc-model-head">
                               <strong>映射 #{index + 1}</strong>
                               <div className="tc-model-actions">
+                                <span>{t("切模", "Overflow")}</span>
+                                <Switch
+                                  value={item.dynamicModelSwitch}
+                                  onChange={(value) =>
+                                    updateKeyModelMapping(item.id, (prev) => ({
+                                      ...prev,
+                                      dynamicModelSwitch: Boolean(value)
+                                    }))
+                                  }
+                                />
+                                <span className="tc-sep">|</span>
                                 <span>{t("启用", "Enabled")}</span>
                                 <Switch
                                   value={item.enabled}
@@ -3948,6 +4083,49 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                                 </p>
                               ) : null}
                             </div>
+                            {item.dynamicModelSwitch ? (
+                              <div className="tc-mapping-overflow">
+                                <span className="tc-sub-label">{t("上下文溢出切模", "Context Overflow Switch")}</span>
+                                <div className="tc-form-grid">
+                                  <label className="tc-field">
+                                    <span>{t("切换阈值（输入 Token）", "Switch Threshold (prompt tokens)")}</span>
+                                    <Input
+                                      type="number"
+                                      value={String(item.contextSwitchThreshold)}
+                                      onChange={(value) => {
+                                        const n = Number(value);
+                                        if (!Number.isNaN(n)) {
+                                          updateKeyModelMapping(item.id, (prev) => ({
+                                            ...prev,
+                                            contextSwitchThreshold: n
+                                          }));
+                                        }
+                                      }}
+                                    />
+                                  </label>
+                                  <label className="tc-field">
+                                    <span>{t("溢出模型（超阈值切换）", "Overflow Model (above threshold)")}</span>
+                                    <Select
+                                      value={item.contextOverflowModel || undefined}
+                                      options={mappingOverflowModelOptions}
+                                      placeholder={t("可跨上游选择任意已启用模型", "Select any enabled model across upstreams")}
+                                      onChange={(value) =>
+                                        updateKeyModelMapping(item.id, (prev) => ({
+                                          ...prev,
+                                          contextOverflowModel: normalizeSelectValue(value)
+                                        }))
+                                      }
+                                    />
+                                  </label>
+                                  <p className="tc-upstream-advice tc-field-wide">
+                                    {t(
+                                      "映射级溢出模型优先于 Key 级设置。超阈值后会直接切到你选定的渠道与模型。",
+                                      "Mapping-level overflow model takes priority over key-level settings. Once the threshold is exceeded, requests switch directly to the selected channel and model."
+                                    )}
+                                  </p>
+                                </div>
+                              </div>
+                            ) : null}
                           </div>
                         );
                       })}
@@ -4458,6 +4636,29 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                     ))}
                     <Button theme="primary" variant="outline" onClick={addUpstreamModel}>
                       {t("新增上游模型", "Add Upstream Model")}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      theme="default"
+                      onClick={handleQuickExportModels}
+                      disabled={!channelForm.upstreamModels.length}
+                    >
+                      {t("导出模型池", "Export Model Pool")}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      theme="default"
+                      onClick={handleQuickCopyModels}
+                      disabled={!channelForm.upstreamModels.length}
+                    >
+                      {t("复制模型池", "Copy Model Pool")}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      theme="default"
+                      onClick={handleOpenQuickImportDialog}
+                    >
+                      {t("导入模型池", "Import Model Pool")}
                     </Button>
                   </div>
 
@@ -6159,6 +6360,60 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
               ) : null}
             </Dialog>
 
+            <Dialog
+              visible={quickExportDialogVisible}
+              width="min(92vw, 800px)"
+              header={t("导出模型池", "Export Model Pool")}
+              cancelBtn={t("关闭", "Close")}
+              confirmBtn={t("复制到剪贴板", "Copy to Clipboard")}
+              onConfirm={() => void handleQuickCopyModels()}
+              onClose={() => setQuickExportDialogVisible(false)}
+            >
+              <div className="tc-quick-io-content">
+                <p className="tc-upstream-advice">
+                  {t(
+                    "以下 JSON 可保存到文件或粘贴到其他渠道的「导入模型池」中。内部 ID 和 API Key 已移除，可安全分享。",
+                    "Save this JSON to a file or paste into another channel's Import Model Pool. Internal IDs and API keys are stripped for safe sharing."
+                  )}
+                </p>
+                <CodeBlock value={quickExportJson} language="json" />
+              </div>
+            </Dialog>
+
+            <Dialog
+              visible={quickImportDialogVisible}
+              width="min(92vw, 800px)"
+              header={t("导入模型池", "Import Model Pool")}
+              cancelBtn={t("取消", "Cancel")}
+              confirmBtn={t("追加到现有模型", "Append to Existing")}
+              onConfirm={handleQuickImportConfirm}
+              onClose={() => setQuickImportDialogVisible(false)}
+            >
+              <div className="tc-quick-io-content">
+                <p className="tc-upstream-advice">
+                  {t(
+                    "粘贴导出的 JSON，将模型追加到当前渠道模型池末尾。也可直接粘贴模型数组 [{ ... }]。",
+                    "Paste exported JSON to append models to the current channel pool. You can also paste a bare model array [{ ... }]."
+                  )}
+                </p>
+                <Textarea
+                  placeholder='{"version":1,"models":[...]}\n\nor\n[{"model":"glm-5","name":"GLM-5",...}]'
+                  value={quickImportJson}
+                  onChange={(value) => setQuickImportJson(value)}
+                  autosize
+                />
+                <div className="tc-quick-io-actions">
+                  <Button
+                    theme="danger"
+                    variant="outline"
+                    onClick={handleQuickImportReplace}
+                    disabled={!quickImportJson.trim()}
+                  >
+                    {t("替换全部模型", "Replace All Models")}
+                  </Button>
+                </div>
+              </div>
+            </Dialog>
           </Layout.Content>
         </Layout>
       </Layout>

@@ -672,6 +672,60 @@ body {
   flex-wrap: wrap;
 }
 
+.tc-model-actions .tc-sep {
+  color: var(--tc-border);
+  user-select: none;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.tc-mapping-overflow {
+  padding-top: 12px;
+  border-top: 1px dashed #dbe4f2;
+}
+
+.tc-sub-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 12px;
+}
+
+.tc-quick-io-content {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.tc-quick-io-content textarea {
+  min-height: 200px;
+  font-family: "SF Mono", "Fira Code", "Fira Mono", Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  padding: 14px;
+  border: 1px solid var(--tc-border);
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #1e293b;
+  resize: vertical;
+}
+
+.tc-quick-io-content textarea:focus {
+  outline: 2px solid #3b82f6;
+  outline-offset: -1px;
+  border-color: transparent;
+}
+
+.tc-quick-io-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 4px;
+}
+
 .tc-form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
