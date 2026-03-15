@@ -24,7 +24,7 @@ model ProviderKey {
   supportsVision         Boolean          @default(true)
   visionModel            String?
   dynamicModelSwitch     Boolean          @default(false)
-  contextSwitchThreshold Int              @default(12000)
+  contextSwitchThreshold Int              @default(128000)
   contextOverflowModel   String?
   activeModelOverride    String?
   timeoutMs              Int              @default(60000)

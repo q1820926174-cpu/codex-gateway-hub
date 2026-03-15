@@ -59,6 +59,10 @@ import type { EChartsOption } from "echarts";
 
 const ReactECharts = dynamic(() => import("echarts-for-react"), { ssr: false });
 
+import { UsageLoadingSkeleton, UsagePulseLoader } from "@/components/ui/UsageLoadingSkeleton";
+import { UsageStatCard } from "@/components/ui/UsageStatCard";
+import { UsagePieChart, PIE_COLORS } from "@/components/ui/UsagePieChart";
+import type { PieSlice } from "@/components/ui/UsagePieChart";
 const PROVIDERS = ["openai", "anthropic", "openrouter", "xai", "deepseek", "glm", "doubao", "custom"] as const;
 type ProviderName = (typeof PROVIDERS)[number];
 
@@ -1481,6 +1485,8 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   const hasCustomUsageDateRange = Boolean(
     usageDateRange[0]?.trim() && usageDateRange[1]?.trim()
   );
+  const usageDateFrom = usageDateRange[0] ?? "";
+  const usageDateTo = usageDateRange[1] ?? "";
   const usageRangeTagLabel = hasCustomUsageDateRange
     ? `${t("范围", "Range")} ${usageDateRange[0]} ~ ${usageDateRange[1]}`
     : `${t("窗口", "Window")} ${usageMinutes} ${t("分钟", "minutes")}`;
@@ -1520,6 +1526,15 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     return Array.from(minuteMap.values()).sort((a, b) => a.minute.localeCompare(b.minute));
   }, [resolvedUsageBucketMinutes, usageReport]);
 
+  // 自适应趋势图高度：数据少时矮，多时高
+  const usageTimelineChartHeight = useMemo(() => {
+    const count = usageTimelinePoints.length;
+    if (count <= 5) return 180;
+    if (count <= 20) return 240;
+    if (count <= 60) return 300;
+    return 360;
+  }, [usageTimelinePoints]);
+
   const usageTimelineChartOption = useMemo<EChartsOption | null>(() => {
     if (!usageTimelinePoints.length) {
       return null;
@@ -1528,14 +1543,16 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     const isTokenMetric = usagePrimaryMetricMeta.isToken;
 
     return {
-      color: [usagePrimaryMetricMeta.color],
+      color: PIE_COLORS,
       tooltip: {
         trigger: "axis",
         backgroundColor: "rgba(15, 23, 42, 0.92)",
+        borderColor: "rgba(255, 255, 255, 0.08)",
         borderWidth: 0,
         textStyle: {
           color: "#f8fafc"
         },
+        extraCssText: "border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);",
         valueFormatter: (value) =>
           typeof value === "number" ? formatCompactNumber(value) : String(value ?? "")
       },
@@ -1574,7 +1591,8 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
         },
         splitLine: {
           lineStyle: {
-            color: "#e2e8f0"
+            color: "#e2e8f0",
+            type: "dashed"
           }
         },
         nameTextStyle: {
@@ -1582,6 +1600,8 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
         }
       },
       dataZoom: usageTimelinePoints.length > 90 ? [{ type: "inside", start: 40, end: 100 }] : [],
+      animationDuration: 800,
+      animationEasing: "cubicOut",
       series: [
         {
           name: metricLabel,
@@ -1589,10 +1609,28 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
           smooth: 0.35,
           showSymbol: false,
           lineStyle: {
-            width: 2
+            width: 2.5,
+            shadowColor: "rgba(59, 130, 246, 0.3)",
+            shadowBlur: 8,
+            shadowOffsetY: 4
           },
           areaStyle: {
-            opacity: 0.12
+            color: {
+              type: "linear",
+              x: 0, y: 0, x2: 0, y2: 1,
+              colorStops: [
+                { offset: 0, color: "rgba(59, 130, 246, 0.25)" },
+                { offset: 0.5, color: "rgba(59, 130, 246, 0.08)" },
+                { offset: 1, color: "rgba(59, 130, 246, 0.01)" }
+              ]
+            }
+          },
+          emphasis: {
+            focus: "series",
+            itemStyle: {
+              borderWidth: 2,
+              borderColor: "#fff"
+            }
           },
           data: usageTimelinePoints.map((item) => pickUsageMetricValue(item, usageMetric))
         }
@@ -1613,12 +1651,17 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       .reverse();
 
     return {
-      color: [usagePrimaryMetricMeta.color],
+      color: PIE_COLORS,
       tooltip: {
         trigger: "axis",
         axisPointer: {
           type: "shadow"
         },
+        backgroundColor: "rgba(15, 23, 42, 0.92)",
+        borderColor: "rgba(255, 255, 255, 0.08)",
+        borderWidth: 0,
+        textStyle: { color: "#f8fafc", fontSize: 12 },
+        extraCssText: "border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);",
         valueFormatter: (value) =>
           typeof value === "number" ? formatCompactNumber(value) : String(value ?? "")
       },
@@ -1636,7 +1679,8 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
         },
         splitLine: {
           lineStyle: {
-            color: "#e2e8f0"
+            color: "#e2e8f0",
+            type: "dashed"
           }
         }
       },
@@ -1648,6 +1692,8 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
         },
         data: topKeys.map((item) => item.keyName)
       },
+      animationDuration: 600,
+      animationEasing: "cubicOut",
       series: [
         {
           name: usagePrimaryMetricMeta.label,
@@ -1655,7 +1701,10 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
           barMaxWidth: 14,
           data: topKeys.map((item) => pickUsageMetricValue(item, usageMetric)),
           itemStyle: {
-            borderRadius: [0, 6, 6, 0]
+            borderRadius: [0, 6, 6, 0],
+            shadowColor: "rgba(59, 130, 246, 0.15)",
+            shadowBlur: 6,
+            shadowOffsetY: 2
           }
         }
       ]
@@ -1675,12 +1724,17 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       .reverse();
 
     return {
-      color: [usagePrimaryMetricMeta.color],
+      color: PIE_COLORS,
       tooltip: {
         trigger: "axis",
         axisPointer: {
           type: "shadow"
         },
+        backgroundColor: "rgba(15, 23, 42, 0.92)",
+        borderColor: "rgba(255, 255, 255, 0.08)",
+        borderWidth: 0,
+        textStyle: { color: "#f8fafc", fontSize: 12 },
+        extraCssText: "border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);",
         valueFormatter: (value) =>
           typeof value === "number" ? formatCompactNumber(value) : String(value ?? "")
       },
@@ -1698,7 +1752,8 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
         },
         splitLine: {
           lineStyle: {
-            color: "#e2e8f0"
+            color: "#e2e8f0",
+            type: "dashed"
           }
         }
       },
@@ -1710,6 +1765,8 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
         },
         data: topModels.map((item) => `${item.model} · ${item.keyName}`)
       },
+      animationDuration: 600,
+      animationEasing: "cubicOut",
       series: [
         {
           name: usagePrimaryMetricMeta.label,
@@ -1717,7 +1774,10 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
           barMaxWidth: 14,
           data: topModels.map((item) => pickUsageMetricValue(item, usageMetric)),
           itemStyle: {
-            borderRadius: [0, 6, 6, 0]
+            borderRadius: [0, 6, 6, 0],
+            shadowColor: "rgba(59, 130, 246, 0.15)",
+            shadowBlur: 6,
+            shadowOffsetY: 2
           },
           label: {
             show: true,
@@ -1939,8 +1999,8 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     usageMinutes,
     usageTimelineLimit,
     usageKeyFilter,
-    usageDateRange[0],
-    usageDateRange[1]
+    usageDateFrom,
+    usageDateTo
   ]);
 
   function notifySuccess(content: string) {
@@ -4768,6 +4828,18 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                     </label>
                   </div>
 
+                  <div className="tc-model-list-toolbar">
+                    <div className="tc-model-list-toolbar-left">
+                      <div className="tc-model-list-title">{t("模型池", "Model Pool")}</div>
+                      <Tag variant="light-outline">
+                        {t("当前", "Current")} {channelForm.upstreamModels.length} {t("个", "items")}
+                      </Tag>
+                    </div>
+                    <Button theme="primary" variant="outline" onClick={addUpstreamModel}>
+                      {t("继续添加模型", "Add Another Model")}
+                    </Button>
+                  </div>
+
                   <div className="tc-model-list">
                     {channelForm.upstreamModels.map((item, index) => (
                       <div className="tc-model-item" key={item.id}>
@@ -5817,56 +5889,65 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                     </div>
                   </div>
 
-                  {!usageReport || usageReport.summary.requestCount === 0 ? (
-                    <p className="tc-upstream-advice">暂无 token 用量数据。先发起一次模型请求后再查看。</p>
+                 {!usageReport || usageReport.summary.requestCount === 0 ? (
+                    loadingUsage ? (
+                      <UsageLoadingSkeleton />
+                    ) : (
+                      <div className="tc-usage-empty-state">
+                        <div className="tc-usage-empty-icon">
+                          <svg width="64" height="64" viewBox="0 0 64 64" fill="none">
+                            <rect x="8" y="24" width="12" height="28" rx="3" fill="#e2e8f0" />
+                            <rect x="26" y="16" width="12" height="36" rx="3" fill="#cbd5e1" />
+                            <rect x="44" y="8" width="12" height="44" rx="3" fill="#94a3b8" />
+                          </svg>
+                        </div>
+                        <p className="tc-usage-empty-title">暂无 Token 用量数据</p>
+                        <p className="tc-usage-empty-desc">先发起一次模型请求后再查看。数据将按分钟自动聚合。</p>
+                      </div>
+                    )
                   ) : (
                     <>
-                      <div className="tc-usage-cards">
-                        <article className="tc-usage-card">
-                          <span>请求总数</span>
-                          <strong>{formatNumber(usageReport.summary.requestCount)}</strong>
-                        </article>
-                        <article className="tc-usage-card">
-                          <span>输入 Token</span>
-                          <strong>{formatNumber(usageReport.summary.promptTokens)}</strong>
-                        </article>
-                        <article className="tc-usage-card">
-                          <span>输出 Token</span>
-                          <strong>{formatNumber(usageReport.summary.completionTokens)}</strong>
-                        </article>
-                        <article className="tc-usage-card">
-                          <span>Total Token</span>
-                          <strong>{formatNumber(usageReport.summary.totalTokens)}</strong>
-                        </article>
+                      <div className="tc-stat-cards-grid">
+                        <UsageStatCard variant="requests" value={usageReport.summary.requestCount} delay={0} locale={locale} />
+                        <UsageStatCard variant="prompt" value={usageReport.summary.promptTokens} delay={0.08} locale={locale} />
+                        <UsageStatCard variant="completion" value={usageReport.summary.completionTokens} delay={0.16} locale={locale} />
+                        <UsageStatCard variant="total" value={usageReport.summary.totalTokens} delay={0.24} locale={locale} />
                       </div>
+
+                      {/* 数据刷新时的顶部 loading 条 */}
+                      {loadingUsage ? (
+                        <div className="tc-usage-refresh-bar">
+                          <div className="tc-usage-refresh-bar-inner" />
+                        </div>
+                      ) : null}
 
                       <div className="tc-usage-charts">
                         <div className="tc-usage-chart-card tc-usage-chart-wide">
-                          <h4>趋势图（{usagePrimaryMetricMeta.label}）</h4>
+                          <h4>{t("趋势图", "Trend")}（{usagePrimaryMetricMeta.label}）</h4>
                           <p className="tc-usage-chart-note">
-                            OpenAI 风格主图：当前时间桶 {resolvedUsageBucketMinutes} 分钟，统计
+                            {t("时间桶", "Time bucket")} {resolvedUsageBucketMinutes} {t("分钟", "min")}，{t("统计", "covering")}
                             {hasCustomUsageDateRange
-                              ? ` ${usageDateRange[0]} 至 ${usageDateRange[1]}`
+                              ? ` ${usageDateRange[0]} ${t("至", "to")} ${usageDateRange[1]}`
                               : usageMinutes >= 1440
-                                ? ` 最近 ${(usageMinutes / 1440).toFixed(usageMinutes % 1440 === 0 ? 0 : 1)} 天`
-                                : ` 最近 ${usageMinutes} 分钟`}
-                            的用量趋势。
+                                ? ` ${t("最近", "last")} ${(usageMinutes / 1440).toFixed(usageMinutes % 1440 === 0 ? 0 : 1)} ${t("天", "days")}`
+                                : ` ${t("最近", "last")} ${usageMinutes} ${t("分钟", "min")}`}
+                            {t("的用量趋势", " usage trend.")}
                           </p>
                           {usageTimelineChartOption ? (
                             <ReactECharts
                               notMerge
                               lazyUpdate
                               option={usageTimelineChartOption}
-                              style={{ width: "100%", height: 320 }}
+                              style={{ width: "100%", height: usageTimelineChartHeight }}
                             />
                           ) : (
-                            <p className="tc-upstream-advice">暂无分钟趋势数据。</p>
+                            <p className="tc-upstream-advice">{t("暂无分钟趋势数据。", "No timeline data available.")}</p>
                           )}
                         </div>
 
                         <div className="tc-usage-chart-card">
                           <h4>Key Top12（{usagePrimaryMetricMeta.shortLabel}）</h4>
-                          <p className="tc-usage-chart-note">对比不同本地 Key 的核心指标分布。</p>
+                          <p className="tc-usage-chart-note">{t("对比不同本地 Key 的核心指标分布。", "Compare key-level metric distribution.")}</p>
                           {usagePerKeyChartOption ? (
                             <ReactECharts
                               notMerge
@@ -5875,13 +5956,13 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                               style={{ width: "100%", height: 320 }}
                             />
                           ) : (
-                            <p className="tc-upstream-advice">暂无 Key 维度数据。</p>
+                            <p className="tc-upstream-advice">{t("暂无 Key 维度数据。", "No key-level data.")}</p>
                           )}
                         </div>
 
                         <div className="tc-usage-chart-card">
-                          <h4>真实模型 Top10（{usagePrimaryMetricMeta.shortLabel}）</h4>
-                          <p className="tc-usage-chart-note">识别高消耗模型，辅助做策略切换与限流。</p>
+                          <h4>{t("真实模型 Top10", "Upstream Model Top10")}（{usagePrimaryMetricMeta.shortLabel}）</h4>
+                          <p className="tc-usage-chart-note">{t("识别高消耗模型，辅助做策略切换与限流。", "Identify high-consumption models for policy tuning.")}</p>
                           {usagePerModelChartOption ? (
                             <ReactECharts
                               notMerge
@@ -5890,9 +5971,37 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                               style={{ width: "100%", height: 320 }}
                             />
                           ) : (
-                            <p className="tc-upstream-advice">暂无模型维度数据。</p>
+                            <p className="tc-upstream-advice">{t("暂无模型维度数据。", "No model-level data.")}</p>
                           )}
                         </div>
+                      </div>
+
+                      {/* 饼图分布 */}
+                      <div className="tc-usage-charts">
+                        {usageReport.perKey.length > 0 ? (
+                          <UsagePieChart
+                            title={`Key 分布（${usagePrimaryMetricMeta.shortLabel}）`}
+                            slices={usageReport.perKey.slice(0, 8).map((item) => ({
+                              name: item.keyName,
+                              value: pickUsageMetricValue(item, usageMetric)
+                            }))}
+                            height={260}
+                            delay={0.4}
+                            EChartsComponent={ReactECharts}
+                          />
+                        ) : null}
+                        {usageReport.perModel.length > 0 ? (
+                          <UsagePieChart
+                            title={`模型分布（${usagePrimaryMetricMeta.shortLabel}）`}
+                            slices={usageReport.perModel.slice(0, 8).map((item) => ({
+                              name: item.model,
+                              value: pickUsageMetricValue(item, usageMetric)
+                            }))}
+                            height={260}
+                            delay={0.5}
+                            EChartsComponent={ReactECharts}
+                          />
+                        ) : null}
                       </div>
 
                       <div className="tc-usage-grid">
