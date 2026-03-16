@@ -99,7 +99,7 @@ const keyModelMappingSchema = z.object({
   enabled: z.boolean().default(true),
   dynamicModelSwitch: z.boolean().default(false).optional(),
   contextSwitchThreshold: z.number().int().min(256).max(2_000_000).default(128000).optional(),
-  contextOverflowModel: z.string().min(1).max(512).optional()
+  contextOverflowModel: z.string().min(1).max(512).nullable().optional()
 }).superRefine((value, ctx) => {
   if (value.dynamicModelSwitch && !(value.contextOverflowModel && value.contextOverflowModel.trim())) {
     ctx.addIssue({

@@ -16,7 +16,9 @@ import {
   serializeOverflowModelSelection
 } from "@/lib/overflow-model";
 import {
+  quickExportKeyMappings,
   quickExportModels,
+  quickImportKeyMappings,
   quickImportModels
 } from "@/lib/quick-import-export";
 import { JsonViewer } from "@/components/json-viewer";
@@ -1048,6 +1050,12 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   const [quickImportDialogVisible, setQuickImportDialogVisible] = useState(false);
   const [quickExportDialogVisible, setQuickExportDialogVisible] = useState(false);
   const [quickExportJson, setQuickExportJson] = useState("");
+  const [quickImportKeyMappingJson, setQuickImportKeyMappingJson] = useState("");
+  const [quickImportKeyMappingDialogVisible, setQuickImportKeyMappingDialogVisible] =
+    useState(false);
+  const [quickExportKeyMappingDialogVisible, setQuickExportKeyMappingDialogVisible] =
+    useState(false);
+  const [quickExportKeyMappingJson, setQuickExportKeyMappingJson] = useState("");
 
   const [runtimeModel, setRuntimeModel] = useState("");
   const [syncDefaultModel, setSyncDefaultModel] = useState(false);
@@ -1122,6 +1130,38 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       return channels.find((item) => item.id === mapping.upstreamChannelId) ?? null;
     }
     return selectedChannelForKey;
+  };
+  const resolveImportedChannelBinding = (channelName: string | null, channelId: number | null) => {
+    const normalizedName = channelName?.trim().toLowerCase() ?? "";
+    if (normalizedName) {
+      const matchedByName = channels.filter(
+        (item) => item.name.trim().toLowerCase() === normalizedName
+      );
+      if (matchedByName.length === 1) {
+        return {
+          id: matchedByName[0].id,
+          requested: true,
+          resolved: true
+        };
+      }
+    }
+
+    if (typeof channelId === "number") {
+      const matchedById = channels.find((item) => item.id === channelId) ?? null;
+      if (matchedById) {
+        return {
+          id: matchedById.id,
+          requested: true,
+          resolved: true
+        };
+      }
+    }
+
+    return {
+      id: null,
+      requested: Boolean(normalizedName) || typeof channelId === "number",
+      resolved: false
+    };
   };
   const findChannelModelProfile = (channel: UpstreamChannel | null, targetModel: string) => {
     const normalizedTargetModel = targetModel.trim().toLowerCase();
@@ -2939,9 +2979,33 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     );
   }
 
+  function handleQuickExportKeyMappings() {
+    const exported = quickExportKeyMappings(
+      keyForm.modelMappings,
+      (channelId) => channels.find((item) => item.id === channelId)?.name ?? null
+    );
+    setQuickExportKeyMappingJson(exported);
+    setQuickExportKeyMappingDialogVisible(true);
+  }
+
+  async function handleQuickCopyKeyMappings() {
+    await copyTextToClipboard(
+      quickExportKeyMappings(
+        keyForm.modelMappings,
+        (channelId) => channels.find((item) => item.id === channelId)?.name ?? null
+      ),
+      t("模型映射已复制到剪贴板。", "Model mappings copied to clipboard.")
+    );
+  }
+
   function handleOpenQuickImportDialog() {
     setQuickImportJson("");
     setQuickImportDialogVisible(true);
+  }
+
+  function handleOpenQuickImportKeyMappingDialog() {
+    setQuickImportKeyMappingJson("");
+    setQuickImportKeyMappingDialogVisible(true);
   }
 
   function handleQuickImportConfirm() {
@@ -3003,6 +3067,65 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     });
     setQuickImportDialogVisible(false);
     notifySuccess(result.note);
+  }
+
+  function handleQuickImportKeyMappings(replaceAll: boolean) {
+    const result = quickImportKeyMappings(quickImportKeyMappingJson);
+    if (!result.ok) {
+      notifyError(result.error);
+      return;
+    }
+
+    let unresolvedMappingChannelCount = 0;
+    let unresolvedOverflowChannelCount = 0;
+    const incoming = result.mappings.map((item) => {
+      const mappingBinding = resolveImportedChannelBinding(
+        item.upstreamChannelName,
+        item.upstreamChannelId
+      );
+      const overflowBinding = resolveImportedChannelBinding(
+        item.contextOverflowChannelName,
+        item.contextOverflowChannelId
+      );
+      if (mappingBinding.requested && !mappingBinding.resolved) {
+        unresolvedMappingChannelCount += 1;
+      }
+      if (
+        item.contextOverflowModel &&
+        overflowBinding.requested &&
+        !overflowBinding.resolved
+      ) {
+        unresolvedOverflowChannelCount += 1;
+      }
+      return {
+        id: generateMappingId(),
+        clientModel: item.clientModel,
+        targetModel: item.targetModel,
+        upstreamChannelId: mappingBinding.id,
+        thinkingType: item.thinkingType,
+        enabled: item.enabled,
+        dynamicModelSwitch: item.dynamicModelSwitch,
+        contextSwitchThreshold: item.contextSwitchThreshold,
+        contextOverflowModel: item.contextOverflowModel
+          ? serializeOverflowModelSelection(item.contextOverflowModel, overflowBinding.id)
+          : null
+      };
+    });
+
+    setKeyForm((prev) => ({
+      ...prev,
+      modelMappings: replaceAll ? incoming : [...prev.modelMappings, ...incoming]
+    }));
+    setQuickImportKeyMappingDialogVisible(false);
+    notifySuccess(result.note);
+    if (unresolvedMappingChannelCount || unresolvedOverflowChannelCount) {
+      notifyInfo(
+        t(
+          `已导入，但有 ${unresolvedMappingChannelCount} 条映射渠道绑定、${unresolvedOverflowChannelCount} 条溢出模型渠道绑定未命中当前工作区，已自动回退为继承当前 Key 或仅保留模型名。`,
+          `Imported with fallback: ${unresolvedMappingChannelCount} mapping channel bindings and ${unresolvedOverflowChannelCount} overflow channel bindings were not found in this workspace, so they now inherit the key or keep only the model name.`
+        )
+      );
+    }
   }
 
   function handleMenuRoute(next: string) {
@@ -3955,6 +4078,29 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                       disabled={!keyForm.upstreamChannelId}
                     >
                       {t("新增映射", "Add Mapping")}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      theme="default"
+                      onClick={handleQuickExportKeyMappings}
+                      disabled={!keyForm.modelMappings.length}
+                    >
+                      {t("导出映射", "Export Mappings")}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      theme="default"
+                      onClick={() => void handleQuickCopyKeyMappings()}
+                      disabled={!keyForm.modelMappings.length}
+                    >
+                      {t("复制映射", "Copy Mappings")}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      theme="default"
+                      onClick={handleOpenQuickImportKeyMappingDialog}
+                    >
+                      {t("导入映射", "Import Mappings")}
                     </Button>
                   </div>
 
@@ -6542,6 +6688,61 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                     disabled={!quickImportJson.trim()}
                   >
                     {t("替换全部模型", "Replace All Models")}
+                  </Button>
+                </div>
+              </div>
+            </Dialog>
+
+            <Dialog
+              visible={quickExportKeyMappingDialogVisible}
+              width="min(92vw, 800px)"
+              header={t("导出模型映射", "Export Model Mappings")}
+              cancelBtn={t("关闭", "Close")}
+              confirmBtn={t("复制到剪贴板", "Copy to Clipboard")}
+              onConfirm={() => void handleQuickCopyKeyMappings()}
+              onClose={() => setQuickExportKeyMappingDialogVisible(false)}
+            >
+              <div className="tc-quick-io-content">
+                <p className="tc-upstream-advice">
+                  {t(
+                    "以下 JSON 可粘贴到其他本地 Key 的「导入映射」中。内部映射 ID 已移除；映射级渠道绑定会附带渠道名，导入时优先按渠道名恢复。",
+                    "Paste this JSON into another local key's Import Mappings dialog. Internal mapping IDs are removed, and mapping-level upstream bindings include channel names so import can restore them by name first."
+                  )}
+                </p>
+                <CodeBlock value={quickExportKeyMappingJson} language="json" />
+              </div>
+            </Dialog>
+
+            <Dialog
+              visible={quickImportKeyMappingDialogVisible}
+              width="min(92vw, 800px)"
+              header={t("导入模型映射", "Import Model Mappings")}
+              cancelBtn={t("取消", "Cancel")}
+              confirmBtn={t("追加到现有映射", "Append to Existing")}
+              onConfirm={() => handleQuickImportKeyMappings(false)}
+              onClose={() => setQuickImportKeyMappingDialogVisible(false)}
+            >
+              <div className="tc-quick-io-content">
+                <p className="tc-upstream-advice">
+                  {t(
+                    "粘贴导出的 JSON，将映射追加到当前 Key。也可直接粘贴映射数组 [{ ... }]。导入只更新表单，仍需点击页面底部「保存 Key」。",
+                    "Paste exported JSON to append mappings to the current key. You can also paste a bare mapping array [{ ... }]. Import updates only the form, so you still need to click Save Key at the bottom."
+                  )}
+                </p>
+                <Textarea
+                  placeholder='{"version":1,"mappings":[...]}\n\nor\n[{"clientModel":"gpt-5.4","targetModel":"glm-5",...}]'
+                  value={quickImportKeyMappingJson}
+                  onChange={(value) => setQuickImportKeyMappingJson(value)}
+                  autosize
+                />
+                <div className="tc-quick-io-actions">
+                  <Button
+                    theme="danger"
+                    variant="outline"
+                    onClick={() => handleQuickImportKeyMappings(true)}
+                    disabled={!quickImportKeyMappingJson.trim()}
+                  >
+                    {t("替换全部映射", "Replace All Mappings")}
                   </Button>
                 </div>
               </div>
