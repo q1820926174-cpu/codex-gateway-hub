@@ -101,3 +101,21 @@ export const configApi = {
   // 获取网关配置
   getConfig: () => fetchJson("/api/config")
 };
+
+// API endpoints for prompt lab
+// Prompt Lab 相关 API 端点
+export const promptLabApi = {
+  // Create a prompt lab run
+  // 创建 Prompt Lab 运行任务
+  createRun: (data: unknown) => fetchJson("/api/prompt-lab/runs", { method: "POST", body: JSON.stringify(data) }),
+  // Query run progress
+  // 查询运行进度
+  getRun: (id: string) => fetchJson(`/api/prompt-lab/runs/${encodeURIComponent(id)}`),
+  // Fetch normalized report
+  // 获取标准化报告
+  getReport: (id: string) => fetchJson(`/api/prompt-lab/runs/${encodeURIComponent(id)}/report`),
+  // Preview rule matching result
+  // 预览规则命中结果
+  previewRule: (data: unknown) =>
+    fetchJson("/api/prompt-lab/rule-preview", { method: "POST", body: JSON.stringify(data) })
+};

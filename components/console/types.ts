@@ -1,4 +1,11 @@
 import type { LocaleCode } from "@/components/locale-provider";
+export type {
+  PromptLabFailureCase,
+  PromptLabMetricSummary as PromptLabMetrics,
+  PromptLabRun,
+  PromptLabRunWithReport,
+  RulePreviewResult
+} from "@/lib/prompt-lab-types";
 
 // --- Provider / Wire API constants ---
 export const PROVIDERS = ["openai", "anthropic", "openrouter", "xai", "deepseek", "glm", "doubao", "custom"] as const;
@@ -54,7 +61,7 @@ export const MODULE_LABEL: Record<EditorModule, { zh: string; en: string }> = {
 
 export const MODULE_SUMMARY: Record<EditorModule, { zh: string; en: string }> = {
   access: { zh: "管理本地 Key 鉴权、映射策略和调用方入口。", en: "Manage local key auth, mappings, and client-facing entry points." },
-  prompt: { zh: "维护网关默认注入提示词与 AGENTS 关键词匹配规则。", en: "Manage gateway-injected default prompts and AGENTS keyword matching rules." },
+  prompt: { zh: "维护网关注入提示词：全局默认 + 按上游真实模型定制规则。", en: "Manage gateway-injected prompts: global default plus upstream-model specific rules." },
   export: { zh: "集中查看 Codex / Claude 导入配置与原生导出片段。", en: "Review Codex / Claude import configs and native export snippets in one place." },
   upstream: { zh: "维护上游供应商、模型池和视觉兜底通道。", en: "Maintain upstream providers, model pools, and fallback vision routing." },
   runtime: { zh: "在线切换模型、覆盖默认值并实时启停 Key。", en: "Switch models online, override defaults, and toggle keys in runtime." },
@@ -328,8 +335,8 @@ export const API_DOC_GATEWAY_ENDPOINTS: ApiDocEndpoint[] = [
 
 export const API_DOC_MANAGEMENT_ENDPOINTS: ApiDocEndpoint[] = [
   { method: "GET", path: "/api/health", zh: "健康检查", en: "Health check" },
-  { method: "GET", path: "/api/config", zh: "配置摘要与全局提示词配置", en: "Config summary and global prompt config" },
-  { method: "PUT", path: "/api/config", zh: "更新全局提示词配置", en: "Update global prompt config" },
+  { method: "GET", path: "/api/config", zh: "配置摘要与提示词配置（含模型规则）", en: "Config summary and prompt config (with model rules)" },
+  { method: "PUT", path: "/api/config", zh: "更新提示词配置（含模型规则）", en: "Update prompt config (with model rules)" },
   { method: "GET", path: "/api/keys", zh: "Key 列表", en: "List keys" },
   { method: "POST", path: "/api/keys", zh: "创建 Key", en: "Create key" },
   { method: "GET", path: "/api/keys/:id", zh: "查询 Key", en: "Get key" },

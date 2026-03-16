@@ -1,6 +1,6 @@
 "use client";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { keysApi, upstreamsApi, logsApi, usageApi, configApi } from "@/lib/api";
+import { keysApi, upstreamsApi, logsApi, usageApi, configApi, promptLabApi } from "@/lib/api";
 
 // Query keys for React Query cache management
 // React Query 缓存管理的查询键
@@ -28,7 +28,13 @@ export const queryKeys = {
   usage: ["usage"] as const,
   // Query key for config
   // 配置的查询键
-  config: ["config"] as const
+  config: ["config"] as const,
+  // Query key for prompt lab run
+  // Prompt Lab 运行任务查询键
+  promptLabRun: (id: string) => ["prompt-lab", "run", id] as const,
+  // Query key for prompt lab report
+  // Prompt Lab 报告查询键
+  promptLabReport: (id: string) => ["prompt-lab", "report", id] as const
 };
 
 // Hook to fetch all gateway keys
@@ -106,4 +112,36 @@ export function useUsage(params?: Record<string, string>) {
 // 获取网关配置的 hook
 export function useConfig() {
   return useQuery({ queryKey: queryKeys.config, queryFn: configApi.getConfig });
+}
+
+// Hook to create a prompt lab run
+// 创建 Prompt Lab 运行任务的 hook
+export function useCreatePromptLabRun() {
+  return useMutation({ mutationFn: promptLabApi.createRun });
+}
+
+// Hook to fetch prompt lab run progress
+// 获取 Prompt Lab 任务进度的 hook
+export function usePromptLabRun(id: string | null) {
+  return useQuery({
+    queryKey: queryKeys.promptLabRun(id ?? ""),
+    queryFn: () => promptLabApi.getRun(id!),
+    enabled: !!id
+  });
+}
+
+// Hook to fetch prompt lab report
+// 获取 Prompt Lab 标准化报告的 hook
+export function usePromptLabReport(id: string | null) {
+  return useQuery({
+    queryKey: queryKeys.promptLabReport(id ?? ""),
+    queryFn: () => promptLabApi.getReport(id!),
+    enabled: !!id
+  });
+}
+
+// Hook to preview prompt rule matching
+// 预览提示词规则命中的 hook
+export function usePromptLabRulePreview() {
+  return useMutation({ mutationFn: promptLabApi.previewRule });
 }

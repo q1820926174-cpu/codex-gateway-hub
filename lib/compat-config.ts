@@ -279,20 +279,63 @@ type CompatPromptHintMatchInput = {
   clientModel: string | null | undefined;
 };
 
-function resolveCompatPromptHintFromRules(
+type CompatPromptRuleScoreDetail = {
+  providerRank: PatternMatchRank;
+  upstreamRank: PatternMatchRank;
+  hasProvider: boolean;
+  hasUpstream: boolean;
+  score: number;
+};
+
+export type CompatPromptHintResolutionDebug = {
+  hint: string;
+  hintSource: "default" | "rule";
+  matchedRuleId: string | null;
+  matchedRuleIndex: number | null;
+  scoreBreakdown: CompatPromptRuleScoreDetail | null;
+};
+
+function buildRuleScoreDetail(rule: CompatPromptRule, provider: string, upstreamModel: string) {
+  const providerRank = rankPatternMatch(rule.provider, provider);
+  if (providerRank < 0) {
+    return null;
+  }
+
+  const upstreamRank = rankPatternMatch(rule.upstreamModelPattern, upstreamModel);
+  if (upstreamRank < 0) {
+    return null;
+  }
+
+  const hasProvider = !!rule.provider.trim();
+  const hasUpstream = !!rule.upstreamModelPattern.trim();
+  const score =
+    upstreamRank * 100 +
+    providerRank * 25 +
+    (hasUpstream ? 8 : 0) +
+    (hasProvider ? 4 : 0);
+
+  return {
+    providerRank,
+    upstreamRank,
+    hasProvider,
+    hasUpstream,
+    score
+  } satisfies CompatPromptRuleScoreDetail;
+}
+
+function findBestCompatPromptRuleMatch(
   rules: CompatPromptRule[],
   input: CompatPromptHintMatchInput
 ) {
-  if (!rules.length) {
-    return "";
-  }
-
   const provider = normalizeModelMatchValue(input.provider);
   const upstreamModel = normalizeModelMatchValue(input.upstreamModel);
 
-  let bestHint = "";
-  let bestScore = -1;
-  let bestIndex = Number.POSITIVE_INFINITY;
+  let best: {
+    hint: string;
+    ruleId: string;
+    ruleIndex: number;
+    score: CompatPromptRuleScoreDetail;
+  } | null = null;
 
   for (let index = 0; index < rules.length; index += 1) {
     const rule = rules[index];
@@ -300,33 +343,29 @@ function resolveCompatPromptHintFromRules(
       continue;
     }
 
-    const providerRank = rankPatternMatch(rule.provider, provider);
-    if (providerRank < 0) {
+    const score = buildRuleScoreDetail(rule, provider, upstreamModel);
+    if (!score) {
       continue;
     }
 
-    const upstreamRank = rankPatternMatch(rule.upstreamModelPattern, upstreamModel);
-    if (upstreamRank < 0) {
-      continue;
-    }
-
-    const hasProvider = !!rule.provider.trim();
-    const hasUpstream = !!rule.upstreamModelPattern.trim();
-
-    const score =
-      upstreamRank * 100 +
-      providerRank * 25 +
-      (hasUpstream ? 8 : 0) +
-      (hasProvider ? 4 : 0);
-
-    if (score > bestScore || (score === bestScore && index < bestIndex)) {
-      bestHint = rule.hint;
-      bestScore = score;
-      bestIndex = index;
+    if (!best || score.score > best.score.score || (score.score === best.score.score && index < best.ruleIndex)) {
+      best = {
+        hint: rule.hint,
+        ruleId: rule.id,
+        ruleIndex: index,
+        score
+      };
     }
   }
 
-  return bestHint;
+  return best;
+}
+
+function resolveCompatPromptHintFromRules(
+  rules: CompatPromptRule[],
+  input: CompatPromptHintMatchInput
+) {
+  return findBestCompatPromptRuleMatch(rules, input)?.hint ?? "";
 }
 
 function readCompatPromptConfigFromDisk(): CompatPromptConfig {
@@ -397,4 +436,28 @@ export async function saveCompatPromptConfig(input: CompatPromptConfigInput) {
 export function resolveCompatPromptHintForModel(input: CompatPromptHintMatchInput) {
   const config = getCompatPromptConfig();
   return resolveCompatPromptHintFromRules(config.modelPromptRules, input);
+}
+
+export function resolveCompatPromptHintDebugForModel(
+  input: CompatPromptHintMatchInput
+): CompatPromptHintResolutionDebug {
+  const config = getCompatPromptConfig();
+  const match = findBestCompatPromptRuleMatch(config.modelPromptRules, input);
+  if (!match) {
+    return {
+      hint: config.chineseReplyHint,
+      hintSource: "default",
+      matchedRuleId: null,
+      matchedRuleIndex: null,
+      scoreBreakdown: null
+    };
+  }
+
+  return {
+    hint: match.hint,
+    hintSource: "rule",
+    matchedRuleId: match.ruleId,
+    matchedRuleIndex: match.ruleIndex,
+    scoreBreakdown: match.score
+  };
 }

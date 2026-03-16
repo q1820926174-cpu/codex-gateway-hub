@@ -2,6 +2,7 @@
 
 import { SettingsConsole } from "@/components/settings-console";
 import type { EditorModule } from "@/components/console/types";
+import { PromptModule } from "@/components/console/modules/PromptModule";
 
 type ModuleRouterProps = {
   module?: EditorModule;
@@ -13,5 +14,8 @@ type ModuleRouterProps = {
  * 新组件体系（ConsoleLayout, TanStack Query 等）将在后续逐步替换各模块内部实现
  */
 export function ModuleRouter({ module }: ModuleRouterProps) {
+  if (module === "prompt") {
+    return <PromptModule />;
+  }
   return <SettingsConsole module={module} />;
 }
