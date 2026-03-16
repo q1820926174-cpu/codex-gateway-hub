@@ -1,7 +1,6 @@
 "use client";
 
 import {
-  memo,
   startTransition,
   useDeferredValue,
   useEffect,
@@ -12,8 +11,6 @@ import {
 } from "react";
 import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import {
   createCodexExportBundle,
   type CodexApplyPatchToolType,
@@ -24,7 +21,6 @@ import {
   parseOverflowModelSelection,
   serializeOverflowModelSelection
 } from "@/lib/overflow-model";
-import { supportsGlmThinkingType } from "@/lib/key-config";
 import {
   quickExportKeyMappings,
   quickExportModels,
@@ -32,7 +28,12 @@ import {
   quickImportModels
 } from "@/lib/quick-import-export";
 import { JsonViewer } from "@/components/json-viewer";
-import { useLocale, type LocaleCode } from "@/components/locale-provider";
+import { useLocale } from "@/components/locale-provider";
+import type {
+  PromptLabFailureCase,
+  PromptLabRun,
+  RulePreviewResult
+} from "@/lib/prompt-lab-types";
 import {
   Button,
   Card,
@@ -76,1087 +77,124 @@ import { WorkspaceDashboard } from "@/components/console/workspace-dashboard";
 import { UsageStatCard } from "@/components/ui/UsageStatCard";
 import { UsagePieChart, PIE_COLORS } from "@/components/ui/UsagePieChart";
 import type { PieSlice } from "@/components/ui/UsagePieChart";
-const PROVIDERS = ["openai", "anthropic", "openrouter", "xai", "deepseek", "glm", "doubao", "custom"] as const;
-type ProviderName = (typeof PROVIDERS)[number];
-
-const UPSTREAM_WIRE_APIS = ["responses", "chat_completions", "anthropic_messages"] as const;
-type UpstreamWireApi = (typeof UPSTREAM_WIRE_APIS)[number];
-const GLM_CODEX_THINKING_THRESHOLDS = ["off", "low", "medium", "high"] as const;
-type GlmCodexThinkingThreshold = (typeof GLM_CODEX_THINKING_THRESHOLDS)[number];
-const DOUBAO_THINKING_TYPES = ["enabled", "disabled", "auto"] as const;
-type DoubaoThinkingType = (typeof DOUBAO_THINKING_TYPES)[number];
-
-const PROVIDER_DEFAULT_BASE_URL: Record<Exclude<ProviderName, "custom">, string> = {
-  openai: "https://api.openai.com",
-  anthropic: "https://api.anthropic.com",
-  openrouter: "https://openrouter.ai/api",
-  xai: "https://api.x.ai",
-  deepseek: "https://api.deepseek.com",
-  glm: "https://open.bigmodel.cn/api/coding/paas/v4",
-  doubao: "https://ark.cn-beijing.volces.com/api/coding/v3"
-};
-
-const PROVIDER_META: Record<ProviderName, { label: string; tip: string }> = {
-  openai: { label: "OpenAI", tip: "国际通用生态" },
-  anthropic: { label: "Anthropic", tip: "Claude 官方协议" },
-  openrouter: { label: "OpenRouter", tip: "聚合多家模型" },
-  xai: { label: "xAI", tip: "Grok 体系" },
-  deepseek: { label: "DeepSeek", tip: "高性价比" },
-  glm: { label: "GLM", tip: "智谱开放平台" },
-  doubao: { label: "豆包", tip: "火山方舟" },
-  custom: { label: "自定义", tip: "兼容 OpenAI 或 Anthropic 格式" }
-};
-
-const DEFAULT_GATEWAY_ORIGIN = "http://127.0.0.1:3000";
-
-const CN_DATE_FORMATTER = new Intl.DateTimeFormat("zh-CN", {
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-  hour: "2-digit",
-  minute: "2-digit",
-  hour12: false,
-  timeZone: "Asia/Shanghai"
-});
-
-const NUMBER_FORMATTER = new Intl.NumberFormat("zh-CN");
-const OPENAI_GREEN = "#10a37f";
-const OPENAI_SLATE = "#334155";
-const OPENAI_SOFT = "#94a3b8";
-const AI_CALL_RANGE_OPTIONS = [
-  { label: "15m", minutes: 15 },
-  { label: "1h", minutes: 60 },
-  { label: "24h", minutes: 1440 }
-] as const;
-const USAGE_RANGE_OPTIONS = [
-  { label: "1h", minutes: 60 },
-  { label: "24h", minutes: 1440 },
-  { label: "7d", minutes: 10080 }
-] as const;
-const USAGE_METRIC_META: Record<
+import {
+  AI_CALL_RANGE_OPTIONS,
+  API_DOC_GATEWAY_ENDPOINTS,
+  API_DOC_MANAGEMENT_ENDPOINTS,
+  CODING_PRESETS,
+  DEFAULT_GATEWAY_ORIGIN,
+  DOUBAO_THINKING_TYPES,
+  EMPTY_AI_CALL_FILTER_OPTIONS,
+  EMPTY_AI_CALL_STATS,
+  GLM_CODEX_THINKING_THRESHOLDS,
+  LOCALE_OPTIONS,
+  MODULE_LABEL,
+  MODULE_SUMMARY,
+  PROVIDERS,
+  PROVIDER_DEFAULT_BASE_URL,
+  PROVIDER_META,
+  UPSTREAM_WIRE_APIS,
+  USAGE_METRIC_META,
+  USAGE_RANGE_OPTIONS
+} from "@/components/console/types";
+import type {
+  AiCallLogEntry,
+  AiCallLogFilterOptions,
+  AiCallLogStats,
+  ApiLogEntry,
+  ChannelFormState,
+  ChannelsResponse,
+  CodingPreset,
+  DoubaoThinkingType,
+  EditorModule,
+  GatewayKey,
+  GlmCodexThinkingThreshold,
+  KeyFormState,
+  KeyModelMapping,
+  KeysResponse,
+  ProviderName,
+  UpstreamChannel,
+  UpstreamModelConfig,
+  UpstreamWireApi,
+  UsageBucketMode,
   UsageMetricKey,
-  { label: string; shortLabel: string; color: string; isToken: boolean }
-> = {
-  requestCount: { label: "请求数", shortLabel: "请求", color: OPENAI_SLATE, isToken: false },
-  promptTokens: { label: "输入 Token", shortLabel: "输入", color: OPENAI_GREEN, isToken: true },
-  completionTokens: { label: "输出 Token", shortLabel: "输出", color: OPENAI_SOFT, isToken: true },
-  totalTokens: { label: "Total Token", shortLabel: "总量", color: "#0f172a", isToken: true }
-};
-const CN_MINUTE_FORMATTER = new Intl.DateTimeFormat("zh-CN", {
-  month: "2-digit",
-  day: "2-digit",
-  hour: "2-digit",
-  minute: "2-digit",
-  hour12: false,
-  timeZone: "Asia/Shanghai"
-});
-const EMPTY_AI_CALL_STATS: AiCallLogStats = {
-  matched: 0,
-  main: 0,
-  visionFallback: 0,
-  visionByModel: [],
-  visionByKey: []
-};
-const EMPTY_AI_CALL_FILTER_OPTIONS: AiCallLogFilterOptions = {
-  upstreamModels: [],
-  requestedModels: [],
-  clientModels: [],
-  routes: [],
-  requestWireApis: [],
-  upstreamWireApis: []
-};
+  UsageReport,
+  UsageTimelineRow
+} from "@/components/console/types";
+import {
+  generateLocalKey,
+  generateMappingId
+} from "@/lib/console-utils";
+import {
+  MarkdownLogBlock,
+  buildPromptLabHintFromFailure,
+  buildRecentDateRange,
+  createCompatPromptRuleDraft,
+  createEmptyChannelFormState,
+  createEmptyKeyFormState,
+  createUpstreamModelDraft,
+  ensureCompatPromptRuleIdsUnique,
+  formatClaudeModelWithContext,
+  formatCnDate,
+  formatCompactNumber,
+  formatCompatPromptKeywordsInput,
+  formatCompatPromptRulesJson,
+  formatMinuteLabel,
+  formatNumber,
+  formatSignedNumber,
+  humanizeConsoleErrorMessage,
+  inferContextWindowFromModel,
+  inspectCompatPromptRules,
+  maskLocalKey,
+  normalizeAiCallFilterOptions,
+  normalizeCompatPromptRule,
+  normalizeCompatPromptRules,
+  normalizeGlmCodexThinkingThreshold,
+  normalizeModelCode,
+  normalizeSelectValue,
+  parseCompatPromptKeywordsInput,
+  parseCompatPromptRulesJson,
+  parsePromptLabModelListInput,
+  pickUsageMetricValue,
+  resolveClaudeMaxOutputTokens,
+  resolveCodexTokenBudgets,
+  resolveThinkingTokens,
+  resolveUsageBucketMinutes,
+  sanitizeTomlKey,
+  shouldShowDoubaoThinkingType,
+  shouldShowGlmThinkingThreshold,
+  stringifyCompatPromptRuleForSearch,
+  summarizeLogPreview,
+  syncChannelFormWithModelPool,
+  toBase64Utf8,
+  toChannelForm,
+  toKeyForm,
+  type CompatPromptConfig,
+  type CompatPromptRule,
+  type ConfigSummaryResponse,
+  type PromptLabReportResponse,
+  type PromptLabRunSummaryResponse
+} from "@/components/console/settings-console-helpers";
+import {
+  SettingsCallsPanel,
+  SettingsDocsPanel,
+  SettingsLogsPanel,
+  SettingsRuntimePanel,
+  SettingsUsagePanel
+} from "@/components/console/settings-console-panels";
+import {
+  SettingsAccessPanel,
+  SettingsExportPanel,
+  SettingsPromptPanel,
+  SettingsUpstreamPanel
+} from "@/components/console/settings-console-editor-panels";
 
-const LOCALE_OPTIONS: Array<{ label: string; value: LocaleCode }> = [
-  { label: "中文", value: "zh-CN" },
-  { label: "English", value: "en-US" }
-];
+export type { EditorModule } from "@/components/console/types";
+export { formatCompactNumber, formatNumber } from "@/components/console/settings-console-helpers";
 
-export type EditorModule = "access" | "prompt" | "export" | "upstream" | "runtime" | "logs" | "calls" | "usage" | "docs" | "dashboard";
 type SettingsConsoleProps = {
   module?: EditorModule;
 };
-
-const MODULE_LABEL: Record<EditorModule, { zh: string; en: string }> = {
-  access: { zh: "基础接入", en: "Access" },
-  prompt: { zh: "提示词配置", en: "Prompt Config" },
-  export: { zh: "配置导出", en: "Export" },
-  upstream: { zh: "上游渠道", en: "Upstreams" },
-  runtime: { zh: "运行时调度", en: "Runtime" },
-  logs: { zh: "请求日志", en: "Request Logs" },
-  calls: { zh: "AI 调用日志", en: "AI Call Logs" },
-  usage: { zh: "用量报表", en: "Usage Report" },
-  docs: { zh: "接口文档", en: "API Docs" }
-  ,
-  dashboard: { zh: "工作台", en: "Dashboard" }
-};
-
-const MODULE_SUMMARY: Record<EditorModule, { zh: string; en: string }> = {
-  access: {
-    zh: "管理本地 Key 鉴权、映射策略和调用方入口。",
-    en: "Manage local key auth, mappings, and client-facing entry points."
-  },
-  prompt: {
-    zh: "维护网关注入提示词：全局默认 + 按上游真实模型定制规则。",
-    en: "Manage gateway-injected prompts: global default plus upstream-model specific rules."
-  },
-  export: {
-    zh: "集中查看 Codex / Claude 导入配置与原生导出片段。",
-    en: "Review Codex / Claude import configs and native export snippets in one place."
-  },
-  upstream: {
-    zh: "维护上游供应商、模型池和视觉兜底通道。",
-    en: "Maintain upstream providers, model pools, and fallback vision routing."
-  },
-  runtime: {
-    zh: "在线切换模型、覆盖默认值并实时启停 Key。",
-    en: "Switch models online, override defaults, and toggle keys in runtime."
-  },
-  logs: {
-    zh: "排查网关请求链路，查看请求体、响应体和错误。",
-    en: "Inspect request chains with payloads, responses, and errors."
-  },
-  calls: {
-    zh: "追踪真实模型调用，核对系统提示词与结果。",
-    en: "Trace actual model invocations with prompts and outputs."
-  },
-  usage: {
-    zh: "按 Key / 模型 / 时间段观察 Token 消耗趋势。",
-    en: "Track token consumption by key, model, and time buckets."
-  },
-  docs: {
-    zh: "查看网关与管理接口文档，复制即用示例。",
-    en: "Browse gateway/ops API docs and copy ready-to-run examples."
-  }
-  ,
-  dashboard: {
-    zh: "系统运行概览与快速操作入口。",
-    en: "System overview and quick actions."
-  }
-};
-
-type ApiDocEndpoint = {
-  method: "GET" | "POST" | "PUT" | "DELETE";
-  path: string;
-  zh: string;
-  en: string;
-};
-
-const API_DOC_GATEWAY_ENDPOINTS: ApiDocEndpoint[] = [
-  {
-    method: "POST",
-    path: "/v1/chat/completions",
-    zh: "OpenAI Chat Completions 兼容（别名：/api/v1/chat/completions）",
-    en: "OpenAI Chat Completions compatible (alias: /api/v1/chat/completions)"
-  },
-  {
-    method: "POST",
-    path: "/v1/completions",
-    zh: "OpenAI Completions 兼容（别名：/api/v1/completions）",
-    en: "OpenAI Completions compatible (alias: /api/v1/completions)"
-  },
-  {
-    method: "POST",
-    path: "/v1/responses",
-    zh: "OpenAI Responses 兼容（别名：/api/v1/responses）",
-    en: "OpenAI Responses compatible (alias: /api/v1/responses)"
-  },
-  {
-    method: "POST",
-    path: "/v1/messages",
-    zh: "Anthropic Messages 兼容（别名：/api/v1/messages）",
-    en: "Anthropic Messages compatible (alias: /api/v1/messages)"
-  }
-];
-
-const API_DOC_MANAGEMENT_ENDPOINTS: ApiDocEndpoint[] = [
-  { method: "GET", path: "/api/health", zh: "健康检查", en: "Health check" },
-  { method: "GET", path: "/api/config", zh: "配置摘要与提示词配置（含模型规则）", en: "Config summary and prompt config (with model rules)" },
-  { method: "PUT", path: "/api/config", zh: "更新提示词配置（含模型规则）", en: "Update prompt config (with model rules)" },
-  { method: "GET", path: "/api/keys", zh: "Key 列表", en: "List keys" },
-  { method: "POST", path: "/api/keys", zh: "创建 Key", en: "Create key" },
-  { method: "GET", path: "/api/keys/:id", zh: "查询 Key", en: "Get key" },
-  { method: "PUT", path: "/api/keys/:id", zh: "更新 Key", en: "Update key" },
-  { method: "DELETE", path: "/api/keys/:id", zh: "删除 Key", en: "Delete key" },
-  { method: "GET", path: "/api/upstreams", zh: "渠道列表", en: "List upstream channels" },
-  { method: "POST", path: "/api/upstreams", zh: "创建渠道", en: "Create upstream channel" },
-  { method: "GET", path: "/api/upstreams/:id", zh: "查询渠道", en: "Get upstream channel" },
-  { method: "PUT", path: "/api/upstreams/:id", zh: "更新渠道", en: "Update upstream channel" },
-  { method: "DELETE", path: "/api/upstreams/:id", zh: "删除渠道", en: "Delete upstream channel" },
-  { method: "POST", path: "/api/upstreams/test", zh: "测试上游连通", en: "Test upstream connectivity" },
-  { method: "POST", path: "/api/keys/test-upstream", zh: "按 Key 测试上游", en: "Test upstream by key" },
-  { method: "GET", path: "/api/keys/switch-model", zh: "查询运行时状态", en: "Get runtime switch status" },
-  { method: "POST", path: "/api/keys/switch-model", zh: "运行时切模/启停", en: "Switch runtime model or enable/disable key" },
-  { method: "GET", path: "/api/usage", zh: "用量报表", en: "Usage report" },
-  { method: "DELETE", path: "/api/usage", zh: "清空用量", en: "Clear usage events" },
-  { method: "GET", path: "/api/logs", zh: "访问日志", en: "API access logs" },
-  { method: "DELETE", path: "/api/logs", zh: "清空访问日志", en: "Clear API access logs" },
-  { method: "GET", path: "/api/call-logs", zh: "AI 调用日志", en: "AI call logs" },
-  { method: "DELETE", path: "/api/call-logs", zh: "清空 AI 调用日志", en: "Clear AI call logs" },
-  { method: "POST", path: "/api/secret-entry", zh: "提交入口暗号", en: "Submit entry secret" },
-  { method: "DELETE", path: "/api/secret-entry", zh: "清除入口暗号", en: "Clear entry secret cookie" }
-];
-
-type UpstreamModelConfig = {
-  id: string;
-  name: string;
-  aliasModel: string | null;
-  model: string;
-  contextWindow: number | null;
-  upstreamWireApi: UpstreamWireApi;
-  glmCodexThinkingThreshold: GlmCodexThinkingThreshold;
-  supportsVision: boolean;
-  visionChannelId: number | null;
-  visionModel: string | null;
-  enabled: boolean;
-};
-
-type KeyModelMapping = {
-  id: string;
-  clientModel: string;
-  targetModel: string;
-  upstreamChannelId: number | null;
-  thinkingType: DoubaoThinkingType | null;
-  enabled: boolean;
-  dynamicModelSwitch: boolean;
-  contextSwitchThreshold: number;
-  contextOverflowModel: string | null;
-};
-
-type GatewayKey = {
-  id: number;
-  name: string;
-  localKey: string;
-  upstreamChannelId: number | null;
-  upstreamChannelName: string | null;
-  provider: ProviderName;
-  upstreamWireApi: UpstreamWireApi;
-  wireApi: string;
-  upstreamBaseUrl: string;
-  hasUpstreamApiKey: boolean;
-  upstreamModels: UpstreamModelConfig[];
-  modelMappings: KeyModelMapping[];
-  defaultModel: string;
-  supportsVision: boolean;
-  visionModel: string | null;
-  dynamicModelSwitch: boolean;
-  contextSwitchThreshold: number;
-  contextOverflowModel: string | null;
-  activeModelOverride: string | null;
-  timeoutMs: number;
-  enabled: boolean;
-  createdAt: string;
-  updatedAt: string;
-};
-
-type UpstreamChannel = {
-  id: number;
-  name: string;
-  provider: ProviderName;
-  upstreamWireApi: UpstreamWireApi;
-  upstreamBaseUrl: string;
-  hasUpstreamApiKey: boolean;
-  upstreamModels: UpstreamModelConfig[];
-  defaultModel: string;
-  supportsVision: boolean;
-  visionModel: string | null;
-  timeoutMs: number;
-  enabled: boolean;
-  keyCount: number;
-  createdAt: string;
-  updatedAt: string;
-};
-
-type KeysResponse = {
-  items: GatewayKey[];
-  wireApi: string;
-};
-
-type ChannelsResponse = {
-  items: UpstreamChannel[];
-  providers: ProviderName[];
-  upstreamWireApis: UpstreamWireApi[];
-};
-
-type CompatPromptConfig = {
-  agentsMdKeywords: string[];
-  chineseReplyHint: string;
-  modelPromptRules: CompatPromptRule[];
-};
-
-type CompatPromptRule = {
-  id: string;
-  enabled: boolean;
-  provider: string;
-  upstreamModelPattern: string;
-  hint: string;
-};
-
-type ConfigSummaryResponse = {
-  wireApi: string;
-  totalKeys: number;
-  enabledKeys: number;
-  totalChannels: number;
-  enabledChannels: number;
-  manageKeysApi: string;
-  manageUpstreamsApi: string;
-  usageReportApi: string;
-  aiCallLogApi: string;
-  compatPromptConfig: CompatPromptConfig;
-  compatPromptDefaults: CompatPromptConfig;
-};
-
-type ApiLogEntry = {
-  id: string;
-  route: string;
-  method: string;
-  path: string;
-  status: number | null;
-  elapsedMs: number;
-  requestHeaders: Record<string, string>;
-  requestBody: string;
-  responseHeaders: Record<string, string>;
-  responseBody: string;
-  error: string | null;
-  createdAt: string;
-};
-
-type AiCallLogEntry = {
-  id: string;
-  keyId: number;
-  keyName: string;
-  route: string;
-  requestWireApi: string;
-  upstreamWireApi: string;
-  requestedModel: string;
-  clientModel: string;
-  upstreamModel: string;
-  callType: "main" | "vision_fallback";
-  stream: boolean;
-  systemPrompt: string;
-  userPrompt: string;
-  conversationTranscript?: string;
-  assistantReasoning?: string;
-  assistantResponse: string;
-  images?: Array<{
-    sourceType: "data_url" | "remote_url" | "unsupported";
-    source: string;
-    savedUrl: string | null;
-    mimeType: string | null;
-    sizeBytes: number | null;
-    error?: string;
-  }>;
-  createdAt: string;
-};
-
-type AiCallLogStats = {
-  matched: number;
-  main: number;
-  visionFallback: number;
-  visionByModel: Array<{ model: string; count: number }>;
-  visionByKey: Array<{ keyId: number; keyName: string; count: number }>;
-};
-
-type AiCallLogFilterOptions = {
-  upstreamModels: string[];
-  requestedModels: string[];
-  clientModels: string[];
-  routes: string[];
-  requestWireApis: string[];
-  upstreamWireApis: string[];
-};
-
-type UsageSummaryRow = {
-  keyId: number;
-  keyName: string;
-  requestCount: number;
-  promptTokens: number;
-  completionTokens: number;
-  totalTokens: number;
-};
-
-type UsageModelRow = UsageSummaryRow & {
-  model: string;
-};
-
-type UsageTimelineRow = UsageModelRow & {
-  minute: string;
-};
-
-type UsageReport = {
-  windowMinutes: number;
-  keyId: number | null;
-  generatedAt: string;
-  rangeFrom?: string;
-  rangeTo?: string;
-  summary: {
-    requestCount: number;
-    promptTokens: number;
-    completionTokens: number;
-    totalTokens: number;
-    uniqueKeys: number;
-    uniqueModels: number;
-  };
-  perKey: UsageSummaryRow[];
-  perModel: UsageModelRow[];
-  timeline: UsageTimelineRow[];
-};
-
-type UsageMetricKey = "requestCount" | "promptTokens" | "completionTokens" | "totalTokens";
-type UsageBucketMode = "auto" | "1" | "5" | "15" | "60";
-
-type KeyFormState = {
-  name: string;
-  localKey: string;
-  upstreamChannelId: number | null;
-  modelMappings: KeyModelMapping[];
-  dynamicModelSwitch: boolean;
-  contextSwitchThreshold: number;
-  contextOverflowModel: string;
-  enabled: boolean;
-};
-
-type ChannelFormState = {
-  name: string;
-  provider: ProviderName;
-  upstreamBaseUrl: string;
-  upstreamApiKey: string;
-  clearUpstreamApiKey: boolean;
-  timeoutMs: number;
-  enabled: boolean;
-  defaultModel: string;
-  upstreamModels: UpstreamModelConfig[];
-};
-
-type CodingPreset = {
-  id: "glm-coding" | "doubao-coding";
-  label: string;
-  provider: ProviderName;
-  upstreamBaseUrl: string;
-  defaultModel: string;
-  contextWindow: number | null;
-  upstreamWireApi: UpstreamWireApi;
-  supportsVision: boolean;
-  visionModel: string | null;
-};
-
-const CODING_PRESETS: CodingPreset[] = [
-  {
-    id: "glm-coding",
-    label: "GLM 国内编程套餐建议",
-    provider: "glm",
-    upstreamBaseUrl: "https://open.bigmodel.cn/api/coding/paas/v4",
-    defaultModel: "glm-5",
-    contextWindow: 128000,
-    upstreamWireApi: "chat_completions",
-    supportsVision: true,
-    visionModel: null
-  },
-  {
-    id: "doubao-coding",
-    label: "豆包编程套餐建议",
-    provider: "doubao",
-    upstreamBaseUrl: "https://ark.cn-beijing.volces.com/api/coding/v3",
-    defaultModel: "doubao-seed-2.0-code",
-    contextWindow: 128000,
-    upstreamWireApi: "chat_completions",
-    supportsVision: true,
-    visionModel: null
-  }
-];
-
-function generateLocalKey() {
-  const random = crypto.getRandomValues(new Uint8Array(24));
-  const suffix = Array.from(random)
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-  return `sk-${suffix}`;
-}
-
-function generateModelId() {
-  const random = crypto.getRandomValues(new Uint8Array(8));
-  const suffix = Array.from(random)
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-  return `mdl_${suffix}`;
-}
-
-function generateMappingId() {
-  const random = crypto.getRandomValues(new Uint8Array(8));
-  const suffix = Array.from(random)
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-  return `map_${suffix}`;
-}
-
-function generateCompatPromptRuleId() {
-  const random = crypto.getRandomValues(new Uint8Array(8));
-  const suffix = Array.from(random)
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-  return `rule_${suffix}`;
-}
-
-function createCompatPromptRuleDraft(overrides: Partial<CompatPromptRule> = {}): CompatPromptRule {
-  return {
-    id: overrides.id?.trim() || generateCompatPromptRuleId(),
-    enabled: overrides.enabled ?? true,
-    provider: overrides.provider?.trim() || "",
-    upstreamModelPattern: overrides.upstreamModelPattern?.trim() || "",
-    hint: overrides.hint ?? ""
-  };
-}
-
-function createUpstreamModelDraft(
-  overrides: Partial<UpstreamModelConfig> = {}
-): UpstreamModelConfig {
-  return {
-    id: overrides.id ?? generateModelId(),
-    name: overrides.name ?? "默认模型",
-    aliasModel: overrides.aliasModel ?? null,
-    model: overrides.model ?? "gpt-4.1-mini",
-    contextWindow: typeof overrides.contextWindow === "number" ? overrides.contextWindow : null,
-    upstreamWireApi: overrides.upstreamWireApi ?? "responses",
-    glmCodexThinkingThreshold:
-      overrides.glmCodexThinkingThreshold === "off" ||
-      overrides.glmCodexThinkingThreshold === "medium" ||
-      overrides.glmCodexThinkingThreshold === "high"
-        ? overrides.glmCodexThinkingThreshold
-        : "low",
-    supportsVision: overrides.supportsVision ?? true,
-    visionChannelId: overrides.visionChannelId ?? null,
-    visionModel: overrides.visionModel ?? null,
-    enabled: overrides.enabled ?? true
-  };
-}
-
-function normalizeGlmCodexThinkingThreshold(
-  value: string | null | undefined
-): GlmCodexThinkingThreshold {
-  if (value === "off") {
-    return "off";
-  }
-  if (value === "medium") {
-    return "medium";
-  }
-  if (value === "high") {
-    return "high";
-  }
-  return "low";
-}
-
-function shouldShowGlmThinkingThreshold(provider: ProviderName, model: string) {
-  return supportsGlmThinkingType(provider, model);
-}
-
-function shouldShowDoubaoThinkingType(provider: ProviderName, model: string) {
-  const normalized = model.trim().toLowerCase();
-  return (
-    provider === "doubao" ||
-    normalized.startsWith("doubao-") ||
-    normalized.startsWith("deepseek-")
-  );
-}
-
-function createEmptyKeyFormState(localKey = ""): KeyFormState {
-  return {
-    name: "new-local-key",
-    localKey,
-    upstreamChannelId: null,
-    modelMappings: [],
-    dynamicModelSwitch: false,
-    contextSwitchThreshold: 128000,
-    contextOverflowModel: "",
-    enabled: true
-  };
-}
-
-function createEmptyChannelFormState(): ChannelFormState {
-  return {
-    name: "new-upstream-channel",
-    provider: "openai",
-    upstreamBaseUrl: PROVIDER_DEFAULT_BASE_URL.openai,
-    upstreamApiKey: "",
-    clearUpstreamApiKey: false,
-    timeoutMs: 60000,
-    enabled: true,
-    defaultModel: "gpt-4.1-mini",
-    upstreamModels: [
-      createUpstreamModelDraft({
-        name: "默认模型",
-        model: "gpt-4.1-mini",
-        upstreamWireApi: "responses",
-        supportsVision: true
-      })
-    ]
-  };
-}
-
-function syncChannelFormWithModelPool(form: ChannelFormState): ChannelFormState {
-  const upstreamModels = form.upstreamModels.length
-    ? form.upstreamModels
-    : [createUpstreamModelDraft({ model: form.defaultModel || "gpt-4.1-mini" })];
-
-  const hasDefault = upstreamModels.some((item) => item.model === form.defaultModel);
-  const defaultModel = hasDefault ? form.defaultModel : upstreamModels[0]?.model ?? "gpt-4.1-mini";
-
-  return {
-    ...form,
-    upstreamModels,
-    defaultModel
-  };
-}
-
-function toKeyForm(key: GatewayKey): KeyFormState {
-  return {
-    name: key.name,
-    localKey: key.localKey,
-    upstreamChannelId: key.upstreamChannelId,
-    modelMappings:
-      key.modelMappings?.map((item) => ({
-        id: item.id || generateMappingId(),
-        clientModel: item.clientModel,
-        targetModel: item.targetModel,
-        upstreamChannelId:
-          typeof item.upstreamChannelId === "number" ? item.upstreamChannelId : null,
-        thinkingType:
-          item.thinkingType === "enabled" ||
-          item.thinkingType === "disabled" ||
-          item.thinkingType === "auto"
-            ? item.thinkingType
-            : null,
-        enabled: item.enabled,
-        dynamicModelSwitch: item.dynamicModelSwitch ?? false,
-        contextSwitchThreshold: item.contextSwitchThreshold ?? 128000,
-        contextOverflowModel: item.contextOverflowModel ?? null
-      })) ?? [],
-    dynamicModelSwitch: key.dynamicModelSwitch,
-    contextSwitchThreshold: key.contextSwitchThreshold,
-    contextOverflowModel: key.contextOverflowModel ?? "",
-    enabled: key.enabled
-  };
-}
-
-function toChannelForm(channel: UpstreamChannel): ChannelFormState {
-  return syncChannelFormWithModelPool({
-    name: channel.name,
-    provider: channel.provider,
-    upstreamBaseUrl: channel.upstreamBaseUrl,
-    upstreamApiKey: "",
-    clearUpstreamApiKey: false,
-    timeoutMs: channel.timeoutMs,
-    enabled: channel.enabled,
-    defaultModel: channel.defaultModel,
-    upstreamModels:
-      channel.upstreamModels.length > 0
-        ? channel.upstreamModels.map((item) => ({
-            ...item,
-            aliasModel: item.aliasModel ?? null,
-            contextWindow: typeof item.contextWindow === "number" ? item.contextWindow : null,
-            glmCodexThinkingThreshold: normalizeGlmCodexThinkingThreshold(
-              item.glmCodexThinkingThreshold
-            ),
-            visionChannelId: item.visionChannelId ?? null
-          }))
-        : [
-            createUpstreamModelDraft({
-              aliasModel: null,
-              model: channel.defaultModel,
-              contextWindow: null,
-              upstreamWireApi: channel.upstreamWireApi,
-              glmCodexThinkingThreshold: "low",
-              supportsVision: channel.supportsVision,
-              visionChannelId: null,
-              visionModel: channel.visionModel
-            })
-          ]
-  });
-}
-
-function formatCnDate(value: string) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return "-";
-  }
-  return CN_DATE_FORMATTER.format(date);
-}
-
-export function formatNumber(value: number) {
-  return NUMBER_FORMATTER.format(Number.isFinite(value) ? value : 0);
-}
-
-function formatMinuteLabel(value: string) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-  return CN_MINUTE_FORMATTER.format(date);
-}
-
-export function formatCompactNumber(value: number) {
-  if (!Number.isFinite(value)) {
-    return "0";
-  }
-  if (Math.abs(value) >= 100_000_000) {
-    return `${(value / 100_000_000).toFixed(1)}亿`;
-  }
-  if (Math.abs(value) >= 10_000) {
-    return `${(value / 10_000).toFixed(1)}万`;
-  }
-  return formatNumber(value);
-}
-
-function pickUsageMetricValue(
-  row: Pick<UsageTimelineRow, UsageMetricKey>,
-  metric: UsageMetricKey
-) {
-  return Number(row[metric] ?? 0);
-}
-
-function resolveUsageBucketMinutes(minutes: number, mode: UsageBucketMode) {
-  if (mode !== "auto") {
-    return Number(mode);
-  }
-  if (minutes <= 120) {
-    return 1;
-  }
-  if (minutes <= 720) {
-    return 5;
-  }
-  if (minutes <= 1440) {
-    return 15;
-  }
-  return 60;
-}
-
-function maskLocalKey(localKey: string) {
-  if (localKey.length <= 16) {
-    return localKey;
-  }
-  return `${localKey.slice(0, 10)}...${localKey.slice(-4)}`;
-}
-
-function normalizeSelectValue(value: unknown): string {
-  if (Array.isArray(value)) {
-    return String(value[0] ?? "");
-  }
-  return String(value ?? "");
-}
-
-function normalizeStringArray(value: unknown) {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return value
-    .map((item) => String(item ?? "").trim())
-    .filter(Boolean);
-}
-
-function normalizeAiCallFilterOptions(value: unknown): AiCallLogFilterOptions {
-  if (!value || typeof value !== "object") {
-    return EMPTY_AI_CALL_FILTER_OPTIONS;
-  }
-  const source = value as Partial<AiCallLogFilterOptions>;
-  return {
-    upstreamModels: normalizeStringArray(source.upstreamModels),
-    requestedModels: normalizeStringArray(source.requestedModels),
-    clientModels: normalizeStringArray(source.clientModels),
-    routes: normalizeStringArray(source.routes),
-    requestWireApis: normalizeStringArray(source.requestWireApis),
-    upstreamWireApis: normalizeStringArray(source.upstreamWireApis)
-  };
-}
-
-function formatDateTimeInput(value: Date) {
-  const year = value.getFullYear();
-  const month = String(value.getMonth() + 1).padStart(2, "0");
-  const day = String(value.getDate()).padStart(2, "0");
-  const hour = String(value.getHours()).padStart(2, "0");
-  const minute = String(value.getMinutes()).padStart(2, "0");
-  const second = String(value.getSeconds()).padStart(2, "0");
-  return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
-}
-
-function buildRecentDateRange(minutes: number): [string, string] {
-  const end = new Date();
-  const start = new Date(end.getTime() - Math.max(1, minutes) * 60_000);
-  return [formatDateTimeInput(start), formatDateTimeInput(end)];
-}
-
-function formatCompatPromptKeywordsInput(keywords: string[]) {
-  return keywords.join("\n");
-}
-
-function parseCompatPromptKeywordsInput(value: string) {
-  return Array.from(
-    new Set(
-      value
-        .split(/\r?\n/)
-        .map((item) => item.trim())
-        .filter(Boolean)
-    )
-  );
-}
-
-function normalizeCompatPromptRule(rule: Partial<CompatPromptRule>, index: number): CompatPromptRule {
-  return {
-    id: rule.id?.trim() || `rule-${index + 1}`,
-    enabled: rule.enabled !== false,
-    provider: rule.provider?.trim() || "",
-    upstreamModelPattern: rule.upstreamModelPattern?.trim() || "",
-    hint: rule.hint?.trim() || ""
-  };
-}
-
-function normalizeCompatPromptRules(rules: Partial<CompatPromptRule>[]) {
-  return rules.map((rule, index) => normalizeCompatPromptRule(rule, index));
-}
-
-function formatCompatPromptRulesJson(rules: CompatPromptRule[]) {
-  return JSON.stringify(normalizeCompatPromptRules(rules), null, 2);
-}
-
-function extractCompatPromptRulesArray(payload: unknown): unknown[] | null {
-  if (Array.isArray(payload)) {
-    return payload;
-  }
-  if (!payload || typeof payload !== "object") {
-    return null;
-  }
-
-  const source = payload as {
-    modelPromptRules?: unknown;
-    compatPromptConfig?: {
-      modelPromptRules?: unknown;
-    };
-  };
-  if (Array.isArray(source.modelPromptRules)) {
-    return source.modelPromptRules;
-  }
-  if (source.compatPromptConfig && Array.isArray(source.compatPromptConfig.modelPromptRules)) {
-    return source.compatPromptConfig.modelPromptRules;
-  }
-  return null;
-}
-
-function parseCompatPromptRulesJson(value: string): CompatPromptRule[] {
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return [];
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(trimmed);
-  } catch {
-    throw new Error("模型规则 JSON 格式无效。");
-  }
-  const sourceArray = extractCompatPromptRulesArray(parsed);
-  if (!sourceArray) {
-    throw new Error(
-      "模型规则 JSON 必须是数组，或包含 modelPromptRules / compatPromptConfig.modelPromptRules。"
-    );
-  }
-
-  return sourceArray.map((entry, index) => {
-    if (!entry || typeof entry !== "object") {
-      throw new Error(`第 ${index + 1} 条模型规则必须是对象。`);
-    }
-
-    const source = entry as Record<string, unknown>;
-    const hint = typeof source.hint === "string" ? source.hint.trim() : "";
-    if (!hint) {
-      throw new Error(`第 ${index + 1} 条模型规则缺少 hint。`);
-    }
-    return normalizeCompatPromptRule(
-      {
-        id: typeof source.id === "string" ? source.id : undefined,
-        enabled: typeof source.enabled === "boolean" ? source.enabled : undefined,
-        provider: typeof source.provider === "string" ? source.provider : undefined,
-        upstreamModelPattern:
-          typeof source.upstreamModelPattern === "string"
-            ? source.upstreamModelPattern
-            : undefined,
-        hint
-      },
-      index
-    );
-  });
-}
-
-function ensureCompatPromptRuleIdsUnique(rules: CompatPromptRule[]) {
-  const usedIds = new Set<string>();
-  return rules.map((rule, index) => {
-    const base = rule.id.trim() || `rule-${index + 1}`;
-    let nextId = base;
-    let suffix = 2;
-    while (usedIds.has(nextId)) {
-      nextId = `${base}-${suffix}`;
-      suffix += 1;
-    }
-    usedIds.add(nextId);
-    return {
-      ...rule,
-      id: nextId
-    };
-  });
-}
-
-function stringifyCompatPromptRuleForSearch(rule: CompatPromptRule) {
-  return [rule.id, rule.provider, rule.upstreamModelPattern, rule.hint].join(" ").toLowerCase();
-}
-
-function resolveThinkingTokens(contextWindow: number | null) {
-  if (!contextWindow || !Number.isFinite(contextWindow) || contextWindow <= 0) {
-    return 8192;
-  }
-  return Math.max(2048, Math.min(8192, Math.floor(contextWindow * 0.1)));
-}
-
-function resolveCodexTokenBudgets(contextWindow: number | null) {
-  if (!contextWindow || !Number.isFinite(contextWindow) || contextWindow <= 0) {
-    return {
-      autoCompactTokenLimit: null
-    };
-  }
-
-  // Keep compaction slightly below full window to avoid hard context overflow.
-  const autoCompactTokenLimit = Math.max(4096, Math.floor(contextWindow * 0.85));
-
-  return {
-    autoCompactTokenLimit
-  };
-}
-
-function resolveClaudeMaxOutputTokens(contextWindow: number | null) {
-  if (!contextWindow || !Number.isFinite(contextWindow) || contextWindow <= 0) {
-    return 8192;
-  }
-  // Claude docs example: 1m window -> 32000 max output tokens.
-  return Math.max(4096, Math.min(32000, Math.floor(contextWindow * 0.032)));
-}
-
-function formatContextWindowSuffix(contextWindow: number) {
-  if (!Number.isFinite(contextWindow) || contextWindow <= 0) {
-    return "";
-  }
-  if (contextWindow % 1_000_000 === 0) {
-    return `${Math.floor(contextWindow / 1_000_000)}m`;
-  }
-  if (contextWindow % 1_000 === 0) {
-    return `${Math.floor(contextWindow / 1_000)}k`;
-  }
-  return String(Math.floor(contextWindow));
-}
-
-function formatClaudeModelWithContext(model: string, contextWindow: number | null) {
-  const normalizedModel = model.trim();
-  if (!normalizedModel || !contextWindow || !Number.isFinite(contextWindow) || contextWindow <= 0) {
-    return normalizedModel;
-  }
-  const suffix = formatContextWindowSuffix(contextWindow);
-  if (!suffix) {
-    return normalizedModel;
-  }
-  return `${normalizedModel}[${suffix}]`;
-}
-
-function inferContextWindowFromModel(model: string, provider: ProviderName) {
-  const normalized = model.trim().toLowerCase().replace(/\[[^\]]+\]$/, "");
-  if (!normalized) {
-    return null;
-  }
-
-  // GLM coding presets usually expose 128k context.
-  if (provider === "glm") {
-    if (
-      normalized === "glm-5" ||
-      normalized.startsWith("glm-5-") ||
-      normalized.startsWith("glm-4.5")
-    ) {
-      return 128000;
-    }
-  }
-
-  // Doubao coding presets commonly expose 128k context.
-  if (provider === "doubao") {
-    if (normalized.includes("doubao-seed") || normalized.includes("seed-2.0-code")) {
-      return 128000;
-    }
-  }
-
-  // Codex/GPT-5 family commonly uses large windows.
-  if (normalized.startsWith("gpt-5")) {
-    return 272000;
-  }
-
-  // Claude family default context is typically 200k.
-  if (normalized.startsWith("claude-")) {
-    return 200000;
-  }
-
-  return null;
-}
-
-function toBase64Utf8(input: string) {
-  const bytes = new TextEncoder().encode(input);
-  let binary = "";
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-  return btoa(binary);
-}
-
-function sanitizeTomlKey(value: string) {
-  const normalized = value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_]+/g, "_")
-    .replace(/^_+|_+$/g, "");
-  return normalized || "custom";
-}
-
-function normalizeModelCode(provider: ProviderName, model: string) {
-  const trimmed = model.trim();
-  if (provider === "glm") {
-    return trimmed.toLowerCase();
-  }
-  return trimmed;
-}
-
-const LOG_MARKDOWN_PLUGINS = [remarkGfm];
-const LOG_MARKDOWN_SIGNAL_RE =
-  /(^|\n)\s*(#{1,6}\s|[-*+]\s|\d+\.\s|>\s|```|~~~)|\[[^\]]+\]\([^)]+\)|\|.+\|/m;
-const LARGE_LOG_BLOCK_THRESHOLD = 12000;
-
-const MarkdownLogBlock = memo(function MarkdownLogBlock({ value }: { value: string }) {
-  const normalized = value.trim();
-  if (!normalized) {
-    return <div className="tc-log-markdown tc-log-markdown-empty">[empty]</div>;
-  }
-  const shouldUseMarkdown =
-    normalized.length <= LARGE_LOG_BLOCK_THRESHOLD && LOG_MARKDOWN_SIGNAL_RE.test(normalized);
-  if (!shouldUseMarkdown) {
-    return <pre className="tc-log-markdown tc-log-markdown-plain">{normalized}</pre>;
-  }
-  return (
-    <div className="tc-log-markdown">
-      <ReactMarkdown remarkPlugins={LOG_MARKDOWN_PLUGINS} skipHtml>
-        {normalized}
-      </ReactMarkdown>
-    </div>
-  );
-});
-
-function summarizeLogPreview(...values: string[]) {
-  for (const value of values) {
-    const normalized = value.trim();
-    if (!normalized) {
-      continue;
-    }
-    return normalized.length > 220 ? `${normalized.slice(0, 220)}...` : normalized;
-  }
-  return "";
-}
 
 export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   const router = useRouter();
@@ -1264,6 +302,33 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   const [compatPromptDefaults, setCompatPromptDefaults] = useState<CompatPromptConfig | null>(
     null
   );
+  const [promptConfigTab, setPromptConfigTab] = useState<"rules" | "lab">("rules");
+  const [promptLabMode, setPromptLabMode] = useState<"cli" | "import">("cli");
+  const [promptLabBaselineModel, setPromptLabBaselineModel] = useState("gpt-5.4");
+  const [promptLabCandidateModelsInput, setPromptLabCandidateModelsInput] = useState(
+    "gpt-5.3-codex\ngpt-5.2-codex"
+  );
+  const [promptLabSuiteId, setPromptLabSuiteId] = useState("tool-accuracy-v1");
+  const [promptLabSandbox, setPromptLabSandbox] = useState<
+    "read-only" | "workspace-write" | "danger-full-access"
+  >("workspace-write");
+  const [promptLabImportJsonInput, setPromptLabImportJsonInput] = useState("");
+  const [promptLabRunId, setPromptLabRunId] = useState<string | null>(null);
+  const [promptLabSubmitting, setPromptLabSubmitting] = useState(false);
+  const [promptLabFetchingReport, setPromptLabFetchingReport] = useState(false);
+  const [promptLabRunSummary, setPromptLabRunSummary] = useState<PromptLabRunSummaryResponse | null>(
+    null
+  );
+  const [promptLabReport, setPromptLabReport] = useState<PromptLabReportResponse | null>(null);
+  const [promptLabLastError, setPromptLabLastError] = useState("");
+  const promptLabPollTimerRef = useRef<number | null>(null);
+  const promptLabImportFileInputRef = useRef<HTMLInputElement | null>(null);
+  const [rulePreviewProviderInput, setRulePreviewProviderInput] = useState("");
+  const [rulePreviewUpstreamModelInput, setRulePreviewUpstreamModelInput] = useState("");
+  const [rulePreviewClientModelInput, setRulePreviewClientModelInput] = useState("");
+  const [rulePreviewLoading, setRulePreviewLoading] = useState(false);
+  const [rulePreviewResult, setRulePreviewResult] = useState<RulePreviewResult | null>(null);
+  const [showPromptLabRegressionCta, setShowPromptLabRegressionCta] = useState(false);
 
   const selectedKey = useMemo(
     () => keys.find((item) => item.id === selectedKeyId) ?? null,
@@ -2204,12 +1269,27 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     usageDateTo
   ]);
 
+  useEffect(() => {
+    return () => {
+      if (promptLabPollTimerRef.current !== null) {
+        window.clearInterval(promptLabPollTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (routeModule !== "prompt" && promptLabPollTimerRef.current !== null) {
+      window.clearInterval(promptLabPollTimerRef.current);
+      promptLabPollTimerRef.current = null;
+    }
+  }, [routeModule]);
+
   function notifySuccess(content: string) {
     MessagePlugin.success(content);
   }
 
   function notifyError(content: string) {
-    MessagePlugin.error(content);
+    MessagePlugin.error(humanizeConsoleErrorMessage(content));
   }
 
   function notifyInfo(content: string) {
@@ -2260,6 +1340,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     setCompatPromptRulesDraft(normalizedRules);
     setCompatPromptRuleSearch("");
     setCompatPromptRulesJsonInput(formatCompatPromptRulesJson(normalizedRules));
+    setShowPromptLabRegressionCta(false);
   }
 
   function addCompatPromptRule(overrides: Partial<CompatPromptRule> = {}) {
@@ -2394,6 +1475,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     const agentsMdKeywords = parseCompatPromptKeywordsInput(compatPromptKeywordsInput);
     const chineseReplyHint = compatPromptHintInput.trim();
     const modelPromptRules = normalizeCompatPromptRules(compatPromptRulesDraft);
+    const ruleCheckIssues = inspectCompatPromptRules(modelPromptRules);
 
     if (!agentsMdKeywords.length) {
       notifyError(t("至少保留一个 AGENTS 关键词。", "Keep at least one AGENTS keyword."));
@@ -2417,6 +1499,25 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
         );
         return;
       }
+    }
+    const blockingIssues = ruleCheckIssues.filter((item) => item.level === "error");
+    if (blockingIssues.length > 0) {
+      notifyError(
+        t(
+          `保存前请先修复规则冲突：${blockingIssues[0].message}`,
+          `Please resolve rule conflicts before saving: ${blockingIssues[0].message}`
+        )
+      );
+      return;
+    }
+    const warningIssues = ruleCheckIssues.filter((item) => item.level === "warn");
+    if (warningIssues.length > 0) {
+      notifyInfo(
+        t(
+          `保存提示：发现 ${warningIssues.length} 条规则覆盖风险，请在 Prompt Lab 做回归验证。`,
+          `Save notice: ${warningIssues.length} broad-match risks found. Please run Prompt Lab regression.`
+        )
+      );
     }
     setCompatPromptRulesJsonInput(formatCompatPromptRulesJson(modelPromptRules));
 
@@ -2442,6 +1543,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       const data = (await response.json()) as ConfigSummaryResponse;
       setCompatPromptDefaults(data.compatPromptDefaults);
       applyCompatPromptConfig(data.compatPromptConfig);
+      setShowPromptLabRegressionCta(true);
       notifySuccess(t("网关注入提示词配置已保存。", "Gateway injected prompt config saved."));
     } catch (err) {
       notifyError(
@@ -3242,6 +2344,293 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     }
   }
 
+  function downloadTextAsFile(fileName: string, content: string, mimeType = "application/json") {
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = fileName;
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    URL.revokeObjectURL(url);
+  }
+
+  function downloadCompatPromptRulesJsonFile(format: "array" | "wrapped" = "wrapped") {
+    const normalized = normalizeCompatPromptRules(compatPromptRulesDraft);
+    const payload =
+      format === "array"
+        ? normalized
+        : {
+            modelPromptRules: normalized
+          };
+    const stamp = new Date().toISOString().replace(/[:]/g, "-");
+    const suffix = format === "array" ? "rules-array" : "rules";
+    const fileName = `compat-prompt-${suffix}-${stamp}.json`;
+    downloadTextAsFile(fileName, `${JSON.stringify(payload, null, 2)}\n`);
+    notifySuccess(
+      t(
+        "模型规则 JSON 已导出到文件。",
+        "Model rules JSON has been exported to a file."
+      )
+    );
+  }
+
+  function clearPromptLabPollingTimer() {
+    if (promptLabPollTimerRef.current !== null) {
+      window.clearInterval(promptLabPollTimerRef.current);
+      promptLabPollTimerRef.current = null;
+    }
+  }
+
+  function collectPromptLabRegressionCandidatesFromRules() {
+    const output: string[] = [];
+    const seen = new Set<string>();
+    for (const rule of compatPromptRulesDraft) {
+      if (!rule.enabled) {
+        continue;
+      }
+      const tokens = rule.upstreamModelPattern
+        .split(/[\n,]+/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+      for (const token of tokens) {
+        const lower = token.toLowerCase();
+        if (
+          lower === "*" ||
+          lower === "all" ||
+          lower === "any" ||
+          token.includes("*") ||
+          token.includes("?")
+        ) {
+          continue;
+        }
+        if (seen.has(lower)) {
+          continue;
+        }
+        seen.add(lower);
+        output.push(token);
+        if (output.length >= 12) {
+          return output;
+        }
+      }
+    }
+    return output;
+  }
+
+  async function fetchPromptLabRunSummary(runId: string, silent = false) {
+    if (!runId.trim()) {
+      return null;
+    }
+    const response = await fetch(`/api/prompt-lab/runs/${encodeURIComponent(runId)}`, {
+      cache: "no-store"
+    });
+    const body = (await response.json().catch(() => ({}))) as PromptLabRunSummaryResponse & {
+      error?: string;
+    };
+    if (!response.ok) {
+      if (!silent) {
+        throw new Error(body.error ?? `Prompt Lab 查询失败 (${response.status})`);
+      }
+      return null;
+    }
+    setPromptLabRunSummary(body);
+    if (body.status === "succeeded") {
+      clearPromptLabPollingTimer();
+      if (promptLabReport?.runId !== body.id) {
+        void fetchPromptLabReport(body.id, true);
+      }
+    } else if (body.status === "failed") {
+      clearPromptLabPollingTimer();
+    }
+    return body;
+  }
+
+  async function fetchPromptLabReport(runId: string, silent = false) {
+    if (!runId.trim()) {
+      return null;
+    }
+    if (!silent) {
+      setPromptLabFetchingReport(true);
+    }
+    try {
+      const response = await fetch(`/api/prompt-lab/runs/${encodeURIComponent(runId)}/report`, {
+        cache: "no-store"
+      });
+      const body = (await response.json().catch(() => ({}))) as PromptLabReportResponse & {
+        error?: string;
+      };
+      if (!response.ok) {
+        throw new Error(body.error ?? `Prompt Lab 报告拉取失败 (${response.status})`);
+      }
+      setPromptLabReport(body);
+      return body;
+    } catch (error) {
+      if (!silent) {
+        throw error;
+      }
+      return null;
+    } finally {
+      if (!silent) {
+        setPromptLabFetchingReport(false);
+      }
+    }
+  }
+
+  function startPromptLabPolling(runId: string) {
+    clearPromptLabPollingTimer();
+    promptLabPollTimerRef.current = window.setInterval(() => {
+      void fetchPromptLabRunSummary(runId, true);
+    }, 2000);
+  }
+
+  async function runPromptLab() {
+    setPromptLabSubmitting(true);
+    setPromptLabLastError("");
+    setShowPromptLabRegressionCta(false);
+    try {
+      const baselineModel = promptLabBaselineModel.trim() || "gpt-5.4";
+      const candidateModels = parsePromptLabModelListInput(promptLabCandidateModelsInput);
+      const payload: Record<string, unknown> = {
+        mode: promptLabMode,
+        baselineModel,
+        candidateModels,
+        suiteId: promptLabSuiteId.trim() || "tool-accuracy-v1",
+        sandbox: promptLabSandbox
+      };
+
+      if (promptLabMode === "import") {
+        if (!promptLabImportJsonInput.trim()) {
+          throw new Error("请先粘贴 report.json 内容。");
+        }
+        try {
+          payload.reportJson = JSON.parse(promptLabImportJsonInput);
+        } catch {
+          throw new Error("report.json 解析失败，请检查 JSON 格式。");
+        }
+      }
+
+      const response = await fetch("/api/prompt-lab/runs", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      const body = (await response.json().catch(() => ({}))) as {
+        runId?: string;
+        status?: PromptLabRun["status"];
+        error?: string;
+      };
+      if (!response.ok || !body.runId) {
+        throw new Error(body.error ?? `Prompt Lab 启动失败 (${response.status})`);
+      }
+
+      setPromptLabRunId(body.runId);
+      setPromptLabReport(null);
+      await fetchPromptLabRunSummary(body.runId);
+      if (body.status === "queued" || body.status === "running") {
+        startPromptLabPolling(body.runId);
+        notifyInfo(t("Prompt Lab 已启动，正在执行。", "Prompt Lab started and is running."));
+      } else {
+        await fetchPromptLabReport(body.runId, true);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Prompt Lab 运行失败";
+      setPromptLabLastError(message);
+      notifyError(message);
+    } finally {
+      setPromptLabSubmitting(false);
+    }
+  }
+
+  function openPromptLabImportFilePicker() {
+    const input = promptLabImportFileInputRef.current;
+    if (!input) {
+      notifyError("导入控件不可用。");
+      return;
+    }
+    input.value = "";
+    input.click();
+  }
+
+  async function handlePromptLabImportFileChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0] ?? null;
+    event.target.value = "";
+    if (!file) {
+      return;
+    }
+    try {
+      const text = await file.text();
+      JSON.parse(text);
+      setPromptLabImportJsonInput(text);
+      notifySuccess(
+        t(
+          `已加载报告文件：${file.name}`,
+          `Loaded report file: ${file.name}`
+        )
+      );
+    } catch {
+      notifyError(t("报告文件不是合法 JSON。", "Report file is not valid JSON."));
+    }
+  }
+
+  async function previewCompatPromptRuleMatch() {
+    setRulePreviewLoading(true);
+    try {
+      const response = await fetch("/api/prompt-lab/rule-preview", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          provider: rulePreviewProviderInput,
+          upstreamModel: rulePreviewUpstreamModelInput,
+          clientModel: rulePreviewClientModelInput
+        })
+      });
+      const body = (await response.json().catch(() => ({}))) as RulePreviewResult & {
+        error?: string;
+      };
+      if (!response.ok) {
+        throw new Error(body.error ?? `规则预览失败 (${response.status})`);
+      }
+      setRulePreviewResult(body);
+      notifyInfo(
+        body.hintSource === "rule"
+          ? t("已命中模型规则。", "Matched model-specific rule.")
+          : t("未命中规则，回落默认提示词。", "No rule matched. Fallback to default hint.")
+      );
+    } catch (err) {
+      notifyError(err instanceof Error ? err.message : "规则预览失败");
+    } finally {
+      setRulePreviewLoading(false);
+    }
+  }
+
+  function applyFailureCaseAsCompatRule(item: PromptLabFailureCase) {
+    const nextHint = buildPromptLabHintFromFailure(item);
+    addCompatPromptRule({
+      upstreamModelPattern: item.model,
+      hint: nextHint
+    });
+    setPromptConfigTab("rules");
+    notifySuccess(
+      t(
+        `已根据 ${item.model} 失败样例创建规则草稿。`,
+        `Rule draft created from ${item.model} failure case.`
+      )
+    );
+  }
+
+  async function runPromptLabRegressionFromCurrentRules() {
+    const candidates = collectPromptLabRegressionCandidatesFromRules();
+    if (!candidates.length) {
+      notifyError(t("当前没有可回归测试的具体模型规则。", "No specific model rules to run regression."));
+      return;
+    }
+    setPromptLabCandidateModelsInput(candidates.join("\n"));
+    setPromptConfigTab("lab");
+    setPromptLabMode("cli");
+    await runPromptLab();
+  }
+
   async function copyNativeCodexBundleFile(
     fileKey: keyof CodexExportBundle["files"],
     successMessage: string,
@@ -3862,6 +3251,13 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   const compatPromptHintLength = compatPromptHintInput.trim().length;
   const compatPromptRuleCount = compatPromptRulesDraft.length;
   const compatPromptRuleEnabledCount = compatPromptRulesDraft.filter((item) => item.enabled).length;
+  const compatPromptRuleCheckIssues = inspectCompatPromptRules(compatPromptRulesDraft);
+  const compatPromptRuleErrorCount = compatPromptRuleCheckIssues.filter(
+    (item) => item.level === "error"
+  ).length;
+  const compatPromptRuleWarnCount = compatPromptRuleCheckIssues.filter(
+    (item) => item.level === "warn"
+  ).length;
   const compatPromptRuleSearchKeyword = compatPromptRuleSearch.trim().toLowerCase();
   const compatPromptRuleVisibleItems = compatPromptRulesDraft
     .map((rule, index) => ({ rule, index }))
@@ -3880,6 +3276,14 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   )
     .sort((a, b) => a.localeCompare(b))
     .slice(0, 16);
+  const promptLabCandidateModels = parsePromptLabModelListInput(promptLabCandidateModelsInput);
+  const promptLabRunning =
+    promptLabRunSummary?.status === "queued" || promptLabRunSummary?.status === "running";
+  const promptLabBaselineMetrics =
+    promptLabReport?.report.perModel.find(
+      (item) => item.model.toLowerCase() === promptLabReport.report.baselineModel.toLowerCase()
+    ) ?? null;
+  const promptLabThresholds = promptLabReport?.thresholds ?? null;
   const routeModuleTitle = t(MODULE_LABEL[routeModule].zh, MODULE_LABEL[routeModule].en);
   const routeModuleSummary = t(MODULE_SUMMARY[routeModule].zh, MODULE_SUMMARY[routeModule].en);
 
@@ -4257,469 +3661,35 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                   gatewayV1Endpoint={gatewayV1Endpoint}
                 />
               ) : routeModule === "access" ? (
-                <section className="tc-section">
-                  <h3>{t("本地 Key 接入", "Local Key Access")}</h3>
-                  <p className="tc-upstream-advice">
-                    {t(
-                      "one-api 风格：本地 Key 只负责鉴权与调度，上游连接在「上游渠道」模块独立维护。",
-                      "one-api style: local key handles auth and scheduling only. Upstream connections are managed in the Upstreams module."
-                    )}
-                  </p>
-                  <div className="tc-form-grid">
-                    <label className="tc-field">
-                      <span>{t("Key 名称", "Key Name")}</span>
-                      <Input
-                        value={keyForm.name}
-                        onChange={(value) => setKeyForm((prev) => ({ ...prev, name: value }))}
-                        placeholder={t("如：生产-客服网关", "e.g. prod-support-gateway")}
-                        clearable
-                      />
-                    </label>
-
-                    <label className="tc-field">
-                      <span>{t("绑定上游渠道", "Bind Upstream")}</span>
-                      <Select
-                        value={keyForm.upstreamChannelId ? String(keyForm.upstreamChannelId) : undefined}
-                        options={keyBindChannelOptions}
-                        placeholder={t("请选择渠道", "Select upstream")}
-                        onChange={(value) => {
-                          const next = Number(normalizeSelectValue(value));
-                          if (!Number.isNaN(next) && next > 0) {
-                            setKeyForm((prev) => ({ ...prev, upstreamChannelId: next }));
-                          }
-                        }}
-                      />
-                    </label>
-
-                    <label className="tc-field tc-field-wide">
-                      <span>{t("本地 Key（OpenAI 风格）", "Local Key (OpenAI style)")}</span>
-                      <div className="tc-inline-actions">
-                        <Input
-                          value={keyForm.localKey}
-                          onChange={(value) => setKeyForm((prev) => ({ ...prev, localKey: value }))}
-                          placeholder="sk-xxxxxxxxxxxxxxxxxxxxxxxx"
-                          clearable
-                        />
-                        <Button
-                          variant="outline"
-                          theme="default"
-                          onClick={() =>
-                            setKeyForm((prev) => ({
-                              ...prev,
-                              localKey: generateLocalKey()
-                            }))
-                          }
-                        >
-                          {t("生成", "Generate")}
-                        </Button>
-                        <Button variant="outline" theme="default" onClick={() => void copyLocalKey()}>
-                          {t("复制", "Copy")}
-                        </Button>
-                      </div>
-                    </label>
-
-                    <label className="tc-switchline">
-                      <span>{t("按上下文长度自动切模", "Auto-switch by context length")}</span>
-                      <Switch
-                        value={keyForm.dynamicModelSwitch}
-                        onChange={(value) =>
-                          setKeyForm((prev) => ({
-                            ...prev,
-                            dynamicModelSwitch: Boolean(value)
-                          }))
-                        }
-                      />
-                    </label>
-
-                    <label className="tc-switchline">
-                      <span>{t("启用状态", "Enabled")}</span>
-                      <Switch
-                        value={keyForm.enabled}
-                        onChange={(value) =>
-                          setKeyForm((prev) => ({
-                            ...prev,
-                            enabled: Boolean(value)
-                          }))
-                        }
-                      />
-                    </label>
-
-                    {keyForm.dynamicModelSwitch ? (
-                      <>
-                        <label className="tc-field">
-                          <span>{t("切换阈值（输入 Token）", "Switch Threshold (prompt tokens)")}</span>
-                          <Input
-                            type="number"
-                            value={String(keyForm.contextSwitchThreshold)}
-                            onChange={(value) => {
-                              const n = Number(value);
-                              if (!Number.isNaN(n)) {
-                                setKeyForm((prev) => ({
-                                  ...prev,
-                                  contextSwitchThreshold: n
-                                }));
-                              }
-                            }}
-                          />
-                        </label>
-                        <label className="tc-field">
-                          <span>{t("溢出模型（超阈值切换）", "Overflow Model (above threshold)")}</span>
-                          <Select
-                            value={keyForm.contextOverflowModel || undefined}
-                            options={keyOverflowModelOptions}
-                            placeholder={t("可跨上游选择任意已启用模型", "Select any enabled model across upstreams")}
-                            onChange={(value) =>
-                              setKeyForm((prev) => ({
-                                ...prev,
-                                contextOverflowModel: normalizeSelectValue(value)
-                              }))
-                            }
-                          />
-                        </label>
-                        <p className="tc-upstream-advice tc-field-wide">
-                          {t(
-                            "溢出模型支持跨上游选择。超阈值后会直接切到你选定的渠道与模型，而不再限制为当前绑定渠道。",
-                            "Overflow model supports cross-upstream selection. Once the threshold is exceeded, requests switch directly to the selected channel and model instead of being limited to the currently bound upstream."
-                          )}
-                        </p>
-                      </>
-                    ) : null}
-                  </div>
-
-                  <div className="tc-actions-row">
-                    <Tag variant="light-outline">{t("单 Key 内部模型映射（客户端 -> 内部）", "Single-key model mapping (client -> internal)")}</Tag>
-                    <Button
-                      variant="outline"
-                      theme="default"
-                      onClick={addKeyModelMapping}
-                      disabled={!keyForm.upstreamChannelId}
-                    >
-                      {t("新增映射", "Add Mapping")}
-                    </Button>
-                    <Button
-                      variant="outline"
-                      theme="default"
-                      onClick={handleQuickExportKeyMappings}
-                      disabled={!keyForm.modelMappings.length}
-                    >
-                      {t("导出映射", "Export Mappings")}
-                    </Button>
-                    <Button
-                      variant="outline"
-                      theme="default"
-                      onClick={() => void handleQuickCopyKeyMappings()}
-                      disabled={!keyForm.modelMappings.length}
-                    >
-                      {t("复制映射", "Copy Mappings")}
-                    </Button>
-                    <Button
-                      variant="outline"
-                      theme="default"
-                      onClick={handleOpenQuickImportKeyMappingDialog}
-                    >
-                      {t("导入映射", "Import Mappings")}
-                    </Button>
-                  </div>
-
-                  {keyForm.modelMappings.length > 0 ? (
-                    <div className="tc-model-list">
-                      {keyForm.modelMappings.map((item, index) => {
-                        const mappingChannel = resolveMappingChannel(item);
-                        const targetProfile = findChannelModelProfile(mappingChannel, item.targetModel);
-                        const showDoubaoThinkingControl = shouldShowDoubaoThinkingType(
-                          mappingChannel?.provider ?? "openai",
-                          targetProfile?.model ?? item.targetModel
-                        );
-                        const showGlmThinkingControl = shouldShowGlmThinkingThreshold(
-                          mappingChannel?.provider ?? "openai",
-                          targetProfile?.model ?? item.targetModel
-                        );
-
-                        return (
-                          <div key={item.id} className="tc-model-item">
-                            <div className="tc-model-head">
-                              <strong>映射 #{index + 1}</strong>
-                              <div className="tc-model-actions">
-                                <span>{t("切模", "Overflow")}</span>
-                                <Switch
-                                  value={item.dynamicModelSwitch}
-                                  onChange={(value) =>
-                                    updateKeyModelMapping(item.id, (prev) => ({
-                                      ...prev,
-                                      dynamicModelSwitch: Boolean(value)
-                                    }))
-                                  }
-                                />
-                                <span className="tc-sep">|</span>
-                                <span>{t("启用", "Enabled")}</span>
-                                <Switch
-                                  value={item.enabled}
-                                  onChange={(value) =>
-                                    updateKeyModelMapping(item.id, (prev) => ({
-                                      ...prev,
-                                      enabled: Boolean(value)
-                                    }))
-                                  }
-                                />
-                                <Button
-                                  variant="outline"
-                                  theme="danger"
-                                  onClick={() => removeKeyModelMapping(item.id)}
-                                >
-                                  {t("删除", "Delete")}
-                                </Button>
-                              </div>
-                            </div>
-
-                            <div className="tc-form-grid">
-                              <label className="tc-field">
-                                <span>{t("客户端模型名", "Client Model Name")}</span>
-                                <Input
-                                  value={item.clientModel}
-                                  onChange={(value) =>
-                                    updateKeyModelMapping(item.id, (prev) => ({
-                                      ...prev,
-                                      clientModel: value
-                                    }))
-                                  }
-                                  placeholder={t("如：gpt-5.3-codex", "e.g. gpt-5.3-codex")}
-                                  clearable
-                                />
-                              </label>
-
-                              <label className="tc-field">
-                                <span>{t("内部模型名", "Internal Model Name")}</span>
-                                <Input
-                                  value={item.targetModel}
-                                  onChange={(value) =>
-                                    updateKeyModelMapping(item.id, (prev) => ({
-                                      ...prev,
-                                      targetModel: value
-                                    }))
-                                  }
-                                  placeholder={t("如：glm-5 / gpt-4.1-mini", "e.g. glm-5 / gpt-4.1-mini")}
-                                  clearable
-                                />
-                              </label>
-
-                              <label className="tc-field">
-                                <span>
-                                  {t("绑定上游渠道（映射级）", "Bind Upstream (Mapping-level)")}
-                                </span>
-                                <Select
-                                  value={
-                                    typeof item.upstreamChannelId === "number"
-                                      ? String(item.upstreamChannelId)
-                                      : "__inherit__"
-                                  }
-                                  options={mappingBindChannelOptions}
-                                  onChange={(value) => {
-                                    const normalized = normalizeSelectValue(value);
-                                    const parsed = Number(normalized);
-                                    updateKeyModelMapping(item.id, (prev) => ({
-                                      ...prev,
-                                      upstreamChannelId:
-                                        normalized === "__inherit__" ||
-                                        !Number.isInteger(parsed) ||
-                                        parsed <= 0
-                                          ? null
-                                          : parsed
-                                    }));
-                                  }}
-                                />
-                              </label>
-
-                              {showDoubaoThinkingControl ? (
-                                <label className="tc-field">
-                                  <span>{t("豆包深度思考", "Doubao Thinking")}</span>
-                                  <Select
-                                    value={item.thinkingType ?? "__inherit__"}
-                                    options={[
-                                      {
-                                        value: "__inherit__",
-                                        label: t("继承请求参数", "Inherit request")
-                                      },
-                                      ...DOUBAO_THINKING_TYPES.map((thinkingType) => ({
-                                        value: thinkingType,
-                                        label: formatDoubaoThinkingTypeLabel(thinkingType)
-                                      }))
-                                    ]}
-                                    onChange={(value) => {
-                                      const normalized = normalizeSelectValue(value);
-                                      updateKeyModelMapping(item.id, (prev) => ({
-                                        ...prev,
-                                        thinkingType:
-                                          normalized === "enabled" ||
-                                          normalized === "disabled" ||
-                                          normalized === "auto"
-                                            ? normalized
-                                            : null
-                                      }));
-                                    }}
-                                  />
-                                </label>
-                              ) : null}
-
-                              {showDoubaoThinkingControl ? (
-                                <p className="tc-upstream-advice tc-field-wide">
-                                  {t(
-                                    "映射级可固定豆包 thinking.type（enabled/disabled/auto）。选择“继承请求参数”时，客户端传什么就透传什么；未传时按网关自动策略处理。",
-                                    "Mapping-level setting can pin Doubao thinking.type (enabled/disabled/auto). With 'Inherit request', client input is forwarded as-is; if absent, gateway auto strategy is used."
-                                  )}
-                                </p>
-                              ) : null}
-
-                              {showGlmThinkingControl ? (
-                                <label className="tc-field">
-                                  <span>
-                                    {t(
-                                      "GLM 深度思考触发阈值",
-                                      "GLM Deep Thinking Threshold"
-                                    )}
-                                  </span>
-                                  <Select
-                                    value={targetProfile?.glmCodexThinkingThreshold ?? "low"}
-                                    options={GLM_CODEX_THINKING_THRESHOLDS.map((threshold) => ({
-                                      value: threshold,
-                                      label: formatGlmThinkingThresholdLabel(threshold)
-                                    }))}
-                                    onChange={(value) =>
-                                      void updateBoundChannelGlmThinkingThreshold(
-                                        item,
-                                        normalizeGlmCodexThinkingThreshold(
-                                          normalizeSelectValue(value)
-                                        )
-                                      )
-                                    }
-                                    disabled={
-                                      loading ||
-                                      savingKey ||
-                                      savingChannel ||
-                                      !mappingChannel ||
-                                      !targetProfile
-                                    }
-                                  />
-                                </label>
-                              ) : null}
-
-                              {showGlmThinkingControl && mappingChannel && targetProfile ? (
-                                <p className="tc-upstream-advice tc-field-wide">
-                                  {t(
-                                    `当前映射会继承渠道「${mappingChannel.name}」中内部模型 ${targetProfile.model} 的思考阈值设置。达到该力度时，Codex 的 reasoning_effort 才会自动映射为 GLM thinking.enabled。`,
-                                    `This mapping inherits the thinking threshold from internal model ${targetProfile.model} in channel ${mappingChannel.name}. Codex reasoning_effort only auto-maps to GLM thinking.enabled once the threshold is reached.`
-                                  )}
-                                </p>
-                              ) : null}
-
-                              {showGlmThinkingControl && !mappingChannel ? (
-                                <p className="tc-tip err tc-field-wide">
-                                  {t(
-                                    "请先为该映射选择上游渠道，或让它继承 Key 绑定渠道。",
-                                    "Select an upstream channel for this mapping, or make it inherit the key-level channel first."
-                                  )}
-                                </p>
-                              ) : null}
-
-                              {showGlmThinkingControl && mappingChannel && !targetProfile ? (
-                                <p className="tc-tip err tc-field-wide">
-                                  {t(
-                                    "这是一个 GLM 目标模型，但当前映射渠道的模型池里还没有找到同名内部模型，所以暂时无法设置思考阈值。请先在对应上游渠道模型池中添加或修正该模型。",
-                                    "This is a GLM target model, but no matching internal model was found in the selected channel model pool yet, so the thinking threshold cannot be configured here. Add or fix the model in that upstream channel pool first."
-                                  )}
-                                </p>
-                              ) : null}
-                            </div>
-                            {item.dynamicModelSwitch ? (
-                              <div className="tc-mapping-overflow">
-                                <span className="tc-sub-label">{t("上下文溢出切模", "Context Overflow Switch")}</span>
-                                <div className="tc-form-grid">
-                                  <label className="tc-field">
-                                    <span>{t("切换阈值（输入 Token）", "Switch Threshold (prompt tokens)")}</span>
-                                    <Input
-                                      type="number"
-                                      value={String(item.contextSwitchThreshold)}
-                                      onChange={(value) => {
-                                        const n = Number(value);
-                                        if (!Number.isNaN(n)) {
-                                          updateKeyModelMapping(item.id, (prev) => ({
-                                            ...prev,
-                                            contextSwitchThreshold: n
-                                          }));
-                                        }
-                                      }}
-                                    />
-                                  </label>
-                                  <label className="tc-field">
-                                    <span>{t("溢出模型（超阈值切换）", "Overflow Model (above threshold)")}</span>
-                                    <Select
-                                      value={item.contextOverflowModel || undefined}
-                                      options={mappingOverflowModelOptions}
-                                      placeholder={t("可跨上游选择任意已启用模型", "Select any enabled model across upstreams")}
-                                      onChange={(value) =>
-                                        updateKeyModelMapping(item.id, (prev) => ({
-                                          ...prev,
-                                          contextOverflowModel: normalizeSelectValue(value)
-                                        }))
-                                      }
-                                    />
-                                  </label>
-                                  <p className="tc-upstream-advice tc-field-wide">
-                                    {t(
-                                      "映射级溢出模型优先于 Key 级设置。超阈值后会直接切到你选定的渠道与模型。",
-                                      "Mapping-level overflow model takes priority over key-level settings. Once the threshold is exceeded, requests switch directly to the selected channel and model."
-                                    )}
-                                  </p>
-                                </div>
-                              </div>
-                            ) : null}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  ) : (
-                    <p className="tc-upstream-advice">
-                      {t(
-                        "未配置映射时，客户端模型名按现有模型池（model/alias）直接解析。",
-                        "Without mapping, client model names are resolved directly from current model pool (model/alias)."
-                      )}
-                    </p>
-                  )}
-
-                  {selectedChannelForKey ? (
-                    <div className="tc-channel-summary">
-                      <div className="tc-meta-row">
-                        <Tag theme="primary" variant="light-outline">
-                          {t("渠道供应商", "Upstream Provider")}: {PROVIDER_META[selectedChannelForKey.provider].label}
-                        </Tag>
-                        <Tag variant="light-outline">
-                          {t("默认模型", "Default Model")}: {selectedChannelForKey.defaultModel}
-                        </Tag>
-                        <Tag variant="light-outline">
-                          {t("协议", "Wire API")}: {selectedChannelForKey.upstreamWireApi}
-                        </Tag>
-                      </div>
-                      <div className="tc-channel-endpoint">
-                        <span className="tc-channel-endpoint-label">
-                          {t("上游地址", "Upstream URL")}
-                        </span>
-                        <code>{selectedChannelForKey.upstreamBaseUrl}</code>
-                      </div>
-                    </div>
-                  ) : (
-                    <p className="tc-tip err">{t("请先在「上游渠道」创建渠道，再回来绑定本地 Key。", "Create an upstream first, then bind local key here.")}</p>
-                  )}
-
-                  <p className="tc-upstream-advice">
-                    {t("保存入口统一在本页底部，仅保留一个", "Save action is unified at bottom with one button")}「
-                    {isNewKey ? t("创建 Key", "Create Key") : t("保存 Key", "Save Key")}」。
-                  </p>
-                  <p className="tc-tip">
-                    {t(
-                      "导入预览与原生 Codex 导出已单独放到「配置导出」页面，便于专门查看和复制。",
-                      "Import previews and native Codex export have moved to the dedicated Export page for cleaner access."
-                    )}
-                  </p>
-                </section>
+                <SettingsAccessPanel
+                  t={t}
+                  keyForm={keyForm}
+                  setKeyForm={setKeyForm}
+                  keyBindChannelOptions={keyBindChannelOptions}
+                  normalizeSelectValue={normalizeSelectValue}
+                  copyLocalKey={copyLocalKey}
+                  addKeyModelMapping={addKeyModelMapping}
+                  handleQuickExportKeyMappings={handleQuickExportKeyMappings}
+                  handleQuickCopyKeyMappings={handleQuickCopyKeyMappings}
+                  handleOpenQuickImportKeyMappingDialog={handleOpenQuickImportKeyMappingDialog}
+                  resolveMappingChannel={resolveMappingChannel}
+                  findChannelModelProfile={findChannelModelProfile}
+                  formatDoubaoThinkingTypeLabel={formatDoubaoThinkingTypeLabel}
+                  updateKeyModelMapping={updateKeyModelMapping}
+                  removeKeyModelMapping={removeKeyModelMapping}
+                  mappingBindChannelOptions={mappingBindChannelOptions}
+                  formatGlmThinkingThresholdLabel={formatGlmThinkingThresholdLabel}
+                  updateBoundChannelGlmThinkingThreshold={updateBoundChannelGlmThinkingThreshold}
+                  loading={loading}
+                  savingKey={savingKey}
+                  savingChannel={savingChannel}
+                  keyOverflowModelOptions={keyOverflowModelOptions}
+                  mappingOverflowModelOptions={mappingOverflowModelOptions}
+                  selectedChannelForKey={selectedChannelForKey}
+                  isNewKey={isNewKey}
+                  handleMenuRoute={handleMenuRoute}
+                  generateLocalKey={generateLocalKey}
+                />
               ) : null}
 
               {routeModule === "access" ? (
@@ -4740,2423 +3710,233 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
               ) : null}
 
               {routeModule === "prompt" ? (
-                <section className="tc-section">
-                  <h3>{t("网关注入提示词配置", "Gateway Injected Prompt Config")}</h3>
-                  <p className="tc-upstream-advice">
-                    {t(
-                      "这里控制 AGENTS.md 检测场景下注入策略：未命中规则时使用默认提示词；命中上游真实模型规则时，用该模型专属提示词替换默认提示词。保存后会影响后续请求。",
-                      "This controls AGENTS.md injection behavior: use the default hint when no rule matches; when a real-upstream-model rule matches, its model-specific hint replaces the default hint."
-                    )}
-                  </p>
-
-                  <div className="tc-form-grid">
-                    <label className="tc-field">
-                      <span>{t("AGENTS 关键词（每行一个）", "AGENTS Keywords (one per line)")}</span>
-                      <Textarea
-                        value={compatPromptKeywordsInput}
-                        onChange={(value) => setCompatPromptKeywordsInput(value)}
-                        autosize={{ minRows: 4, maxRows: 8 }}
-                        placeholder={"AGENTS.md\nAGENTS.MD\nagents.md"}
-                      />
-                    </label>
-
-                    <label className="tc-field">
-                      <span>{t("默认提示词正文", "Default Prompt Body")}</span>
-                      <Textarea
-                        value={compatPromptHintInput}
-                        onChange={(value) => setCompatPromptHintInput(value)}
-                        autosize={{ minRows: 10, maxRows: 18 }}
-                        placeholder={t("请输入自动注入的默认提示词", "Enter the default injected prompt")}
-                      />
-                    </label>
-                  </div>
-
-                  <div className="tc-model-list-toolbar">
-                    <div className="tc-model-list-toolbar-left">
-                      <div className="tc-model-list-title">{t("模型定制规则", "Model-Specific Rules")}</div>
-                      <Tag variant="light-outline">
-                        {t("当前", "Current")} {compatPromptRuleCount} {t("条", "items")}
-                      </Tag>
-                      <Tag variant="light-outline">
-                        {t("启用", "Enabled")} {compatPromptRuleEnabledCount}
-                      </Tag>
-                    </div>
-                    <div className="tc-model-list-toolbar-left">
-                      <Input
-                        value={compatPromptRuleSearch}
-                        onChange={(value) => setCompatPromptRuleSearch(value)}
-                        clearable
-                        placeholder={t("搜索规则 ID / 模型 / 提示词", "Search rule ID / model / hint")}
-                        style={{ width: 280 }}
-                      />
-                      <Button
-                        theme="primary"
-                        variant="outline"
-                        onClick={() => addCompatPromptRule()}
-                        disabled={compatPromptRuleCount >= 128}
-                      >
-                        {t("新增规则", "Add Rule")}
-                      </Button>
-                      <Button
-                        variant="outline"
-                        theme="default"
-                        onClick={() => openCompatPromptRulesFileImporter("append")}
-                        disabled={compatPromptRuleCount >= 128}
-                      >
-                        {t("批量导入并追加", "Batch Import (Append)")}
-                      </Button>
-                      <Button
-                        variant="outline"
-                        theme="default"
-                        onClick={() => openCompatPromptRulesFileImporter("replace")}
-                      >
-                        {t("批量导入并覆盖", "Batch Import (Replace)")}
-                      </Button>
-                    </div>
-                  </div>
-                  <input
-                    ref={compatPromptRulesFileInputRef}
-                    type="file"
-                    accept=".json,application/json"
-                    style={{ display: "none" }}
-                    onChange={(event) => void handleCompatPromptRulesFileChange(event)}
-                  />
-
-                  {compatPromptUpstreamModelSuggestions.length > 0 ? (
-                    <>
-                      <p className="tc-upstream-advice">
-                        {t(
-                          "已发现上游真实模型。可一键创建规则，也可以手填任意上游真实模型名称。",
-                          "Detected real upstream models. You can add rules with one click, or type any upstream model manually."
-                        )}
-                      </p>
-                      <div className="tc-actions-row">
-                        {compatPromptUpstreamModelSuggestions.map((model) => (
-                          <Button
-                            key={model}
-                            variant="outline"
-                            size="small"
-                            onClick={() =>
-                              addCompatPromptRule({
-                                upstreamModelPattern: model
-                              })
-                            }
-                            disabled={compatPromptRuleCount >= 128}
-                          >
-                            {model}
-                          </Button>
-                        ))}
-                      </div>
-                    </>
-                  ) : null}
-
-                  {compatPromptRuleCount === 0 ? (
-                    <p className="tc-upstream-advice">
-                      {t(
-                        "当前没有模型规则。你可以点击“新增规则”开始按上游真实模型定制提示词。",
-                        "No model rules yet. Click 'Add Rule' to start customizing hints by real upstream model."
-                      )}
-                    </p>
-                  ) : compatPromptRuleVisibleItems.length === 0 ? (
-                    <p className="tc-upstream-advice">
-                      {t(
-                        "没有匹配搜索条件的规则。",
-                        "No rules matched the search filter."
-                      )}
-                    </p>
-                  ) : (
-                    <div className="tc-model-list">
-                      {compatPromptRuleVisibleItems.map(({ rule, index }) => (
-                        <div className="tc-model-item" key={`${rule.id}-${index}`}>
-                          <div className="tc-model-head">
-                            <strong>{t("规则", "Rule")} #{index + 1}</strong>
-                            <div className="tc-model-actions">
-                              <Tag
-                                theme={rule.enabled ? "success" : "default"}
-                                variant="light-outline"
-                              >
-                                {rule.enabled ? t("启用", "Enabled") : t("停用", "Disabled")}
-                              </Tag>
-                              <Button
-                                variant="outline"
-                                size="small"
-                                onClick={() => duplicateCompatPromptRule(index)}
-                                disabled={compatPromptRuleCount >= 128}
-                              >
-                                {t("复制", "Duplicate")}
-                              </Button>
-                              <Button
-                                theme="danger"
-                                variant="text"
-                                size="small"
-                                onClick={() => removeCompatPromptRule(index)}
-                              >
-                                {t("删除", "Delete")}
-                              </Button>
-                            </div>
-                          </div>
-
-                          <div className="tc-form-grid">
-                            <label className="tc-field">
-                              <span>{t("规则 ID", "Rule ID")}</span>
-                              <Input
-                                value={rule.id}
-                                onChange={(value) =>
-                                  updateCompatPromptRule(index, (prev) => ({
-                                    ...prev,
-                                    id: value
-                                  }))
-                                }
-                                clearable
-                              />
-                            </label>
-
-                            <label className="tc-switchline">
-                              <span>{t("启用规则", "Rule Enabled")}</span>
-                              <Switch
-                                value={rule.enabled}
-                                onChange={(value) =>
-                                  updateCompatPromptRule(index, (prev) => ({
-                                    ...prev,
-                                    enabled: Boolean(value)
-                                  }))
-                                }
-                              />
-                            </label>
-
-                            <label className="tc-field">
-                              <span>{t("供应商匹配（可选）", "Provider Pattern (optional)")}</span>
-                              <Input
-                                value={rule.provider}
-                                onChange={(value) =>
-                                  updateCompatPromptRule(index, (prev) => ({
-                                    ...prev,
-                                    provider: value
-                                  }))
-                                }
-                                placeholder={t("例如：doubao / glm / *", "e.g. doubao / glm / *")}
-                                clearable
-                              />
-                            </label>
-
-                            <label className="tc-field">
-                              <span>{t("上游真实模型匹配", "Upstream Real Model Pattern")}</span>
-                              <Input
-                                value={rule.upstreamModelPattern}
-                                onChange={(value) =>
-                                  updateCompatPromptRule(index, (prev) => ({
-                                    ...prev,
-                                    upstreamModelPattern: value
-                                  }))
-                                }
-                                placeholder={t(
-                                  "例如：doubao-seed-2.0-pro / glm-5 / *",
-                                  "e.g. doubao-seed-2.0-pro / glm-5 / *"
-                                )}
-                                clearable
-                              />
-                            </label>
-
-                            <label className="tc-field tc-field-wide">
-                              <span>{t("规则追加提示词", "Rule Extra Hint")}</span>
-                              <Textarea
-                                value={rule.hint}
-                                onChange={(value) =>
-                                  updateCompatPromptRule(index, (prev) => ({
-                                    ...prev,
-                                    hint: value
-                                  }))
-                                }
-                                autosize={{ minRows: 6, maxRows: 14 }}
-                                placeholder={t(
-                                  "请输入该模型命中时需要追加的提示词",
-                                  "Enter extra hint to append when this rule matches"
-                                )}
-                              />
-                            </label>
-
-                            <p className="tc-upstream-advice tc-field-wide">
-                              {t(
-                                "匹配建议：优先填写“上游真实模型匹配”，可搭配 provider 收敛范围。支持 `*`、`?` 通配。",
-                                "Matching tip: prioritize upstream real model pattern, then narrow with provider if needed. `*` and `?` wildcards are supported."
-                              )}
-                            </p>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  <div className="tc-actions-row">
-                    <Button
-                      variant="outline"
-                      theme="default"
-                      onClick={() => setShowCompatPromptRulesJsonEditor((prev) => !prev)}
-                    >
-                      {showCompatPromptRulesJsonEditor
-                        ? t("收起 JSON 批量编辑", "Hide JSON Bulk Editor")
-                        : t("展开 JSON 批量编辑", "Show JSON Bulk Editor")}
-                    </Button>
-                  </div>
-
-                  {showCompatPromptRulesJsonEditor ? (
-                    <>
-                      <div className="tc-form-grid">
-                        <label className="tc-field tc-field-wide">
-                          <span>{t("高级：模型规则 JSON", "Advanced: Model Rules JSON")}</span>
-                          <Textarea
-                            value={compatPromptRulesJsonInput}
-                            onChange={(value) => setCompatPromptRulesJsonInput(value)}
-                            autosize={{ minRows: 10, maxRows: 22 }}
-                            placeholder={t("可用于批量导入导出规则", "Use for bulk import/export of rules")}
-                          />
-                        </label>
-                      </div>
-                      <div className="tc-actions-row">
-                        <Button variant="outline" theme="default" onClick={exportCompatPromptRulesToJsonDraft}>
-                          {t("从当前规则生成 JSON", "Generate JSON from Rules")}
-                        </Button>
-                        <Button
-                          variant="outline"
-                          theme="default"
-                          onClick={() => importCompatPromptRulesFromJsonDraft("append")}
-                          disabled={compatPromptRuleCount >= 128}
-                        >
-                          {t("从 JSON 追加规则", "Append Rules from JSON")}
-                        </Button>
-                        <Button
-                          variant="outline"
-                          theme="default"
-                          onClick={() => importCompatPromptRulesFromJsonDraft("replace")}
-                        >
-                          {t("从 JSON 覆盖规则", "Replace Rules from JSON")}
-                        </Button>
-                      </div>
-                    </>
-                  ) : null}
-
-                  <div className="tc-actions-row">
-                    <Button
-                      theme="primary"
-                      loading={savingCompatPromptConfig}
-                      onClick={() => void saveGatewayCompatPromptConfig()}
-                      disabled={loading}
-                    >
-                      {t("保存提示词配置", "Save Prompt Config")}
-                    </Button>
-                    <Button
-                      variant="outline"
-                      theme="default"
-                      onClick={() => {
-                        if (!compatPromptDefaults) {
-                          return;
-                        }
-                        applyCompatPromptConfig(compatPromptDefaults);
-                      }}
-                      disabled={!compatPromptDefaults || savingCompatPromptConfig}
-                    >
-                      {t("恢复默认草稿", "Reset to Defaults")}
-                    </Button>
-                  </div>
-
-                  <p className="tc-tip">
-                    {t(
-                      "规则字段：provider / upstreamModelPattern 支持 `*`、`?` 通配；优先按上游真实模型命中。命中规则后将替换默认提示词。支持批量导入 `.json`（数组，或含 modelPromptRules/compatPromptConfig.modelPromptRules）。关键词用于定位 AGENTS.md 段落前的插入位置。",
-                      "Rule fields provider / upstreamModelPattern support `*` and `?` wildcards; matching prioritizes real upstream model. A matched rule replaces the default hint. Batch `.json` import is supported (array, or modelPromptRules/compatPromptConfig.modelPromptRules). Keywords still control where hints are injected before AGENTS.md sections."
-                    )}
-                  </p>
-                </section>
+                <SettingsPromptPanel
+                  t={t}
+                  compatPromptKeywordsInput={compatPromptKeywordsInput}
+                  setCompatPromptKeywordsInput={setCompatPromptKeywordsInput}
+                  compatPromptHintInput={compatPromptHintInput}
+                  setCompatPromptHintInput={setCompatPromptHintInput}
+                  compatPromptRuleCount={compatPromptRuleCount}
+                  compatPromptRuleEnabledCount={compatPromptRuleEnabledCount}
+                  compatPromptRuleSearch={compatPromptRuleSearch}
+                  setCompatPromptRuleSearch={setCompatPromptRuleSearch}
+                  addCompatPromptRule={addCompatPromptRule}
+                  openCompatPromptRulesFileImporter={openCompatPromptRulesFileImporter}
+                  compatPromptRulesFileInputRef={compatPromptRulesFileInputRef}
+                  handleCompatPromptRulesFileChange={handleCompatPromptRulesFileChange}
+                  compatPromptUpstreamModelSuggestions={compatPromptUpstreamModelSuggestions}
+                  compatPromptRuleVisibleItems={compatPromptRuleVisibleItems}
+                  duplicateCompatPromptRule={duplicateCompatPromptRule}
+                  removeCompatPromptRule={removeCompatPromptRule}
+                  updateCompatPromptRule={updateCompatPromptRule}
+                  setShowCompatPromptRulesJsonEditor={setShowCompatPromptRulesJsonEditor}
+                  showCompatPromptRulesJsonEditor={showCompatPromptRulesJsonEditor}
+                  compatPromptRulesJsonInput={compatPromptRulesJsonInput}
+                  setCompatPromptRulesJsonInput={setCompatPromptRulesJsonInput}
+                  exportCompatPromptRulesToJsonDraft={exportCompatPromptRulesToJsonDraft}
+                  importCompatPromptRulesFromJsonDraft={importCompatPromptRulesFromJsonDraft}
+                  savingCompatPromptConfig={savingCompatPromptConfig}
+                  saveGatewayCompatPromptConfig={saveGatewayCompatPromptConfig}
+                  loading={loading}
+                  compatPromptDefaults={compatPromptDefaults}
+                  applyCompatPromptConfig={applyCompatPromptConfig}
+                />
               ) : null}
 
               {routeModule === "export" ? (
-                <section className="tc-section">
-                  <h3>{t("配置导出与导入", "Export and Import")}</h3>
-                  <p className="tc-upstream-advice">
-                    {t(
-                      "这里集中展示 CC Switch 导入配置、原生 Codex 导出片段和 Claude Code 预览，不再和 Key 编辑表单混在一起。",
-                      "This page centralizes CC Switch import configs, native Codex export snippets, and Claude Code previews instead of mixing them into the key editor."
-                    )}
-                  </p>
-                  <p className="tc-tip">
-                    {t(
-                      "提示：CC Switch 当前 deep link 在 Codex/Claude 场景都可能丢失部分高级变量（例如 Codex 上下文窗口、Claude 上下文窗口/Thinking 变量）。导入后可点对应“补丁复制”按钮粘贴到 CC Switch 配置中。",
-                      "Tip: CC Switch deep link may drop advanced variables for Codex/Claude (for example Codex context window and Claude context-window/thinking variables). After import, use the patch-copy buttons and paste into CC Switch config."
-                    )}
-                  </p>
-
-                  <div className="tc-runtime-doc">
-                    <div className="tc-runtime-doc-head">
-                      <h4>{t("Codex auth.json 预览", "Codex auth.json Preview")}</h4>
-                      <Button
-                        variant="outline"
-                        theme="default"
-                        onClick={() => void copyCcSwitchCodexAuthJson()}
-                        disabled={loading || !keyForm.localKey.trim()}
-                      >
-                        {t("一键复制 auth.json（含密钥）", "Copy auth.json (with key)")}
-                      </Button>
-                    </div>
-                    <CodeBlock
-                      value={
-                        codexAuthJsonPreview ||
-                        t("请先填写本地 Key 后查看配置预览。", "Fill local key to preview config.")
-                      }
-                      language="json"
-                    />
-                    <p className="tc-upstream-advice">
-                      {t(
-                        "说明：这里对应 CC Switch 的 auth.json；预览与复制都会显示完整真实密钥。",
-                        "Note: This maps to CC Switch auth.json. Both preview and copy include the full real key."
-                      )}
-                    </p>
-                    <div className="tc-runtime-doc-head">
-                      <h4>{t("Codex config.toml 预览", "Codex config.toml Preview")}</h4>
-                      <Button
-                        variant="outline"
-                        theme="default"
-                        onClick={() => void copyCcSwitchCodexConfigToml()}
-                        disabled={loading || !keyForm.localKey.trim()}
-                      >
-                        {t("一键复制 config.toml", "Copy config.toml")}
-                      </Button>
-                    </div>
-                    <CodeBlock
-                      value={
-                        codexConfigTomlPreview ||
-                        t("请先填写本地 Key 后查看配置预览。", "Fill local key to preview config.")
-                      }
-                      language="toml"
-                    />
-
-                    <div className="tc-runtime-doc-head">
-                      <h4>{t("原生 Codex CLI 导出", "Native Codex CLI Export")}</h4>
-                      <Tag theme="primary" variant="light-outline">
-                        {t("推荐", "Recommended")}
-                      </Tag>
-                    </div>
-                    <Tabs
-                      value={nativeCodexApplyPatchToolType}
-                      size="medium"
-                      theme="card"
-                      onChange={(value) =>
-                        setNativeCodexApplyPatchToolType(
-                          normalizeSelectValue(value) as CodexApplyPatchToolType
-                        )
-                      }
-                    >
-                      <Tabs.TabPanel
-                        value="function"
-                        label={t("Function（推荐）", "Function (Recommended)")}
-                      />
-                      <Tabs.TabPanel value="freeform" label="Freeform" />
-                    </Tabs>
-                    <p className="tc-upstream-advice">
-                      {t(
-                        "说明：CC Switch 导入仍是旧流程。原生 Codex 要让第三方模型稳定支持 apply_patch，还需要同时配置 `model_catalog_json` 与 `model_instructions_file`；`AGENTS.md` 为可选工作区补充。",
-                        "Note: CC Switch import remains the legacy flow. Native Codex needs both `model_catalog_json` and `model_instructions_file` for stable third-party apply_patch support; `AGENTS.md` is an optional workspace supplement."
-                      )}
-                    </p>
-                    {nativeCodexExportBundle ? (
-                      <div className="tc-meta-row">
-                        <Tag theme="primary" variant="light-outline">
-                          {t("当前模型", "Selected Model")}: {nativeCodexExportBundle.selectedModel}
-                        </Tag>
-                        <Tag variant="light-outline">
-                          {t("导出模型数", "Exported Models")}: {nativeCodexExportBundle.exportedModels.length}
-                        </Tag>
-                        <Tag variant="light-outline">
-                          apply_patch: {nativeCodexExportBundle.applyPatchToolType}
-                        </Tag>
-                        {nativeCodexSelectedModelProfile &&
-                        shouldShowGlmThinkingThreshold(
-                          selectedKey?.provider ?? selectedChannelForKey?.provider ?? "openai",
-                          nativeCodexSelectedModelProfile.model
-                        ) ? (
-                          <Tag variant="light-outline">
-                            {t("GLM 深度思考", "GLM Deep Thinking")}:{" "}
-                            {formatGlmThinkingThresholdLabel(
-                              nativeCodexSelectedModelProfile.glmCodexThinkingThreshold
-                            )}
-                          </Tag>
-                        ) : null}
-                      </div>
-                    ) : null}
-                    {selectedKeyId !== null ? (
-                      <p className="tc-upstream-advice">
-                        {t(
-                          "已保存 Key 也可通过 `/api/keys/:id/codex-export` 获取相同导出结果。",
-                          "Saved keys can also fetch the same bundle from `/api/keys/:id/codex-export`."
-                        )}
-                      </p>
-                    ) : null}
-
-                    <div className="tc-runtime-doc-head">
-                      <h4>{t("~/.codex/.env 片段", "~/.codex/.env Snippet")}</h4>
-                      <Button
-                        variant="outline"
-                        theme="default"
-                        onClick={() =>
-                          void copyNativeCodexBundleFile(
-                            "envSnippet",
-                            t("原生 Codex .env 片段已复制。", "Native Codex .env snippet copied."),
-                            t("复制原生 Codex .env 片段失败", "Failed to copy native Codex .env snippet")
-                          )
-                        }
-                        disabled={loading || !nativeCodexExportBundle}
-                      >
-                        {t("复制 .env 片段", "Copy .env Snippet")}
-                      </Button>
-                    </div>
-                    <CodeBlock
-                      value={nativeCodexExportBundle?.files.envSnippet.content || nativeCodexEmptyState}
-                      language="dotenv"
-                    />
-                    <p className="tc-upstream-advice">
-                      {t("建议路径", "Suggested path")}:{" "}
-                      {nativeCodexExportBundle?.files.envSnippet.targetPath ?? "~/.codex/.env"}
-                    </p>
-
-                    <div className="tc-runtime-doc-head">
-                      <h4>{t("原生 Codex config.toml 片段", "Native Codex config.toml Snippet")}</h4>
-                      <Button
-                        variant="outline"
-                        theme="default"
-                        onClick={() =>
-                          void copyNativeCodexBundleFile(
-                            "configTomlSnippet",
-                            t("原生 Codex config.toml 片段已复制。", "Native Codex config.toml snippet copied."),
-                            t(
-                              "复制原生 Codex config.toml 片段失败",
-                              "Failed to copy native Codex config.toml snippet"
-                            )
-                          )
-                        }
-                        disabled={loading || !nativeCodexExportBundle}
-                      >
-                        {t("复制原生 config.toml", "Copy Native config.toml")}
-                      </Button>
-                    </div>
-                    <CodeBlock
-                      value={
-                        nativeCodexExportBundle?.files.configTomlSnippet.content || nativeCodexEmptyState
-                      }
-                      language="toml"
-                    />
-                    <p className="tc-upstream-advice">
-                      {t("建议路径", "Suggested path")}:{" "}
-                      {nativeCodexExportBundle?.files.configTomlSnippet.targetPath ?? "~/.codex/config.toml"}
-                    </p>
-
-                    <div className="tc-runtime-doc-head">
-                      <h4>{t("原生 Codex model_catalog_json", "Native Codex model_catalog_json")}</h4>
-                      <Button
-                        variant="outline"
-                        theme="default"
-                        onClick={() =>
-                          void copyNativeCodexBundleFile(
-                            "modelCatalogJson",
-                            t(
-                              "原生 Codex model_catalog_json 已复制。",
-                              "Native Codex model_catalog_json copied."
-                            ),
-                            t(
-                              "复制原生 Codex model_catalog_json 失败",
-                              "Failed to copy native Codex model_catalog_json"
-                            )
-                          )
-                        }
-                        disabled={loading || !nativeCodexExportBundle}
-                      >
-                        {t("复制 model_catalog_json", "Copy model_catalog_json")}
-                      </Button>
-                    </div>
-                    <CodeBlock
-                      value={
-                        nativeCodexExportBundle?.files.modelCatalogJson.content || nativeCodexEmptyState
-                      }
-                      language="json"
-                      maxHeight={260}
-                    />
-                    <p className="tc-upstream-advice">
-                      {t("建议路径", "Suggested path")}:{" "}
-                      {nativeCodexExportBundle?.files.modelCatalogJson.targetPath ??
-                        "~/.codex/codex-gateway-hub/export.catalog.json"}
-                    </p>
-
-                    <div className="tc-runtime-doc-head">
-                      <h4>{t("原生 Codex instructions", "Native Codex instructions")}</h4>
-                      <Button
-                        variant="outline"
-                        theme="default"
-                        onClick={() =>
-                          void copyNativeCodexBundleFile(
-                            "modelInstructionsMd",
-                            t("原生 Codex instructions 已复制。", "Native Codex instructions copied."),
-                            t(
-                              "复制原生 Codex instructions 失败",
-                              "Failed to copy native Codex instructions"
-                            )
-                          )
-                        }
-                        disabled={loading || !nativeCodexExportBundle}
-                      >
-                        {t("复制 instructions", "Copy instructions")}
-                      </Button>
-                    </div>
-                    <CodeBlock
-                      value={
-                        nativeCodexExportBundle?.files.modelInstructionsMd.content || nativeCodexEmptyState
-                      }
-                      language="markdown"
-                      maxHeight={260}
-                    />
-                    <p className="tc-upstream-advice">
-                      {t("建议路径", "Suggested path")}:{" "}
-                      {nativeCodexExportBundle?.files.modelInstructionsMd.targetPath ??
-                        "~/.codex/codex-gateway-hub/export.instructions.md"}
-                    </p>
-
-                    <div className="tc-runtime-doc-head">
-                      <h4>{t("可选 AGENTS.md", "Optional AGENTS.md")}</h4>
-                      <Button
-                        variant="outline"
-                        theme="default"
-                        onClick={() =>
-                          void copyNativeCodexBundleFile(
-                            "agentsMd",
-                            t("原生 Codex AGENTS.md 已复制。", "Native Codex AGENTS.md copied."),
-                            t("复制原生 Codex AGENTS.md 失败", "Failed to copy native Codex AGENTS.md")
-                          )
-                        }
-                        disabled={loading || !nativeCodexExportBundle}
-                      >
-                        {t("复制 AGENTS.md", "Copy AGENTS.md")}
-                      </Button>
-                    </div>
-                    <CodeBlock
-                      value={nativeCodexExportBundle?.files.agentsMd.content || nativeCodexEmptyState}
-                      language="markdown"
-                      maxHeight={260}
-                    />
-                    <p className="tc-upstream-advice">
-                      {t("建议路径", "Suggested path")}:{" "}
-                      {nativeCodexExportBundle?.files.agentsMd.targetPath ?? "./AGENTS.md"}
-                    </p>
-
-                    <div className="tc-runtime-doc-head">
-                      <h4>{t("Claude Code 配置预览（JSON）", "Claude Code Config Preview (JSON)")}</h4>
-                      <Button
-                        variant="outline"
-                        theme="default"
-                        onClick={() => void copyCcSwitchClaudeConfigJson()}
-                        disabled={loading || !keyForm.localKey.trim()}
-                      >
-                        {t("一键复制 Claude 配置（含密钥）", "Copy Claude Config (with key)")}
-                      </Button>
-                    </div>
-                    <CodeBlock
-                      value={
-                        claudeConfigPreview ||
-                        t("请先填写本地 Key 后查看配置预览。", "Fill local key to preview config.")
-                      }
-                      language="json"
-                      maxHeight={260}
-                    />
-                    <p className="tc-upstream-advice">
-                      {t(
-                        "说明：这里对应 CC Switch 的 Claude env 配置；预览与复制都会显示完整真实密钥。",
-                        "Note: This maps to CC Switch Claude env config. Both preview and copy include the full real key."
-                      )}
-                    </p>
-                  </div>
-
-                  <div className="tc-actions-row">
-                    <Button
-                      theme="primary"
-                      variant="outline"
-                      onClick={openCcSwitchCodexImport}
-                      disabled={loading || !keyForm.localKey.trim()}
-                    >
-                      {t("一键导入 CC Switch（Codex）", "One-click Import to CC Switch (Codex)")}
-                    </Button>
-                    <Button
-                      theme="primary"
-                      variant="outline"
-                      onClick={openCcSwitchClaudeImport}
-                      disabled={loading || !keyForm.localKey.trim()}
-                    >
-                      {t("一键导入 CC Switch（Claude Code）", "One-click Import to CC Switch (Claude Code)")}
-                    </Button>
-                    <Button
-                      variant="outline"
-                      theme="default"
-                      onClick={() => void copyCcSwitchCodexDeepLink()}
-                      disabled={loading || !keyForm.localKey.trim()}
-                    >
-                      {t("复制 Codex 导入链接", "Copy Codex Import Link")}
-                    </Button>
-                    <Button
-                      variant="outline"
-                      theme="default"
-                      onClick={() => void copyCcSwitchCodexContextPatch()}
-                      disabled={loading || !keyForm.localKey.trim()}
-                    >
-                      {t("复制 Codex 上下文补丁", "Copy Codex Context Patch")}
-                    </Button>
-                    <Button
-                      variant="outline"
-                      theme="default"
-                      onClick={() => void copyCcSwitchClaudeDeepLink()}
-                      disabled={loading || !keyForm.localKey.trim()}
-                    >
-                      {t("复制 Claude Code 导入链接", "Copy Claude Code Import Link")}
-                    </Button>
-                    <Button
-                      variant="outline"
-                      theme="default"
-                      onClick={() => void copyCcSwitchClaudeThinkingPatch()}
-                      disabled={loading || !keyForm.localKey.trim()}
-                    >
-                      {t("复制 Claude 上下文/Thinking 补丁", "Copy Claude Context/Thinking Patch")}
-                    </Button>
-                  </div>
-                </section>
+                <SettingsExportPanel
+                  t={t}
+                  copyCcSwitchCodexAuthJson={copyCcSwitchCodexAuthJson}
+                  loading={loading}
+                  keyForm={keyForm}
+                  codexAuthJsonPreview={codexAuthJsonPreview}
+                  copyCcSwitchCodexConfigToml={copyCcSwitchCodexConfigToml}
+                  codexConfigTomlPreview={codexConfigTomlPreview}
+                  nativeCodexApplyPatchToolType={nativeCodexApplyPatchToolType}
+                  setNativeCodexApplyPatchToolType={setNativeCodexApplyPatchToolType}
+                  normalizeSelectValue={normalizeSelectValue}
+                  nativeCodexExportBundle={nativeCodexExportBundle}
+                  nativeCodexSelectedModelProfile={nativeCodexSelectedModelProfile}
+                  selectedKey={selectedKey}
+                  selectedChannelForKey={selectedChannelForKey}
+                  formatGlmThinkingThresholdLabel={formatGlmThinkingThresholdLabel}
+                  selectedKeyId={selectedKeyId}
+                  copyNativeCodexBundleFile={copyNativeCodexBundleFile}
+                  nativeCodexEmptyState={nativeCodexEmptyState}
+                  copyCcSwitchClaudeConfigJson={copyCcSwitchClaudeConfigJson}
+                  claudeConfigPreview={claudeConfigPreview}
+                  openCcSwitchCodexImport={openCcSwitchCodexImport}
+                  openCcSwitchClaudeImport={openCcSwitchClaudeImport}
+                  copyCcSwitchCodexDeepLink={copyCcSwitchCodexDeepLink}
+                  copyCcSwitchCodexContextPatch={copyCcSwitchCodexContextPatch}
+                  copyCcSwitchClaudeDeepLink={copyCcSwitchClaudeDeepLink}
+                  copyCcSwitchClaudeThinkingPatch={copyCcSwitchClaudeThinkingPatch}
+                />
               ) : null}
 
               {routeModule === "upstream" ? (
-                <section className="tc-section">
-                  <h3>{t("上游渠道配置", "Upstream Configuration")}</h3>
-                  <p className="tc-upstream-advice">
-                    {t(
-                      "渠道独立管理，可配置多模型池、视觉兜底模型与单模型连通测试。以下仅提供套餐建议，不做强制预设。",
-                      "Manage upstreams independently with model pools, vision fallback, and per-model health checks. Suggestions only, no forced presets."
-                    )}
-                  </p>
-
-                  <div className="tc-upstream-toolbar">
-                    {CODING_PRESETS.map((preset) => (
-                      <Button
-                        key={preset.id}
-                        variant="outline"
-                        theme="default"
-                        onClick={() => applyCodingPreset(preset)}
-                      >
-                        {preset.label}
-                      </Button>
-                    ))}
-                    <Button theme="primary" variant="outline" onClick={addUpstreamModel}>
-                      {t("新增上游模型", "Add Upstream Model")}
-                    </Button>
-                    <Button
-                      variant="outline"
-                      theme="default"
-                      onClick={handleQuickExportModels}
-                      disabled={!channelForm.upstreamModels.length}
-                    >
-                      {t("导出模型池", "Export Model Pool")}
-                    </Button>
-                    <Button
-                      variant="outline"
-                      theme="default"
-                      onClick={handleQuickCopyModels}
-                      disabled={!channelForm.upstreamModels.length}
-                    >
-                      {t("复制模型池", "Copy Model Pool")}
-                    </Button>
-                    <Button
-                      variant="outline"
-                      theme="default"
-                      onClick={handleOpenQuickImportDialog}
-                    >
-                      {t("导入模型池", "Import Model Pool")}
-                    </Button>
-                  </div>
-
-                  <div className="tc-form-grid">
-                    <label className="tc-field">
-                      <span>{t("渠道名称", "Upstream Name")}</span>
-                      <Input
-                        value={channelForm.name}
-                        onChange={(value) => setChannelForm((prev) => ({ ...prev, name: value }))}
-                        placeholder={t("如：openai-主线路", "e.g. openai-main")}
-                        clearable
-                      />
-                    </label>
-
-                    <label className="tc-field">
-                      <span>{t("供应商", "Provider")}</span>
-                      <Select
-                        value={channelForm.provider}
-                        options={PROVIDERS.map((provider) => ({
-                          label: `${PROVIDER_META[provider].label} · ${PROVIDER_META[provider].tip}`,
-                          value: provider
-                        }))}
-                        onChange={(value) => applyProviderPreset(normalizeSelectValue(value) as ProviderName)}
-                      />
-                    </label>
-
-                    <label className="tc-field tc-field-wide">
-                      <span>{t("上游 Base URL", "Upstream Base URL")}</span>
-                      <Input
-                        value={channelForm.upstreamBaseUrl}
-                        onChange={(value) =>
-                          setChannelForm((prev) => ({ ...prev, upstreamBaseUrl: value }))
-                        }
-                        placeholder="https://api.openai.com"
-                        clearable
-                      />
-                    </label>
-
-                    <label className="tc-field tc-field-wide">
-                      <span>
-                        {t("上游 API Key", "Upstream API Key")}{" "}
-                        {selectedChannel?.hasUpstreamApiKey ? t("（已配置）", "(configured)") : t("（未配置）", "(not set)")}
-                      </span>
-                      <Input
-                        type="password"
-                        value={channelForm.upstreamApiKey}
-                        onChange={(value) =>
-                          setChannelForm((prev) => ({
-                            ...prev,
-                            upstreamApiKey: value,
-                            clearUpstreamApiKey: false
-                          }))
-                        }
-                        placeholder={isNewChannel ? t("请输入上游 Key", "Enter upstream API key") : t("留空表示不变", "Keep empty to keep unchanged")}
-                        clearable
-                      />
-                    </label>
-
-                    {!isNewChannel ? (
-                      <label className="tc-checkline">
-                        <Checkbox
-                          checked={channelForm.clearUpstreamApiKey}
-                          onChange={(checked) =>
-                            setChannelForm((prev) => ({
-                              ...prev,
-                              clearUpstreamApiKey: checked,
-                              upstreamApiKey: ""
-                            }))
-                          }
-                        >
-                          {t("清空渠道 API Key", "Clear Upstream API Key")}
-                        </Checkbox>
-                      </label>
-                    ) : null}
-
-                    <label className="tc-field">
-                      <span>{t("请求超时（毫秒）", "Request Timeout (ms)")}</span>
-                      <Input
-                        type="number"
-                        value={String(channelForm.timeoutMs)}
-                        onChange={(value) => {
-                          const n = Number(value);
-                          if (!Number.isNaN(n)) {
-                            setChannelForm((prev) => ({ ...prev, timeoutMs: n }));
-                          }
-                        }}
-                      />
-                    </label>
-
-                    <label className="tc-switchline">
-                      <span>{t("启用状态", "Enabled")}</span>
-                      <Switch
-                        value={channelForm.enabled}
-                        onChange={(value) =>
-                          setChannelForm((prev) => ({ ...prev, enabled: Boolean(value) }))
-                        }
-                      />
-                    </label>
-
-                    <label className="tc-field">
-                      <span>{t("默认模型", "Default Model")}</span>
-                      <Select
-                        value={channelForm.defaultModel}
-                        options={channelModelOptions}
-                        onChange={(value) => setChannelDefaultModel(normalizeSelectValue(value))}
-                      />
-                    </label>
-                  </div>
-
-                  <div className="tc-model-list-toolbar">
-                    <div className="tc-model-list-toolbar-left">
-                      <div className="tc-model-list-title">{t("模型池", "Model Pool")}</div>
-                      <Tag variant="light-outline">
-                        {t("当前", "Current")} {channelForm.upstreamModels.length} {t("个", "items")}
-                      </Tag>
-                    </div>
-                    <Button theme="primary" variant="outline" onClick={addUpstreamModel}>
-                      {t("继续添加模型", "Add Another Model")}
-                    </Button>
-                  </div>
-
-                  <div className="tc-model-list">
-                    {channelForm.upstreamModels.map((item, index) => (
-                      <div className="tc-model-item" key={item.id}>
-                        <div className="tc-model-head">
-                          <strong>{t("模型", "Model")} #{index + 1}</strong>
-                          <div className="tc-model-actions">
-                            <Button
-                              variant="outline"
-                              size="small"
-                              onClick={() => setChannelDefaultModel(item.model)}
-                              disabled={channelForm.defaultModel === item.model}
-                            >
-                              {channelForm.defaultModel === item.model ? t("当前默认", "Current Default") : t("设为默认", "Set Default")}
-                            </Button>
-                            <Button
-                              variant="outline"
-                              size="small"
-                              loading={testingUpstream && testingModelId === item.id}
-                              onClick={() => void testUpstreamModel(item)}
-                              disabled={savingChannel || loading}
-                            >
-                              {t("测试", "Test")}
-                            </Button>
-                            <Button
-                              theme="danger"
-                              variant="text"
-                              size="small"
-                              disabled={channelForm.upstreamModels.length <= 1}
-                              onClick={() => removeUpstreamModel(item.id)}
-                            >
-                              {t("删除", "Delete")}
-                            </Button>
-                          </div>
-                        </div>
-
-                        <div className="tc-form-grid">
-                          <label className="tc-field">
-                            <span>{t("展示名", "Display Name")}</span>
-                            <Input
-                              value={item.name}
-                              onChange={(value) =>
-                                updateUpstreamModel(item.id, (prev) => ({
-                                  ...prev,
-                                  name: value
-                                }))
-                              }
-                              clearable
-                            />
-                          </label>
-
-                          <label className="tc-field">
-                            <span>{t("对外模型名（别名）", "Public Model Name (Alias)")}</span>
-                            <Input
-                              value={item.aliasModel ?? ""}
-                              onChange={(value) =>
-                                updateUpstreamModel(item.id, (prev) => ({
-                                  ...prev,
-                                  aliasModel: value
-                                }))
-                              }
-                              placeholder={t("如：gpt-5.3-codex（可选）", "e.g. gpt-5.3-codex (optional)")}
-                              clearable
-                            />
-                          </label>
-
-                          <label className="tc-field">
-                            <span>{t("模型 ID", "Model ID")}</span>
-                            <Input
-                              value={item.model}
-                              onChange={(value) =>
-                                updateUpstreamModel(item.id, (prev) => ({
-                                  ...prev,
-                                  model: value
-                                }))
-                              }
-                              clearable
-                            />
-                          </label>
-
-                          <label className="tc-field">
-                            <span>{t("上下文长度（Token）", "Context Window (tokens)")}</span>
-                            <Input
-                              type="number"
-                              value={item.contextWindow ? String(item.contextWindow) : ""}
-                              onChange={(value) => {
-                                const normalized = value.trim();
-                                updateUpstreamModel(item.id, (prev) => {
-                                  if (!normalized) {
-                                    return {
-                                      ...prev,
-                                      contextWindow: null
-                                    };
-                                  }
-                                  const next = Number(normalized);
-                                  if (!Number.isFinite(next)) {
-                                    return prev;
-                                  }
-                                  return {
-                                    ...prev,
-                                    contextWindow: Math.floor(next)
-                                  };
-                                });
-                              }}
-                              placeholder={t("如：128000（可选）", "e.g. 128000 (optional)")}
-                              clearable
-                            />
-                          </label>
-
-                          <label className="tc-field">
-                            <span>{t("协议", "Wire API")}</span>
-                            <Select
-                              value={item.upstreamWireApi}
-                              options={UPSTREAM_WIRE_APIS.map((wireApi) => ({
-                                label: wireApi,
-                                value: wireApi
-                              }))}
-                              onChange={(value) =>
-                                updateUpstreamModel(item.id, (prev) => ({
-                                  ...prev,
-                                  upstreamWireApi: normalizeSelectValue(value) as UpstreamWireApi
-                                }))
-                              }
-                            />
-                          </label>
-
-                          {shouldShowGlmThinkingThreshold(
-                            channelForm.provider,
-                            item.model
-                          ) ? (
-                            <label className="tc-field">
-                              <span>
-                                {t(
-                                  "GLM 深度思考触发阈值",
-                                  "GLM Deep Thinking Threshold"
-                                )}
-                              </span>
-                              <Select
-                                value={item.glmCodexThinkingThreshold}
-                                options={GLM_CODEX_THINKING_THRESHOLDS.map((threshold) => ({
-                                  value: threshold,
-                                  label: formatGlmThinkingThresholdLabel(threshold)
-                                }))}
-                                onChange={(value) =>
-                                  updateUpstreamModel(item.id, (prev) => ({
-                                    ...prev,
-                                    glmCodexThinkingThreshold: normalizeGlmCodexThinkingThreshold(
-                                      normalizeSelectValue(value)
-                                    )
-                                  }))
-                                }
-                              />
-                            </label>
-                          ) : null}
-
-                          <label className="tc-switchline">
-                            <span>{t("启用模型", "Model Enabled")}</span>
-                            <Switch
-                              value={item.enabled}
-                              onChange={(value) =>
-                                updateUpstreamModel(item.id, (prev) => ({
-                                  ...prev,
-                                  enabled: Boolean(value)
-                                }))
-                              }
-                            />
-                          </label>
-
-                          {shouldShowGlmThinkingThreshold(
-                            channelForm.provider,
-                            item.model
-                          ) ? (
-                            <p className="tc-upstream-advice tc-field-wide">
-                              {t(
-                                "当 Codex 通过本模型请求 `reasoning_effort` 时，达到这里设置的力度才会自动映射为 GLM 的 `thinking.enabled`。`off` 表示永不自动开启；如果客户端显式发送 `thinking.type`，仍以客户端为准。",
-                                "When Codex sends `reasoning_effort` through this model, GLM `thinking.enabled` will only be auto-enabled once the request reaches this threshold. `off` disables auto-enable; explicit client `thinking.type` still wins."
-                              )}
-                            </p>
-                          ) : null}
-
-                          <label className="tc-switchline">
-                            <span>{t("主模型支持视觉", "Main Model Supports Vision")}</span>
-                            <Switch
-                              value={item.supportsVision}
-                              onChange={(value) =>
-                                updateUpstreamModel(item.id, (prev) => ({
-                                  ...prev,
-                                  supportsVision: Boolean(value),
-                                  visionChannelId: Boolean(value) ? null : prev.visionChannelId,
-                                  visionModel: Boolean(value) ? null : prev.visionModel
-                                }))
-                              }
-                            />
-                          </label>
-
-                          {!item.supportsVision ? (
-                            <>
-                              <p className="tc-upstream-advice tc-field-wide">
-                                {t(
-                                  "当前主模型不支持视觉。收到图片后会先调用下方辅助视觉渠道/模型做图片转文本，再回到本模型继续推理。",
-                                  "This main model has no native vision. Image input will be converted by fallback vision channel/model first, then fed back to this model."
-                                )}
-                              </p>
-                              <label className="tc-field">
-                                <span>{t("视觉渠道（可跨供应商）", "Vision Channel (cross-provider)")}</span>
-                                <Select
-                                  value={
-                                    item.visionChannelId
-                                      ? String(item.visionChannelId)
-                                      : "__self__"
-                                  }
-                                  options={visionChannelOptions}
-                                  onChange={(value) => {
-                                    const next = normalizeSelectValue(value);
-                                    updateUpstreamModel(item.id, (prev) => ({
-                                      ...prev,
-                                      visionChannelId:
-                                        next === "__self__" ? null : Number(next) || null
-                                    }));
-                                  }}
-                                />
-                              </label>
-
-                              <label className="tc-field">
-                                <span>{t("从视觉渠道选择模型", "Pick Model from Vision Channel")}</span>
-                                <Select
-                                  value={item.visionModel ?? undefined}
-                                  options={resolveVisionModelOptions(item)}
-                                  placeholder={t("可选，不填可手输", "Optional; leave empty to type manually")}
-                                  onChange={(value) =>
-                                    updateUpstreamModel(item.id, (prev) => ({
-                                      ...prev,
-                                      visionModel: normalizeSelectValue(value) || null
-                                    }))
-                                  }
-                                />
-                              </label>
-
-                              <label className="tc-field tc-field-wide">
-                                <span>{t("辅助视觉模型（跨模型图片转文本）", "Fallback Vision Model (cross-model image-to-text)")}</span>
-                                <Input
-                                  value={item.visionModel ?? ""}
-                                  onChange={(value) =>
-                                    updateUpstreamModel(item.id, (prev) => ({
-                                      ...prev,
-                                      visionModel: value
-                                    }))
-                                  }
-                                  placeholder={t("如：glm-4v / doubao-vision / gpt-4.1-mini", "e.g. glm-4v / doubao-vision / gpt-4.1-mini")}
-                                  clearable
-                                />
-                              </label>
-                            </>
-                          ) : null}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-
-                  <div className="tc-form-grid">
-                    <label className="tc-field tc-field-wide">
-                      <span>{t("上游测试提示词", "Upstream Test Prompt")}</span>
-                      <Input
-                        value={testPrompt}
-                        onChange={(value) => setTestPrompt(value)}
-                        placeholder={t("如：请只回复 upstream_test_ok", "e.g. Reply only: upstream_test_ok")}
-                        clearable
-                      />
-                    </label>
-                  </div>
-
-                  <div className="tc-actions-row">
-                    <Button
-                      variant="outline"
-                      theme="default"
-                      loading={testingUpstream && testingModelId === null}
-                      onClick={() => void testUpstreamModel()}
-                      disabled={savingChannel || loading}
-                    >
-                      {t("测试默认模型", "Test Default Model")}
-                    </Button>
-                  </div>
-                </section>
+                <SettingsUpstreamPanel
+                  t={t}
+                  applyCodingPreset={applyCodingPreset}
+                  addUpstreamModel={addUpstreamModel}
+                  handleQuickExportModels={handleQuickExportModels}
+                  handleQuickCopyModels={handleQuickCopyModels}
+                  handleOpenQuickImportDialog={handleOpenQuickImportDialog}
+                  channelForm={channelForm}
+                  setChannelForm={setChannelForm}
+                  applyProviderPreset={applyProviderPreset}
+                  normalizeSelectValue={normalizeSelectValue}
+                  selectedChannel={selectedChannel}
+                  isNewChannel={isNewChannel}
+                  setChannelDefaultModel={setChannelDefaultModel}
+                  channelModelOptions={channelModelOptions}
+                  updateUpstreamModel={updateUpstreamModel}
+                  formatGlmThinkingThresholdLabel={formatGlmThinkingThresholdLabel}
+                  removeUpstreamModel={removeUpstreamModel}
+                  testingUpstream={testingUpstream}
+                  testingModelId={testingModelId}
+                  testUpstreamModel={testUpstreamModel}
+                  savingChannel={savingChannel}
+                  loading={loading}
+                  visionChannelOptions={visionChannelOptions}
+                  resolveVisionModelOptions={resolveVisionModelOptions}
+                  testPrompt={testPrompt}
+                  setTestPrompt={setTestPrompt}
+                />
               ) : null}
 
               {routeModule === "logs" ? (
-                <section className="tc-section">
-                  <h3>{t("接口访问日志", "API Access Logs")}</h3>
-                  <p className="tc-upstream-advice">
-                    {t(
-                      "按时间倒序展示网关收到的请求与返回结果。敏感字段已自动脱敏。",
-                      "Shows gateway requests/responses in reverse chronological order. Sensitive fields are redacted."
-                    )}
-                  </p>
-
-                  <div className="tc-log-toolbar">
-                    <div className="tc-log-toolbar-group">
-                      <label className="tc-switchline">
-                        <span>{t("自动刷新（3秒）", "Auto Refresh (3s)")}</span>
-                        <Switch
-                          value={autoRefreshLogs}
-                          onChange={(value) => setAutoRefreshLogs(Boolean(value))}
-                        />
-                      </label>
-                    </div>
-                    <div className="tc-log-toolbar-group">
-                      <label className="tc-field">
-                        <span>{t("拉取条数", "Fetch Limit")}</span>
-                        <Select
-                          value={String(logLimit)}
-                          options={[
-                            { label: "50 条", value: "50" },
-                            { label: "100 条", value: "100" },
-                            { label: "200 条", value: "200" },
-                            { label: "500 条", value: "500" }
-                          ]}
-                          style={{ width: 140 }}
-                          onChange={(value) => {
-                            const next = Number(normalizeSelectValue(value));
-                            if (Number.isFinite(next)) {
-                              setLogLimit(next);
-                            }
-                          }}
-                        />
-                      </label>
-                    </div>
-                    <div className="tc-log-toolbar-group tc-log-toolbar-actions">
-                      <Button
-                        variant="outline"
-                        theme="danger"
-                        onClick={() => void clearApiLogs()}
-                        disabled={loadingLogs}
-                      >
-                        {t("清空日志", "Clear Logs")}
-                      </Button>
-                    </div>
-                  </div>
-
-                  {apiLogs.length === 0 ? (
-                    <p className="tc-upstream-advice">{t("暂无日志。先调用一次接口后再查看。", "No logs yet. Send one request first.")}</p>
-                  ) : (
-                    <div className="tc-log-list">
-                      {apiLogs.map((item) => (
-                        <article
-                          className={`tc-log-item tc-log-item-${statusClassName(item.status)}`}
-                          key={`${item.id}-${item.createdAt}`}
-                        >
-                          <div className="tc-log-head">
-                            <div className="tc-log-head-main">
-                              <div className="tc-log-tags">
-                                <Tag theme={statusTheme(item.status)} variant="light-outline">
-                                  {item.status ?? "ERROR"}
-                                </Tag>
-                                <Tag variant="light-outline">{item.method}</Tag>
-                                <Tag variant="light-outline">{item.route}</Tag>
-                                <Tag variant="light-outline">{item.elapsedMs}ms</Tag>
-                              </div>
-                              <span className="tc-log-time">{formatCnDate(item.createdAt)}</span>
-                            </div>
-                            <div className="tc-log-subline">
-                              <code className="tc-log-path">{item.path}</code>
-                              <span className="tc-log-id">req#{item.id}</span>
-                            </div>
-                          </div>
-                          <div className="tc-log-panels">
-                            <div className="tc-log-panel">
-                              <strong>{t("请求体", "Request Body")}</strong>
-                              <JsonViewer value={item.requestBody} />
-                            </div>
-                            <div className={`tc-log-panel${item.error ? " tc-log-panel-error" : ""}`}>
-                              <strong>{item.error ? t("错误", "Error") : t("响应体", "Response Body")}</strong>
-                              <JsonViewer value={item.error ? item.error : item.responseBody} />
-                            </div>
-                          </div>
-                          <details className="tc-log-detail">
-                            <summary>{t("展开请求/响应头", "Expand Request/Response Headers")}</summary>
-                            <div className="tc-log-panels">
-                              <div className="tc-log-panel">
-                                <strong>{t("请求头", "Request Headers")}</strong>
-                                <JsonViewer value={item.requestHeaders} />
-                              </div>
-                              <div className="tc-log-panel">
-                                <strong>{t("响应头", "Response Headers")}</strong>
-                                <JsonViewer value={item.responseHeaders} />
-                              </div>
-                            </div>
-                          </details>
-                        </article>
-                      ))}
-                    </div>
-                  )}
-                </section>
+                <SettingsLogsPanel
+                  t={t}
+                  autoRefreshLogs={autoRefreshLogs}
+                  setAutoRefreshLogs={setAutoRefreshLogs}
+                  logLimit={logLimit}
+                  setLogLimit={setLogLimit}
+                  normalizeSelectValue={normalizeSelectValue}
+                  clearApiLogs={clearApiLogs}
+                  loadingLogs={loadingLogs}
+                  apiLogs={apiLogs}
+                  statusClassName={statusClassName}
+                  statusTheme={statusTheme}
+                />
               ) : null}
 
               {routeModule === "calls" ? (
-                <section className="tc-section">
-                  <h3>{t("AI 调用日志", "AI Call Logs")}</h3>
-                  <p className="tc-upstream-advice">
-                    {t(
-                      "展示系统提示词、用户提问、模型回答，以及真实上游模型（实际调用模型）信息。支持 Key、时间范围、关键词、请求路由/协议、请求模型、客户端模型、真实模型、流式模式、调用类型等组合筛选，并可单独统计跨模型辅助视觉调用。",
-                      "Shows system prompt, user question, assistant response, and the real upstream model. Supports combined filters by key, time range, keyword, route/APIs, requested/client/upstream model, stream mode, and call type, plus dedicated vision-fallback stats."
-                    )}
-                  </p>
-
-                  <div className="tc-log-toolbar">
-                    <div className="tc-log-toolbar-group">
-                      <label className="tc-switchline">
-                        <span>{t("自动刷新（8秒）", "Auto Refresh (8s)")}</span>
-                        <Switch
-                          value={autoRefreshAiCallLogs}
-                          onChange={(value) => setAutoRefreshAiCallLogs(Boolean(value))}
-                        />
-                      </label>
-                    </div>
-                    <div className="tc-log-toolbar-group">
-                      <label className="tc-field">
-                        <span>{t("拉取条数", "Fetch Limit")}</span>
-                        <Select
-                          value={String(aiCallLogLimit)}
-                          options={[
-                            { label: "50 条", value: "50" },
-                            { label: "100 条", value: "100" },
-                            { label: "200 条", value: "200" },
-                            { label: "500 条", value: "500" }
-                          ]}
-                          style={{ width: 140 }}
-                          onChange={(value) => {
-                            const next = Number(normalizeSelectValue(value));
-                            if (Number.isFinite(next)) {
-                              setAiCallLogLimit(next);
-                            }
-                          }}
-                        />
-                      </label>
-                    </div>
-                    <div className="tc-log-toolbar-group">
-                      <label className="tc-field">
-                        <span>{t("筛选 Key", "Filter Key")}</span>
-                        <Select
-                          value={aiCallKeyFilter ? String(aiCallKeyFilter) : "__all__"}
-                          options={aiCallKeyOptions}
-                          style={{ width: 220 }}
-                          onChange={(value) => {
-                            const next = normalizeSelectValue(value);
-                            if (next === "__all__") {
-                              setAiCallKeyFilter(null);
-                              return;
-                            }
-                            const id = Number(next);
-                            if (Number.isFinite(id) && id > 0) {
-                              setAiCallKeyFilter(id);
-                            }
-                          }}
-                        />
-                      </label>
-                    </div>
-                    <div className="tc-log-toolbar-group">
-                      <label className="tc-field">
-                        <span>{t("筛选真实模型", "Filter Upstream Model")}</span>
-                        <Select
-                          value={aiCallModelFilter || "__all__"}
-                          options={aiCallModelSelectOptions}
-                          style={{ width: 280 }}
-                          onChange={(value) => {
-                            const next = normalizeSelectValue(value);
-                            setAiCallModelFilter(next === "__all__" ? "" : next);
-                          }}
-                        />
-                      </label>
-                    </div>
-                    <div className="tc-log-toolbar-group">
-                      <label className="tc-field">
-                        <span>{t("调用类型", "Call Type")}</span>
-                        <Select
-                          value={aiCallTypeFilter || "__all__"}
-                          options={aiCallTypeOptions}
-                          style={{ width: 180 }}
-                          onChange={(value) => {
-                            const next = normalizeSelectValue(value);
-                            if (next === "__all__") {
-                              setAiCallTypeFilter("");
-                              return;
-                            }
-                            if (next === "main" || next === "vision_fallback") {
-                              setAiCallTypeFilter(next);
-                            }
-                          }}
-                        />
-                      </label>
-                    </div>
-                  </div>
-
-                  <div className="tc-log-toolbar tc-log-toolbar-detail">
-                    <div className="tc-log-toolbar-group">
-                      <label className="tc-field">
-                        <span>{t("时间范围", "Time Range")}</span>
-                        <DateRangePicker
-                          enableTimePicker
-                          clearable
-                          valueType="YYYY-MM-DD HH:mm:ss"
-                          format="YYYY-MM-DD HH:mm:ss"
-                          value={aiCallDateRange}
-                          placeholder={[t("开始时间", "Start time"), t("结束时间", "End time")]}
-                          style={{ width: 340 }}
-                          onChange={(value) => {
-                            if (!Array.isArray(value)) {
-                              setAiCallDateRange([]);
-                              return;
-                            }
-                            const next = value.map((item) => String(item ?? "").trim());
-                            if (next.length === 2 && next[0] && next[1]) {
-                              setAiCallDateRange([next[0], next[1]]);
-                              return;
-                            }
-                            setAiCallDateRange([]);
-                          }}
-                        />
-                      </label>
-                    </div>
-                    <div className="tc-log-toolbar-group tc-log-range-buttons">
-                      {AI_CALL_RANGE_OPTIONS.map((item) => (
-                        <Button
-                          key={`call-range-${item.minutes}`}
-                          size="small"
-                          variant="outline"
-                          onClick={() => applyAiCallQuickRange(item.minutes)}
-                        >
-                          {item.label}
-                        </Button>
-                      ))}
-                      {hasCustomAiCallDateRange ? (
-                        <Button size="small" variant="outline" onClick={() => setAiCallDateRange([])}>
-                          {t("清除时间", "Clear Time")}
-                        </Button>
-                      ) : null}
-                    </div>
-                    <div className="tc-log-toolbar-group tc-log-field-wide">
-                      <label className="tc-field">
-                        <span>{t("关键词", "Keyword")}</span>
-                        <Input
-                          value={aiCallKeywordFilter}
-                          onChange={(value) => setAiCallKeywordFilter(value)}
-                          placeholder={t("搜索提示词、回答、模型、Key", "Search prompts, response, models, key")}
-                          clearable
-                        />
-                      </label>
-                    </div>
-                    <div className="tc-log-toolbar-group">
-                      <label className="tc-field">
-                        <span>{t("路由", "Route")}</span>
-                        <Select
-                          value={aiCallRouteFilter || "__all__"}
-                          options={aiCallRouteOptions}
-                          style={{ width: 180 }}
-                          onChange={(value) => {
-                            const next = normalizeSelectValue(value);
-                            setAiCallRouteFilter(next === "__all__" ? "" : next);
-                          }}
-                        />
-                      </label>
-                    </div>
-                    <div className="tc-log-toolbar-group">
-                      <label className="tc-field">
-                        <span>{t("请求协议", "Request API")}</span>
-                        <Select
-                          value={aiCallRequestWireFilter || "__all__"}
-                          options={aiCallRequestWireOptions}
-                          style={{ width: 190 }}
-                          onChange={(value) => {
-                            const next = normalizeSelectValue(value);
-                            setAiCallRequestWireFilter(next === "__all__" ? "" : next);
-                          }}
-                        />
-                      </label>
-                    </div>
-                    <div className="tc-log-toolbar-group">
-                      <label className="tc-field">
-                        <span>{t("上游协议", "Upstream API")}</span>
-                        <Select
-                          value={aiCallUpstreamWireFilter || "__all__"}
-                          options={aiCallUpstreamWireOptions}
-                          style={{ width: 190 }}
-                          onChange={(value) => {
-                            const next = normalizeSelectValue(value);
-                            setAiCallUpstreamWireFilter(next === "__all__" ? "" : next);
-                          }}
-                        />
-                      </label>
-                    </div>
-                    <div className="tc-log-toolbar-group">
-                      <label className="tc-field">
-                        <span>{t("请求模型", "Requested Model")}</span>
-                        <Select
-                          value={aiCallRequestedModelFilter || "__all__"}
-                          options={aiCallRequestedModelOptions}
-                          style={{ width: 220 }}
-                          onChange={(value) => {
-                            const next = normalizeSelectValue(value);
-                            setAiCallRequestedModelFilter(next === "__all__" ? "" : next);
-                          }}
-                        />
-                      </label>
-                    </div>
-                    <div className="tc-log-toolbar-group">
-                      <label className="tc-field">
-                        <span>{t("客户端模型", "Client Model")}</span>
-                        <Select
-                          value={aiCallClientModelFilter || "__all__"}
-                          options={aiCallClientModelOptions}
-                          style={{ width: 220 }}
-                          onChange={(value) => {
-                            const next = normalizeSelectValue(value);
-                            setAiCallClientModelFilter(next === "__all__" ? "" : next);
-                          }}
-                        />
-                      </label>
-                    </div>
-                    <div className="tc-log-toolbar-group">
-                      <label className="tc-field">
-                        <span>{t("流式模式", "Stream Mode")}</span>
-                        <Select
-                          value={aiCallStreamFilter || "__all__"}
-                          options={aiCallStreamOptions}
-                          style={{ width: 170 }}
-                          onChange={(value) => {
-                            const next = normalizeSelectValue(value);
-                            if (next === "__all__") {
-                              setAiCallStreamFilter("");
-                              return;
-                            }
-                            if (next === "stream" || next === "non_stream") {
-                              setAiCallStreamFilter(next);
-                            }
-                          }}
-                        />
-                      </label>
-                    </div>
-                    <div className="tc-log-toolbar-group tc-log-toolbar-actions">
-                      <Button
-                        variant="outline"
-                        onClick={expandVisibleAiCallLogs}
-                        disabled={aiCallLogs.length === 0}
-                      >
-                        {t("展开全部", "Expand All")}
-                      </Button>
-                      <Button
-                        variant="outline"
-                        onClick={collapseVisibleAiCallLogs}
-                        disabled={expandedAiCallLogIds.length === 0}
-                      >
-                        {t("收起全部", "Collapse All")}
-                      </Button>
-                      <Button variant="outline" onClick={resetAiCallFilters}>
-                        {t("重置筛选", "Reset Filters")}
-                      </Button>
-                      <Button
-                        variant="outline"
-                        theme="danger"
-                        onClick={() => void clearAiCallLogs()}
-                        disabled={loadingAiCallLogs}
-                      >
-                        {t("清空日志", "Clear Logs")}
-                      </Button>
-                    </div>
-                  </div>
-
-                  <div className="tc-meta-row">
-                    <Tag variant="light-outline">匹配调用={aiCallStats.matched}</Tag>
-                    <Tag variant="light-outline">主调用={aiCallStats.main}</Tag>
-                    <Tag theme="warning" variant="light-outline">
-                      辅助视觉={aiCallStats.visionFallback}
-                    </Tag>
-                    {aiCallStats.visionByModel.slice(0, 5).map((item) => (
-                      <Tag key={`vision-model-${item.model}`} theme="primary" variant="light-outline">
-                        视觉模型 {item.model} · {item.count}
-                      </Tag>
-                    ))}
-                    {aiCallStats.visionByKey.slice(0, 3).map((item) => (
-                      <Tag key={`vision-key-${item.keyId}`} variant="light-outline">
-                        视觉 Key {item.keyName} · {item.count}
-                      </Tag>
-                    ))}
-                    {hasCustomAiCallDateRange ? (
-                      <Tag theme="primary" variant="light-outline">
-                        {t("范围", "Range")}={aiCallDateRange[0]} ~ {aiCallDateRange[1]}
-                      </Tag>
-                    ) : null}
-                    {aiCallKeywordFilter.trim() ? (
-                      <Tag theme="primary" variant="light-outline">
-                        {t("关键词", "Keyword")}=
-                        {aiCallKeywordFilter.trim().slice(0, 24)}
-                        {aiCallKeywordFilter.trim().length > 24 ? "..." : ""}
-                      </Tag>
-                    ) : null}
-                  </div>
-
-                  {deferredAiCallLogs.length === 0 ? (
-                    <p className="tc-upstream-advice">{t("暂无 AI 调用日志。先发起一次模型请求后再查看。", "No AI call logs yet. Send one model request first.")}</p>
-                  ) : (
-                    <div className="tc-log-list">
-                      {deferredAiCallLogs.map((item) => {
-                        const assistantReasoning = item.assistantReasoning?.trim() || "";
-                        const assistantResponse = item.assistantResponse?.trim() || "";
-                        const displayAssistantResponse =
-                          assistantReasoning && assistantReasoning === assistantResponse
-                            ? ""
-                            : item.assistantResponse || "";
-                        const expanded = expandedAiCallLogIdSet.has(item.id);
-                        const previewText = summarizeLogPreview(
-                          displayAssistantResponse,
-                          assistantReasoning,
-                          item.userPrompt || "",
-                          item.conversationTranscript || ""
-                        );
-
-                        return (
-                          <article className="tc-log-item tc-log-item-ok" key={`${item.id}-${item.createdAt}`}>
-                          <div className="tc-log-head">
-                            <div className="tc-log-head-main">
-                              <div className="tc-log-tags">
-                                <Tag theme="success" variant="light-outline">
-                                  OK
-                                </Tag>
-                                <Tag
-                                  theme={item.callType === "vision_fallback" ? "warning" : "primary"}
-                                  variant="light-outline"
-                                >
-                                  {item.callType === "vision_fallback" ? "辅助视觉" : "主调用"}
-                                </Tag>
-                                <Tag variant="light-outline">{item.route}</Tag>
-                                <Tag variant="light-outline">key={item.keyName}</Tag>
-                                <Tag variant="light-outline">
-                                  真实模型={item.upstreamModel}
-                                </Tag>
-                                <Tag variant="light-outline">客户端模型={item.clientModel}</Tag>
-                                <Tag variant="light-outline">请求模型={item.requestedModel}</Tag>
-                                <Tag variant="light-outline">
-                                  {item.stream ? "stream" : "non-stream"}
-                                </Tag>
-                              </div>
-                              <div className="tc-log-head-actions">
-                                <span className="tc-log-time">{formatCnDate(item.createdAt)}</span>
-                                <Button
-                                  size="small"
-                                  variant="text"
-                                  onClick={() => toggleAiCallLogExpanded(item.id)}
-                                >
-                                  {expanded ? t("收起详情", "Collapse") : t("展开详情", "Expand")}
-                                </Button>
-                              </div>
-                            </div>
-                            <div className="tc-log-subline">
-                              <code className="tc-log-path">
-                                request={item.requestWireApi} · upstream={item.upstreamWireApi}
-                              </code>
-                              <span className="tc-log-id">log#{item.id}</span>
-                            </div>
-                          </div>
-                          {expanded ? (
-                            <>
-                              {item.conversationTranscript?.trim() ? (
-                                <div className="tc-log-panels">
-                                  <div className="tc-log-panel tc-log-panel-full">
-                                    <strong>完整上下文</strong>
-                                    <MarkdownLogBlock value={item.conversationTranscript} />
-                                  </div>
-                                </div>
-                              ) : null}
-                              <div className="tc-log-panels">
-                                <div className="tc-log-panel">
-                                  <strong>系统提示词</strong>
-                                  <MarkdownLogBlock value={item.systemPrompt || ""} />
-                                </div>
-                                <div className="tc-log-panel">
-                                  <strong>用户提问</strong>
-                                  <MarkdownLogBlock value={item.userPrompt || ""} />
-                                </div>
-                              </div>
-                              {assistantReasoning ? (
-                                <div className="tc-log-panels">
-                                  <div className="tc-log-panel tc-log-panel-full">
-                                    <strong>{t("深度思考", "Deep Thinking")}</strong>
-                                    <MarkdownLogBlock value={assistantReasoning} />
-                                  </div>
-                                </div>
-                              ) : null}
-                              {Array.isArray(item.images) && item.images.length > 0 ? (
-                                <div className="tc-log-panels">
-                                  <div className="tc-log-panel tc-log-panel-full">
-                                    <strong>图片快照</strong>
-                                    <div className="tc-log-image-grid">
-                                      {item.images.map((image, idx) => (
-                                        <article
-                                          className="tc-log-image-card"
-                                          key={`${item.id}-image-${idx}-${image.savedUrl ?? image.source}`}
-                                        >
-                                          {image.savedUrl ? (
-                                            <button
-                                              type="button"
-                                              className="tc-log-image-zoom-btn"
-                                              onClick={() =>
-                                                setPreviewImage({
-                                                  url: image.savedUrl!,
-                                                  title: `log#${item.id} · 图片 ${idx + 1}`
-                                                })
-                                              }
-                                            >
-                                              <img
-                                                src={image.savedUrl}
-                                                alt={`log-${item.id}-image-${idx + 1}`}
-                                                className="tc-log-image-thumb"
-                                                loading="lazy"
-                                              />
-                                            </button>
-                                          ) : (
-                                            <div className="tc-log-image-missing">图片保存失败</div>
-                                          )}
-                                          <div className="tc-log-image-meta">
-                                            <span>来源：{image.sourceType}</span>
-                                            <span>地址：{image.source}</span>
-                                            <span>类型：{image.mimeType || "-"}</span>
-                                            <span>
-                                              大小：
-                                              {typeof image.sizeBytes === "number"
-                                                ? `${formatNumber(image.sizeBytes)} bytes`
-                                                : "-"}
-                                            </span>
-                                            {image.error ? <span className="tc-log-image-error">{image.error}</span> : null}
-                                          </div>
-                                        </article>
-                                      ))}
-                                    </div>
-                                  </div>
-                                </div>
-                              ) : null}
-                              {displayAssistantResponse ? (
-                                <div className="tc-log-panels">
-                                  <div className="tc-log-panel tc-log-panel-full">
-                                    <strong>模型回答</strong>
-                                    <MarkdownLogBlock value={displayAssistantResponse} />
-                                  </div>
-                                </div>
-                              ) : null}
-                            </>
-                          ) : (
-                            <div className="tc-log-preview">
-                              {previewText || t("详情已折叠，点击“展开详情”查看完整日志。", "Details collapsed. Click Expand to render the full log.")}
-                            </div>
-                          )}
-                          </article>
-                        );
-                      })}
-                    </div>
-                  )}
-                </section>
+                <SettingsCallsPanel
+                  t={t}
+                  autoRefreshAiCallLogs={autoRefreshAiCallLogs}
+                  setAutoRefreshAiCallLogs={setAutoRefreshAiCallLogs}
+                  aiCallLogLimit={aiCallLogLimit}
+                  setAiCallLogLimit={setAiCallLogLimit}
+                  normalizeSelectValue={normalizeSelectValue}
+                  aiCallKeyFilter={aiCallKeyFilter}
+                  aiCallKeyOptions={aiCallKeyOptions}
+                  setAiCallKeyFilter={setAiCallKeyFilter}
+                  aiCallModelFilter={aiCallModelFilter}
+                  aiCallModelSelectOptions={aiCallModelSelectOptions}
+                  setAiCallModelFilter={setAiCallModelFilter}
+                  aiCallTypeFilter={aiCallTypeFilter}
+                  aiCallTypeOptions={aiCallTypeOptions}
+                  setAiCallTypeFilter={setAiCallTypeFilter}
+                  aiCallDateRange={aiCallDateRange}
+                  setAiCallDateRange={setAiCallDateRange}
+                  aiCallKeywordFilter={aiCallKeywordFilter}
+                  setAiCallKeywordFilter={setAiCallKeywordFilter}
+                  aiCallRouteFilter={aiCallRouteFilter}
+                  aiCallRouteOptions={aiCallRouteOptions}
+                  setAiCallRouteFilter={setAiCallRouteFilter}
+                  aiCallRequestWireFilter={aiCallRequestWireFilter}
+                  aiCallRequestWireOptions={aiCallRequestWireOptions}
+                  setAiCallRequestWireFilter={setAiCallRequestWireFilter}
+                  aiCallUpstreamWireFilter={aiCallUpstreamWireFilter}
+                  aiCallUpstreamWireOptions={aiCallUpstreamWireOptions}
+                  setAiCallUpstreamWireFilter={setAiCallUpstreamWireFilter}
+                  aiCallRequestedModelFilter={aiCallRequestedModelFilter}
+                  aiCallRequestedModelOptions={aiCallRequestedModelOptions}
+                  setAiCallRequestedModelFilter={setAiCallRequestedModelFilter}
+                  aiCallClientModelFilter={aiCallClientModelFilter}
+                  aiCallClientModelOptions={aiCallClientModelOptions}
+                  setAiCallClientModelFilter={setAiCallClientModelFilter}
+                  aiCallStreamFilter={aiCallStreamFilter}
+                  aiCallStreamOptions={aiCallStreamOptions}
+                  setAiCallStreamFilter={setAiCallStreamFilter}
+                  applyAiCallQuickRange={applyAiCallQuickRange}
+                  hasCustomAiCallDateRange={hasCustomAiCallDateRange}
+                  expandVisibleAiCallLogs={expandVisibleAiCallLogs}
+                  collapseVisibleAiCallLogs={collapseVisibleAiCallLogs}
+                  expandedAiCallLogIds={expandedAiCallLogIds}
+                  resetAiCallFilters={resetAiCallFilters}
+                  clearAiCallLogs={clearAiCallLogs}
+                  loadingAiCallLogs={loadingAiCallLogs}
+                  aiCallStats={aiCallStats}
+                  deferredAiCallLogs={deferredAiCallLogs}
+                  expandedAiCallLogIdSet={expandedAiCallLogIdSet}
+                  toggleAiCallLogExpanded={toggleAiCallLogExpanded}
+                  setPreviewImage={setPreviewImage}
+                />
               ) : null}
 
               {routeModule === "usage" ? (
-                <section className="tc-section">
-                  <h3>{t("Token 用量统计报表", "Token Usage Report")}</h3>
-                  <p className="tc-upstream-advice">
-                    {t(
-                      "按分钟聚合展示每个本地 Key 与模型的 token 用量，支持自动刷新和按 Key 筛选。",
-                      "Shows per-minute aggregated token usage by local key and model. Supports auto refresh and key filter."
-                    )}
-                  </p>
-
-                  <div className="tc-usage-toolbar">
-                    <div className="tc-usage-range">
-                      <span>时间范围</span>
-                      <div className="tc-usage-range-buttons">
-                        {USAGE_RANGE_OPTIONS.map((item) => (
-                          <Button
-                            key={`usage-range-${item.minutes}`}
-                            size="small"
-                            theme={!hasCustomUsageDateRange && usageMinutes === item.minutes ? "primary" : "default"}
-                            variant={!hasCustomUsageDateRange && usageMinutes === item.minutes ? "base" : "outline"}
-                            onClick={() => {
-                              setUsageMinutes(item.minutes);
-                              setUsageDateRange([]);
-                            }}
-                          >
-                            {item.label}
-                          </Button>
-                        ))}
-                        {hasCustomUsageDateRange ? (
-                          <Button size="small" variant="outline" onClick={() => setUsageDateRange([])}>
-                            清除自由日期
-                          </Button>
-                        ) : null}
-                      </div>
-                    </div>
-
-                    <label className="tc-switchline">
-                      <span>自动刷新（5秒）</span>
-                      <Switch
-                        value={autoRefreshUsage}
-                        onChange={(value) => setAutoRefreshUsage(Boolean(value))}
-                      />
-                    </label>
-
-                    <label className="tc-field">
-                      <span>统计窗口</span>
-                      <Select
-                        value={String(usageMinutes)}
-                        options={[
-                          { label: "30 分钟", value: "30" },
-                          { label: "1 小时", value: "60" },
-                          { label: "3 小时", value: "180" },
-                          { label: "12 小时", value: "720" },
-                          { label: "24 小时", value: "1440" },
-                          { label: "7 天", value: "10080" }
-                        ]}
-                        style={{ width: 150 }}
-                        onChange={(value) => {
-                          const next = Number(normalizeSelectValue(value));
-                          if (Number.isFinite(next)) {
-                            setUsageMinutes(next);
-                            setUsageDateRange([]);
-                          }
-                        }}
-                      />
-                    </label>
-
-                    <label className="tc-field">
-                      <span>自由日期范围</span>
-                      <DateRangePicker
-                        enableTimePicker
-                        clearable
-                        valueType="YYYY-MM-DD HH:mm:ss"
-                        format="YYYY-MM-DD HH:mm:ss"
-                        value={usageDateRange}
-                        placeholder={["开始时间", "结束时间"]}
-                        style={{ width: "min(360px, 100%)" }}
-                        onChange={(value) => {
-                          if (!Array.isArray(value)) {
-                            setUsageDateRange([]);
-                            return;
-                          }
-                          const next = value.map((item) => String(item ?? "").trim());
-                          if (next.length === 2 && next[0] && next[1]) {
-                            setUsageDateRange([next[0], next[1]]);
-                            return;
-                          }
-                          setUsageDateRange([]);
-                        }}
-                      />
-                    </label>
-
-                    <label className="tc-field">
-                      <span>主指标</span>
-                      <Select
-                        value={usageMetric}
-                        options={[
-                          { label: "请求数", value: "requestCount" },
-                          { label: "输入 Token", value: "promptTokens" },
-                          { label: "输出 Token", value: "completionTokens" },
-                          { label: "Total Token", value: "totalTokens" }
-                        ]}
-                        style={{ width: 150 }}
-                        onChange={(value) => {
-                          const next = normalizeSelectValue(value) as UsageMetricKey;
-                          if (next in USAGE_METRIC_META) {
-                            setUsageMetric(next);
-                          }
-                        }}
-                      />
-                    </label>
-
-                    <label className="tc-field">
-                      <span>时间桶</span>
-                      <Select
-                        value={usageBucketMode}
-                        options={[
-                          { label: "自动", value: "auto" },
-                          { label: "1 分钟", value: "1" },
-                          { label: "5 分钟", value: "5" },
-                          { label: "15 分钟", value: "15" },
-                          { label: "1 小时", value: "60" }
-                        ]}
-                        style={{ width: 140 }}
-                        onChange={(value) => {
-                          const next = normalizeSelectValue(value) as UsageBucketMode;
-                          if (["auto", "1", "5", "15", "60"].includes(next)) {
-                            setUsageBucketMode(next);
-                          }
-                        }}
-                      />
-                    </label>
-
-                    <label className="tc-field">
-                      <span>本地 Key 筛选</span>
-                      <Select
-                        value={usageKeyFilter ? String(usageKeyFilter) : "__all__"}
-                        options={usageKeyOptions}
-                        style={{ width: 300 }}
-                        onChange={(value) => {
-                          const next = normalizeSelectValue(value);
-                          if (next === "__all__") {
-                            setUsageKeyFilter(null);
-                            return;
-                          }
-                          const id = Number(next);
-                          if (Number.isFinite(id) && id > 0) {
-                            setUsageKeyFilter(id);
-                          }
-                        }}
-                      />
-                    </label>
-
-                    <label className="tc-field">
-                      <span>分钟明细上限</span>
-                      <Select
-                        value={String(usageTimelineLimit)}
-                        options={[
-                          { label: "200 行", value: "200" },
-                          { label: "600 行", value: "600" },
-                          { label: "1200 行", value: "1200" },
-                          { label: "2000 行", value: "2000" }
-                        ]}
-                        style={{ width: 140 }}
-                        onChange={(value) => {
-                          const next = Number(normalizeSelectValue(value));
-                          if (Number.isFinite(next)) {
-                            setUsageTimelineLimit(next);
-                          }
-                        }}
-                      />
-                    </label>
-
-                    <div className="tc-usage-toolbar-actions">
-                      <Button
-                        variant="outline"
-                        theme="default"
-                        onClick={() => void loadUsageReport()}
-                        disabled={loadingUsage}
-                      >
-                        手动刷新
-                      </Button>
-                      <Button
-                        variant="outline"
-                        theme="danger"
-                        onClick={() => void clearUsageReport()}
-                        disabled={loadingUsage}
-                      >
-                        清空统计
-                      </Button>
-                    </div>
-                  </div>
-
-                 {!usageReport || usageReport.summary.requestCount === 0 ? (
-                    loadingUsage ? (
-                      <UsageLoadingSkeleton />
-                    ) : (
-                      <div className="tc-usage-empty-state">
-                        <div className="tc-usage-empty-icon">
-                          <svg width="64" height="64" viewBox="0 0 64 64" fill="none">
-                            <rect x="8" y="24" width="12" height="28" rx="3" fill="#e2e8f0" />
-                            <rect x="26" y="16" width="12" height="36" rx="3" fill="#cbd5e1" />
-                            <rect x="44" y="8" width="12" height="44" rx="3" fill="#94a3b8" />
-                          </svg>
-                        </div>
-                        <p className="tc-usage-empty-title">暂无 Token 用量数据</p>
-                        <p className="tc-usage-empty-desc">先发起一次模型请求后再查看。数据将按分钟自动聚合。</p>
-                      </div>
-                    )
-                  ) : (
-                    <>
-                      <div className="tc-stat-cards-grid">
-                        <UsageStatCard variant="requests" value={usageReport.summary.requestCount} delay={0} locale={locale} />
-                        <UsageStatCard variant="prompt" value={usageReport.summary.promptTokens} delay={0.08} locale={locale} />
-                        <UsageStatCard variant="completion" value={usageReport.summary.completionTokens} delay={0.16} locale={locale} />
-                        <UsageStatCard variant="total" value={usageReport.summary.totalTokens} delay={0.24} locale={locale} />
-                      </div>
-
-                      {/* 数据刷新时的顶部 loading 条 */}
-                      {loadingUsage ? (
-                        <div className="tc-usage-refresh-bar">
-                          <div className="tc-usage-refresh-bar-inner" />
-                        </div>
-                      ) : null}
-
-                      <div className="tc-usage-charts">
-                        <div className="tc-usage-chart-card tc-usage-chart-wide">
-                          <h4>{t("趋势图", "Trend")}（{usagePrimaryMetricMeta.label}）</h4>
-                          <p className="tc-usage-chart-note">
-                            {t("时间桶", "Time bucket")} {resolvedUsageBucketMinutes} {t("分钟", "min")}，{t("统计", "covering")}
-                            {hasCustomUsageDateRange
-                              ? ` ${usageDateRange[0]} ${t("至", "to")} ${usageDateRange[1]}`
-                              : usageMinutes >= 1440
-                                ? ` ${t("最近", "last")} ${(usageMinutes / 1440).toFixed(usageMinutes % 1440 === 0 ? 0 : 1)} ${t("天", "days")}`
-                                : ` ${t("最近", "last")} ${usageMinutes} ${t("分钟", "min")}`}
-                            {t("的用量趋势", " usage trend.")}
-                          </p>
-                          {usageTimelineChartOption ? (
-                            <ReactECharts
-                              notMerge
-                              lazyUpdate
-                              option={usageTimelineChartOption}
-                              style={{ width: "100%", height: usageTimelineChartHeight }}
-                            />
-                          ) : (
-                            <p className="tc-upstream-advice">{t("暂无分钟趋势数据。", "No timeline data available.")}</p>
-                          )}
-                        </div>
-
-                        <div className="tc-usage-chart-card">
-                          <h4>Key Top12（{usagePrimaryMetricMeta.shortLabel}）</h4>
-                          <p className="tc-usage-chart-note">{t("对比不同本地 Key 的核心指标分布。", "Compare key-level metric distribution.")}</p>
-                          {usagePerKeyChartOption ? (
-                            <ReactECharts
-                              notMerge
-                              lazyUpdate
-                              option={usagePerKeyChartOption}
-                              style={{ width: "100%", height: 320 }}
-                            />
-                          ) : (
-                            <p className="tc-upstream-advice">{t("暂无 Key 维度数据。", "No key-level data.")}</p>
-                          )}
-                        </div>
-
-                        <div className="tc-usage-chart-card">
-                          <h4>{t("真实模型 Top10", "Upstream Model Top10")}（{usagePrimaryMetricMeta.shortLabel}）</h4>
-                          <p className="tc-usage-chart-note">{t("识别高消耗模型，辅助做策略切换与限流。", "Identify high-consumption models for policy tuning.")}</p>
-                          {usagePerModelChartOption ? (
-                            <ReactECharts
-                              notMerge
-                              lazyUpdate
-                              option={usagePerModelChartOption}
-                              style={{ width: "100%", height: 320 }}
-                            />
-                          ) : (
-                            <p className="tc-upstream-advice">{t("暂无模型维度数据。", "No model-level data.")}</p>
-                          )}
-                        </div>
-                      </div>
-
-                      {/* 饼图分布 */}
-                      <div className="tc-usage-charts">
-                        {usageReport.perKey.length > 0 ? (
-                          <UsagePieChart
-                            title={`Key 分布（${usagePrimaryMetricMeta.shortLabel}）`}
-                            slices={usageReport.perKey.slice(0, 8).map((item) => ({
-                              name: item.keyName,
-                              value: pickUsageMetricValue(item, usageMetric)
-                            }))}
-                            height={260}
-                            delay={0.4}
-                            EChartsComponent={ReactECharts}
-                          />
-                        ) : null}
-                        {usageReport.perModel.length > 0 ? (
-                          <UsagePieChart
-                            title={`模型分布（${usagePrimaryMetricMeta.shortLabel}）`}
-                            slices={usageReport.perModel.slice(0, 8).map((item) => ({
-                              name: item.model,
-                              value: pickUsageMetricValue(item, usageMetric)
-                            }))}
-                            height={260}
-                            delay={0.5}
-                            EChartsComponent={ReactECharts}
-                          />
-                        ) : null}
-                      </div>
-
-                      <div className="tc-usage-grid">
-                        <div className="tc-usage-block">
-                          <h4>按 Key 汇总</h4>
-                          <div className="tc-usage-table-wrap">
-                            <table className="tc-usage-table">
-                              <thead>
-                                <tr>
-                                  <th>本地 Key</th>
-                                  <th>请求数</th>
-                                  <th>输入</th>
-                                  <th>输出</th>
-                                  <th>Total</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {usageReport.perKey.map((item) => (
-                                  <tr key={`key-${item.keyId}`}>
-                                    <td>{item.keyName}</td>
-                                    <td>{formatNumber(item.requestCount)}</td>
-                                    <td>{formatNumber(item.promptTokens)}</td>
-                                    <td>{formatNumber(item.completionTokens)}</td>
-                                    <td>{formatNumber(item.totalTokens)}</td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        </div>
-
-                        <div className="tc-usage-block">
-                          <h4>按真实模型汇总</h4>
-                          <div className="tc-usage-table-wrap">
-                            <table className="tc-usage-table">
-                              <thead>
-                                <tr>
-                                  <th>真实模型（上游）</th>
-                                  <th>所属 Key</th>
-                                  <th>请求数</th>
-                                  <th>输入</th>
-                                  <th>输出</th>
-                                  <th>Total</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {usageReport.perModel.slice(0, 120).map((item, index) => (
-                                  <tr key={`model-${item.keyId}-${item.model}-${index}`}>
-                                    <td>{item.model}</td>
-                                    <td>{item.keyName}</td>
-                                    <td>{formatNumber(item.requestCount)}</td>
-                                    <td>{formatNumber(item.promptTokens)}</td>
-                                    <td>{formatNumber(item.completionTokens)}</td>
-                                    <td>{formatNumber(item.totalTokens)}</td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="tc-usage-block">
-                        <h4>按分钟明细（真实模型）</h4>
-                        <div className="tc-usage-table-wrap">
-                          <table className="tc-usage-table">
-                            <thead>
-                              <tr>
-                                <th>分钟</th>
-                                <th>Key</th>
-                                <th>真实模型（上游）</th>
-                                <th>请求数</th>
-                                <th>输入</th>
-                                <th>输出</th>
-                                <th>Total</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {usageReport.timeline.map((item, index) => (
-                                <tr key={`timeline-${item.minute}-${item.keyId}-${item.model}-${index}`}>
-                                  <td>{formatCnDate(item.minute)}</td>
-                                  <td>{item.keyName}</td>
-                                  <td>{item.model}</td>
-                                  <td>{formatNumber(item.requestCount)}</td>
-                                  <td>{formatNumber(item.promptTokens)}</td>
-                                  <td>{formatNumber(item.completionTokens)}</td>
-                                  <td>{formatNumber(item.totalTokens)}</td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      </div>
-                    </>
-                  )}
-                </section>
+                <SettingsUsagePanel
+                  t={t}
+                  normalizeSelectValue={normalizeSelectValue}
+                  hasCustomUsageDateRange={hasCustomUsageDateRange}
+                  usageMinutes={usageMinutes}
+                  setUsageMinutes={setUsageMinutes}
+                  setUsageDateRange={setUsageDateRange}
+                  autoRefreshUsage={autoRefreshUsage}
+                  setAutoRefreshUsage={setAutoRefreshUsage}
+                  usageDateRange={usageDateRange}
+                  usageMetric={usageMetric}
+                  setUsageMetric={setUsageMetric}
+                  usageBucketMode={usageBucketMode}
+                  setUsageBucketMode={setUsageBucketMode}
+                  usageKeyFilter={usageKeyFilter}
+                  usageKeyOptions={usageKeyOptions}
+                  setUsageKeyFilter={setUsageKeyFilter}
+                  usageTimelineLimit={usageTimelineLimit}
+                  setUsageTimelineLimit={setUsageTimelineLimit}
+                  loadUsageReport={loadUsageReport}
+                  clearUsageReport={clearUsageReport}
+                  loadingUsage={loadingUsage}
+                  usageReport={usageReport}
+                  locale={locale}
+                  usagePrimaryMetricMeta={usagePrimaryMetricMeta}
+                  resolvedUsageBucketMinutes={resolvedUsageBucketMinutes}
+                  usageTimelineChartOption={usageTimelineChartOption}
+                  usageTimelineChartHeight={usageTimelineChartHeight}
+                  usagePerKeyChartOption={usagePerKeyChartOption}
+                  usagePerModelChartOption={usagePerModelChartOption}
+                  ReactECharts={ReactECharts}
+                />
               ) : null}
 
               {routeModule === "docs" ? (
-                <section className="tc-section">
-                  <h3>{t("本端接口文档", "Gateway API Documentation")}</h3>
-                  <p className="tc-upstream-advice">
-                    {t(
-                      "以下文档与当前服务端实现保持一致，包含网关推理接口和管理接口。网关鉴权使用本地 Key（不是上游 API Key）。",
-                      "This section mirrors the current server implementation, including gateway inference APIs and management APIs. Gateway auth uses local keys (not upstream API keys)."
-                    )}
-                  </p>
-
-                  <div className="tc-meta-row">
-                    <Tag variant="light-outline">{t("网关基地址", "Gateway Base URL")}: {gatewayV1Endpoint}</Tag>
-                    <Tag variant="light-outline">{t("管理基地址", "Management Base URL")}: {gatewayOrigin}/api</Tag>
-                    <Tag variant="light-outline">POST /v1/messages: x-api-key / Authorization</Tag>
-                  </div>
-
-                  <div className="tc-usage-grid">
-                    <div className="tc-usage-block">
-                      <h4>{t("网关推理接口", "Gateway Inference Endpoints")}</h4>
-                      <div className="tc-usage-table-wrap">
-                        <table className="tc-usage-table">
-                          <thead>
-                            <tr>
-                              <th>{t("方法", "Method")}</th>
-                              <th>{t("路径", "Path")}</th>
-                              <th>{t("说明", "Description")}</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {API_DOC_GATEWAY_ENDPOINTS.map((item) => (
-                              <tr key={`${item.method}-${item.path}`}>
-                                <td><Tag variant="light-outline">{item.method}</Tag></td>
-                                <td><code>{item.path}</code></td>
-                                <td>{t(item.zh, item.en)}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-
-                    <div className="tc-usage-block">
-                      <h4>{t("管理与运维接口", "Management and Ops Endpoints")}</h4>
-                      <div className="tc-usage-table-wrap">
-                        <table className="tc-usage-table">
-                          <thead>
-                            <tr>
-                              <th>{t("方法", "Method")}</th>
-                              <th>{t("路径", "Path")}</th>
-                              <th>{t("说明", "Description")}</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {API_DOC_MANAGEMENT_ENDPOINTS.map((item) => (
-                              <tr key={`${item.method}-${item.path}`}>
-                                <td><Tag variant="light-outline">{item.method}</Tag></td>
-                                <td><code>{item.path}</code></td>
-                                <td>{t(item.zh, item.en)}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="tc-runtime-doc">
-                    <h4>{t("调用示例", "Quick Examples")}</h4>
-                    <p className="tc-upstream-advice">
-                      {t(
-                        "示例中的本地 Key 会优先使用当前选中的 Key；若未选择，则使用占位符。",
-                        "Examples prefer the currently selected local key; otherwise they use a placeholder."
-                      )}
-                    </p>
-
-                    <div className="tc-log-panels">
-                      <div className="tc-log-panel">
-                        <div className="tc-runtime-doc-head">
-                          <strong>POST /v1/chat/completions</strong>
-                          <Button
-                            size="small"
-                            variant="outline"
-                            onClick={() =>
-                              void copyTextToClipboard(
-                                apiDocExamples.chatCompletions,
-                                t("示例命令已复制。", "Example command copied.")
-                              )
-                            }
-                          >
-                            {t("复制命令", "Copy Command")}
-                          </Button>
-                        </div>
-                        <CodeBlock value={apiDocExamples.chatCompletions} language="bash" />
-                      </div>
-
-                      <div className="tc-log-panel">
-                        <div className="tc-runtime-doc-head">
-                          <strong>POST /v1/responses</strong>
-                          <Button
-                            size="small"
-                            variant="outline"
-                            onClick={() =>
-                              void copyTextToClipboard(
-                                apiDocExamples.responses,
-                                t("示例命令已复制。", "Example command copied.")
-                              )
-                            }
-                          >
-                            {t("复制命令", "Copy Command")}
-                          </Button>
-                        </div>
-                        <CodeBlock value={apiDocExamples.responses} language="bash" />
-                      </div>
-
-                      <div className="tc-log-panel">
-                        <div className="tc-runtime-doc-head">
-                          <strong>POST /v1/messages</strong>
-                          <Button
-                            size="small"
-                            variant="outline"
-                            onClick={() =>
-                              void copyTextToClipboard(
-                                apiDocExamples.anthropicMessages,
-                                t("示例命令已复制。", "Example command copied.")
-                              )
-                            }
-                          >
-                            {t("复制命令", "Copy Command")}
-                          </Button>
-                        </div>
-                        <CodeBlock value={apiDocExamples.anthropicMessages} language="bash" />
-                      </div>
-                    </div>
-                  </div>
-                </section>
+                <SettingsDocsPanel
+                  t={t}
+                  gatewayV1Endpoint={gatewayV1Endpoint}
+                  gatewayOrigin={gatewayOrigin}
+                  apiDocExamples={apiDocExamples}
+                  copyTextToClipboard={copyTextToClipboard}
+                />
               ) : null}
 
               {routeModule === "runtime" ? (
-                selectedKey ? (
-                  <section className="tc-section">
-                    <h3>{t("运行时调度", "Runtime")}</h3>
-                    <div className="tc-meta-row">
-                      <Tag variant="light-outline">{t("当前默认模型", "Default Model")}: {selectedKey.defaultModel}</Tag>
-                      <Tag variant="light-outline">
-                        {t("绑定渠道", "Bound Upstream")}: {selectedKey.upstreamChannelName ?? "-"}
-                      </Tag>
-                    </div>
-                    <div className="tc-form-grid">
-                      <label className="tc-field tc-field-wide">
-                        <span>{t("运行时覆盖模型", "Runtime Override Model")}</span>
-                        <Input
-                          value={runtimeModel}
-                          onChange={(value) => setRuntimeModel(value)}
-                          placeholder={t("如：gpt-4.1 / glm-4-plus", "e.g. gpt-4.1 / glm-4-plus")}
-                          clearable
-                        />
-                      </label>
-
-                      <label className="tc-checkline">
-                        <Checkbox
-                          checked={syncDefaultModel}
-                          onChange={(checked) => setSyncDefaultModel(checked)}
-                        >
-                          {t("切换时同步更新默认模型", "Update default model together")}
-                        </Checkbox>
-                      </label>
-                    </div>
-
-                    <div className="tc-actions-row">
-                      <Button
-                        theme="primary"
-                        loading={switchingModel}
-                        onClick={() => void switchModel(false)}
-                        disabled={loading}
-                      >
-                        {t("应用运行时切换", "Apply Runtime Switch")}
-                      </Button>
-                      <Button
-                        theme="danger"
-                        variant="outline"
-                        onClick={() => void switchModel(true)}
-                        disabled={switchingModel || loading}
-                      >
-                        {t("清空覆盖", "Clear Override")}
-                      </Button>
-                    </div>
-
-                    <div className="tc-runtime-doc">
-                      <h4>{t("API 控制切换文档", "API Runtime Control Guide")}</h4>
-                      <p className="tc-upstream-advice">
-                        {t(
-                          "可通过接口查询当前生效模型、设置运行时覆盖、清空覆盖，以及启用/停用本地 Key。",
-                          "Use API to query effective model, set runtime override, clear override, and enable/disable local key."
-                        )}
-                      </p>
-                      <div className="tc-meta-row">
-                        <Tag variant="light-outline">GET {runtimeSwitchEndpoint}</Tag>
-                        <Tag variant="light-outline">POST {runtimeSwitchEndpoint}</Tag>
-                        <Tag variant="light-outline">selector=id/localKey/keyName/Bearer</Tag>
-                      </div>
-
-                      <div className="tc-log-panels">
-                        <div className="tc-log-panel tc-log-panel-full">
-                          <div className="tc-runtime-doc-head">
-                            <strong>{t("查询当前运行时状态（GET）", "Query Runtime Status (GET)")}</strong>
-                            <Button
-                              size="small"
-                              variant="outline"
-                              onClick={() =>
-                                void copyTextToClipboard(
-                                  runtimeApiExamples.queryStatus,
-                                  t("查询命令已复制。", "Query command copied.")
-                                )
-                              }
-                            >
-                              {t("复制命令", "Copy Command")}
-                            </Button>
-                          </div>
-                          <CodeBlock value={runtimeApiExamples.queryStatus} language="bash" />
-                        </div>
-
-                        <div className="tc-log-panel">
-                          <div className="tc-runtime-doc-head">
-                            <strong>{t("设置运行时覆盖模型（POST）", "Set Runtime Override (POST)")}</strong>
-                            <Button
-                              size="small"
-                              variant="outline"
-                              onClick={() =>
-                                void copyTextToClipboard(
-                                  runtimeApiExamples.switchModel,
-                                  t("切换命令已复制。", "Switch command copied.")
-                                )
-                              }
-                            >
-                              {t("复制命令", "Copy Command")}
-                            </Button>
-                          </div>
-                          <CodeBlock value={runtimeApiExamples.switchModel} language="bash" />
-                        </div>
-
-                        <div className="tc-log-panel">
-                          <div className="tc-runtime-doc-head">
-                            <strong>{t("清空运行时覆盖（POST）", "Clear Runtime Override (POST)")}</strong>
-                            <Button
-                              size="small"
-                              variant="outline"
-                              onClick={() =>
-                                void copyTextToClipboard(
-                                  runtimeApiExamples.clearOverride,
-                                  t("清空命令已复制。", "Clear command copied.")
-                                )
-                              }
-                            >
-                              {t("复制命令", "Copy Command")}
-                            </Button>
-                          </div>
-                          <CodeBlock value={runtimeApiExamples.clearOverride} language="bash" />
-                        </div>
-
-                        <div className="tc-log-panel">
-                          <div className="tc-runtime-doc-head">
-                            <strong>{t("按 Key ID 启停（POST）", "Enable/Disable by Key ID (POST)")}</strong>
-                            <Button
-                              size="small"
-                              variant="outline"
-                              onClick={() =>
-                                void copyTextToClipboard(
-                                  runtimeApiExamples.toggleEnabledById,
-                                  t("启停命令已复制。", "Enable/disable command copied.")
-                                )
-                              }
-                            >
-                              {t("复制命令", "Copy Command")}
-                            </Button>
-                          </div>
-                          <CodeBlock value={runtimeApiExamples.toggleEnabledById} language="bash" />
-                        </div>
-
-                        <div className="tc-log-panel">
-                          <div className="tc-runtime-doc-head">
-                            <strong>{t("POST 参数结构", "POST Payload")}</strong>
-                            <Button
-                              size="small"
-                              variant="outline"
-                              onClick={() =>
-                                void copyTextToClipboard(
-                                  runtimeApiExamples.payloadSchema,
-                                  t("参数结构已复制。", "Payload copied.")
-                                )
-                              }
-                            >
-                              {t("复制结构", "Copy Payload")}
-                            </Button>
-                          </div>
-                          <CodeBlock value={runtimeApiExamples.payloadSchema} language="json" />
-                        </div>
-                      </div>
-                    </div>
-                  </section>
-                ) : (
-                  <section className="tc-section">
-                    <h3>{t("运行时调度", "Runtime")}</h3>
-                    <p className="tc-tip err">{t("请先创建并保存一个本地 Key。", "Create and save a local key first.")}</p>
-                  </section>
-                )
+                <SettingsRuntimePanel
+                  t={t}
+                  selectedKey={selectedKey}
+                  runtimeModel={runtimeModel}
+                  setRuntimeModel={setRuntimeModel}
+                  syncDefaultModel={syncDefaultModel}
+                  setSyncDefaultModel={setSyncDefaultModel}
+                  switchingModel={switchingModel}
+                  switchModel={switchModel}
+                  loading={loading}
+                  runtimeSwitchEndpoint={runtimeSwitchEndpoint}
+                  runtimeApiExamples={runtimeApiExamples}
+                  copyTextToClipboard={copyTextToClipboard}
+                />
               ) : null}
-
               {routeModule === "access" ? (
                 <footer className="tc-footer-actions">
                   <Button

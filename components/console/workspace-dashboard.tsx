@@ -19,7 +19,7 @@ import dynamic from "next/dynamic";
 import {
   formatCompactNumber,
   formatNumber
-} from "@/components/settings-console";
+} from "@/components/console/settings-console-helpers";
 import {
   type GatewayKey,
   type UpstreamChannel,
