@@ -110,6 +110,11 @@ function normalizeContextWindow(value: number | null | undefined) {
   return Math.floor(value);
 }
 
+function isDoubaoCodexAlias(model: string) {
+  const normalized = model.trim().toLowerCase().replace(/\[[^\]]+\]$/, "");
+  return normalized === "gpt-5.2-codex" || normalized.startsWith("gpt-5.2-codex-");
+}
+
 function inferContextWindowFromModel(model: string, provider: string) {
   const normalized = model.trim().toLowerCase().replace(/\[[^\]]+\]$/, "");
   if (!normalized) {
@@ -127,7 +132,11 @@ function inferContextWindowFromModel(model: string, provider: string) {
   }
 
   if (provider === "doubao") {
-    if (normalized.includes("doubao-seed") || normalized.includes("seed-2.0-code")) {
+    if (
+      normalized.includes("doubao-seed") ||
+      normalized.includes("seed-2.0-code") ||
+      isDoubaoCodexAlias(normalized)
+    ) {
       return 128000;
     }
   }
@@ -227,6 +236,9 @@ function buildConfigTomlSnippet(context: CodexExportContext) {
   const fileBase = sanitizeFileBase(`${context.providerName}_${context.selectedModel}`);
   const catalogPath = `${CODEX_OUTPUT_DIR}/${fileBase}.catalog.json`;
   const instructionsPath = `${CODEX_OUTPUT_DIR}/${fileBase}.instructions.md`;
+  const httpHeadersToml = `http_headers = { "x-codex-gateway-client" = "codex", "x-codex-apply-patch-tool-type" = "${escapeTomlString(
+    context.applyPatchToolType
+  )}" }`;
   return [
     `model_provider = "${escapeTomlString(providerKey)}"`,
     `model = "${escapeTomlString(context.selectedModel)}"`,
@@ -244,6 +256,7 @@ function buildConfigTomlSnippet(context: CodexExportContext) {
     `base_url = "${escapeTomlString(context.gatewayEndpoint)}"`,
     'env_key = "OPENAI_API_KEY"',
     'wire_api = "responses"',
+    httpHeadersToml,
     ""
   ].join("\n");
 }
@@ -283,6 +296,98 @@ function buildModelCatalogJson(context: CodexExportContext) {
   }));
 
   return `${JSON.stringify({ models }, null, 2)}\n`;
+}
+
+function buildModelInstructionsMd(context: CodexExportContext) {
+  const normalizedProvider = context.provider.trim().toLowerCase();
+  const normalizedSelectedModel = context.selectedModel.trim().toLowerCase();
+  const useDoubaoCodexProfile =
+    normalizedProvider === "doubao" || isDoubaoCodexAlias(normalizedSelectedModel);
+  const applyPatchSection =
+    context.applyPatchToolType === "freeform"
+      ? [
+          "Apply patch policy (freeform):",
+          "- When you need to edit files and `apply_patch` is available as a FREEFORM tool, send raw patch text only.",
+          "- Do not wrap the patch payload in JSON or Markdown code fences.",
+          "- Keep patches minimal and use correct unified diff headers and hunks."
+        ]
+      : [
+          "Apply patch policy (function):",
+          "- When you need to edit files and `apply_patch` is available as a function tool, call it through the runtime tool interface.",
+          "- Pass valid patch text using the tool's expected function parameter shape.",
+          "- Keep patches minimal and use correct unified diff headers and hunks."
+        ];
+  const modelSpecificSection = useDoubaoCodexProfile
+    ? [
+        "",
+        "Doubao + gpt-5.2-codex compatibility profile:",
+        "- Tool-call accuracy is more important than long narrative output.",
+        "- For `apply_patch` function calls, always pass a JSON object with a single `input` string field containing patch text.",
+        "- Do not emit half-complete tool arguments; ensure arguments are complete before finalizing the tool call.",
+        "- For ordered tasks, execute strictly in order and verify each step before moving on.",
+        "- Before final completion markers (e.g. `DONE`), run an explicit end-state check."
+      ]
+    : [];
+
+  return (
+    [
+      "# Codex Gateway Hub Model Instructions",
+      "",
+      "You are a coding agent routed through Codex Gateway Hub.",
+      "Your target behavior should be close to a high-quality GPT-5.4 coding assistant:",
+      "- Inspect before editing.",
+      "- Prefer minimal, surgical changes.",
+      "- Keep outputs concise and practical.",
+      "- Never fabricate tool calls, command outputs, or verification results.",
+      "",
+      "Tool execution policy:",
+      "- Use only tools actually exposed by the runtime.",
+      "- If a tool fails, read the error, correct the call, and retry when appropriate.",
+      "- Prefer dedicated tools over shell commands when equivalent dedicated tools exist.",
+      "- When shell search is needed, prefer `rg` or `rg --files`.",
+      ...applyPatchSection,
+      "",
+      "Editing and verification policy:",
+      "- Preserve existing user changes; do not revert unrelated modifications.",
+      "- Avoid destructive commands unless explicitly requested.",
+      "- After edits, run targeted verification checks when practical and report outcomes honestly.",
+      "",
+      "Response policy:",
+      "- Match the user's language by default.",
+      "- Provide short progress updates while working, then a clear final summary of changed files and verification results.",
+      "- If blocked by runtime constraints, report the exact blocker and the next actionable step.",
+      ...modelSpecificSection,
+      ""
+    ].join("\n")
+  );
+}
+
+function buildAgentsMdTemplate(context: CodexExportContext) {
+  return (
+    [
+      "# AGENTS.md",
+      "",
+      "This workspace is configured for Codex Gateway Hub third-party model alignment.",
+      "",
+      "Working rules:",
+      "- Inspect before editing.",
+      "- Edit with minimal scope.",
+      "- Verify practical outcomes before claiming completion.",
+      "- Do not fabricate tool usage or command results.",
+      "- Prefer dedicated tools when available.",
+      "- Preserve user changes you did not make.",
+      "",
+      "Patch rules:",
+      "- Prefer `apply_patch` for focused manual edits when available.",
+      `- Expected apply_patch mode: ${context.applyPatchToolType}.`,
+      "- Never print fake patch text as normal chat output.",
+      "",
+      "Communication rules:",
+      "- Use concise progress updates.",
+      "- In final responses, summarize what changed and what was verified.",
+      ""
+    ].join("\n")
+  );
 }
 
 export function resolveCodexExportContext(
@@ -331,11 +436,11 @@ export function buildCodexExportBundle(
       },
       modelInstructionsMd: {
         targetPath: `${CODEX_OUTPUT_DIR}/${fileBase}.instructions.md`,
-        content: ""
+        content: buildModelInstructionsMd(context)
       },
       agentsMd: {
         targetPath: "./AGENTS.md",
-        content: ""
+        content: buildAgentsMdTemplate(context)
       }
     }
   };

@@ -390,6 +390,68 @@ function stringifyResponsesCustomToolArguments(input: unknown): string {
   });
 }
 
+function extractPatchLikeInput(value: unknown): string | null {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  for (const key of ["input", "patch", "diff", "content", "text"] as const) {
+    const candidate = (value as Record<string, unknown>)[key];
+    if (typeof candidate === "string") {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function normalizeApplyPatchArguments(rawArguments: unknown): string {
+  const direct = extractPatchLikeInput(rawArguments);
+  if (direct !== null) {
+    return JSON.stringify({ input: direct });
+  }
+
+  if (typeof rawArguments === "string") {
+    const trimmed = rawArguments.trim();
+    if (!trimmed) {
+      return JSON.stringify({ input: "" });
+    }
+    try {
+      const parsed = JSON.parse(trimmed);
+      const nested = extractPatchLikeInput(parsed);
+      if (nested !== null) {
+        return JSON.stringify({ input: nested });
+      }
+      if (typeof parsed === "string") {
+        return JSON.stringify({ input: parsed });
+      }
+    } catch {
+      // Keep raw string as patch body when it is not valid JSON.
+    }
+    return JSON.stringify({ input: rawArguments });
+  }
+
+  if (rawArguments == null) {
+    return JSON.stringify({ input: "" });
+  }
+  return JSON.stringify({ input: JSON.stringify(rawArguments) });
+}
+
+export function normalizeFunctionToolArgumentsForResponses(
+  toolName: string,
+  rawArguments: unknown
+): string {
+  const normalizedName = toolName.trim().toLowerCase();
+  if (normalizedName === "apply_patch") {
+    return normalizeApplyPatchArguments(rawArguments);
+  }
+  if (typeof rawArguments === "string") {
+    return rawArguments;
+  }
+  return rawArguments == null ? "" : JSON.stringify(rawArguments);
+}
+
 function extractResponsesCustomToolInput(input: unknown, allowFallback = true): string | null {
   if (typeof input === "string") {
     try {
@@ -506,11 +568,7 @@ function normalizeResponsesInputToLegacyMessages(input: unknown): LegacyChatComp
       const argumentsText =
         explicitType === "custom_tool_call"
           ? stringifyResponsesCustomToolArguments(rawArguments)
-          : typeof rawArguments === "string"
-            ? rawArguments
-            : rawArguments == null
-              ? ""
-              : JSON.stringify(rawArguments);
+          : normalizeFunctionToolArgumentsForResponses(name, rawArguments);
       messages.push({
         role: "assistant",
         content: "",
@@ -1155,12 +1213,7 @@ export function mapLegacyChatCompletionToResponses(
         (item.function && typeof item.function === "object"
           ? item.function.arguments
           : undefined) ?? item.arguments;
-      const argumentsText =
-        typeof rawArguments === "string"
-          ? rawArguments
-          : rawArguments == null
-            ? ""
-            : JSON.stringify(rawArguments);
+      const argumentsText = normalizeFunctionToolArgumentsForResponses(name, rawArguments);
       const customInput = customToolNames.has(name)
         ? extractResponsesCustomToolInput(rawArguments)
         : null;

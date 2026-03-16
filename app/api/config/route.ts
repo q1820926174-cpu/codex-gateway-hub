@@ -14,7 +14,20 @@ export const dynamic = "force-dynamic";
 
 const compatPromptConfigSchema = z.object({
   agentsMdKeywords: z.array(z.string().trim().min(1).max(200)).min(1).max(32),
-  chineseReplyHint: z.string().trim().min(1).max(20000)
+  chineseReplyHint: z.string().trim().min(1).max(20000),
+  modelPromptRules: z
+    .array(
+      z.object({
+        id: z.string().trim().min(1).max(120).optional(),
+        enabled: z.boolean().optional(),
+        provider: z.string().trim().max(200).optional(),
+        upstreamModelPattern: z.string().trim().max(200).optional(),
+        hint: z.string().trim().min(1).max(20000)
+      })
+    )
+    .max(128)
+    .optional()
+    .default([])
 });
 
 export async function GET(req: Request) {

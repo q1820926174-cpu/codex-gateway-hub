@@ -43,6 +43,21 @@ export function normalizeGlmCodexThinkingThresholdValue(
   return "low";
 }
 
+// Whether the upstream/provider should use GLM-style `thinking.type` adaptation
+// 是否使用 GLM 风格的 `thinking.type` 适配
+export function supportsGlmThinkingType(
+  provider: string | null | undefined,
+  model: string | null | undefined
+) {
+  const normalizedProvider = provider?.trim().toLowerCase() || "";
+  if (normalizedProvider === "glm") {
+    return true;
+  }
+
+  const normalizedModel = model?.trim().toLowerCase() || "";
+  return normalizedModel.startsWith("glm-") || normalizedModel.startsWith("pony");
+}
+
 // Maximum number of upstream models allowed
 // 允许的上游模型最大数量
 const MAX_UPSTREAM_MODELS = 64;

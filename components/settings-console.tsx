@@ -1,6 +1,15 @@
 "use client";
 
-import { memo, startTransition, useDeferredValue, useEffect, useMemo, useState } from "react";
+import {
+  memo,
+  startTransition,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent
+} from "react";
 import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import ReactMarkdown from "react-markdown";
@@ -15,6 +24,7 @@ import {
   parseOverflowModelSelection,
   serializeOverflowModelSelection
 } from "@/lib/overflow-model";
+import { supportsGlmThinkingType } from "@/lib/key-config";
 import {
   quickExportKeyMappings,
   quickExportModels,
@@ -186,8 +196,8 @@ const MODULE_SUMMARY: Record<EditorModule, { zh: string; en: string }> = {
     en: "Manage local key auth, mappings, and client-facing entry points."
   },
   prompt: {
-    zh: "维护网关默认注入提示词与 AGENTS 关键词匹配规则。",
-    en: "Manage gateway-injected default prompts and AGENTS keyword matching rules."
+    zh: "维护网关注入提示词：全局默认 + 按上游真实模型定制规则。",
+    en: "Manage gateway-injected prompts: global default plus upstream-model specific rules."
   },
   export: {
     zh: "集中查看 Codex / Claude 导入配置与原生导出片段。",
@@ -260,8 +270,8 @@ const API_DOC_GATEWAY_ENDPOINTS: ApiDocEndpoint[] = [
 
 const API_DOC_MANAGEMENT_ENDPOINTS: ApiDocEndpoint[] = [
   { method: "GET", path: "/api/health", zh: "健康检查", en: "Health check" },
-  { method: "GET", path: "/api/config", zh: "配置摘要与全局提示词配置", en: "Config summary and global prompt config" },
-  { method: "PUT", path: "/api/config", zh: "更新全局提示词配置", en: "Update global prompt config" },
+  { method: "GET", path: "/api/config", zh: "配置摘要与提示词配置（含模型规则）", en: "Config summary and prompt config (with model rules)" },
+  { method: "PUT", path: "/api/config", zh: "更新提示词配置（含模型规则）", en: "Update prompt config (with model rules)" },
   { method: "GET", path: "/api/keys", zh: "Key 列表", en: "List keys" },
   { method: "POST", path: "/api/keys", zh: "创建 Key", en: "Create key" },
   { method: "GET", path: "/api/keys/:id", zh: "查询 Key", en: "Get key" },
@@ -370,6 +380,15 @@ type ChannelsResponse = {
 type CompatPromptConfig = {
   agentsMdKeywords: string[];
   chineseReplyHint: string;
+  modelPromptRules: CompatPromptRule[];
+};
+
+type CompatPromptRule = {
+  id: string;
+  enabled: boolean;
+  provider: string;
+  upstreamModelPattern: string;
+  hint: string;
 };
 
 type ConfigSummaryResponse = {
@@ -569,6 +588,24 @@ function generateMappingId() {
   return `map_${suffix}`;
 }
 
+function generateCompatPromptRuleId() {
+  const random = crypto.getRandomValues(new Uint8Array(8));
+  const suffix = Array.from(random)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+  return `rule_${suffix}`;
+}
+
+function createCompatPromptRuleDraft(overrides: Partial<CompatPromptRule> = {}): CompatPromptRule {
+  return {
+    id: overrides.id?.trim() || generateCompatPromptRuleId(),
+    enabled: overrides.enabled ?? true,
+    provider: overrides.provider?.trim() || "",
+    upstreamModelPattern: overrides.upstreamModelPattern?.trim() || "",
+    hint: overrides.hint ?? ""
+  };
+}
+
 function createUpstreamModelDraft(
   overrides: Partial<UpstreamModelConfig> = {}
 ): UpstreamModelConfig {
@@ -608,7 +645,7 @@ function normalizeGlmCodexThinkingThreshold(
 }
 
 function shouldShowGlmThinkingThreshold(provider: ProviderName, model: string) {
-  return provider === "glm" || model.trim().toLowerCase().startsWith("glm-");
+  return supportsGlmThinkingType(provider, model);
 }
 
 function shouldShowDoubaoThinkingType(provider: ProviderName, model: string) {
@@ -860,6 +897,114 @@ function parseCompatPromptKeywordsInput(value: string) {
   );
 }
 
+function normalizeCompatPromptRule(rule: Partial<CompatPromptRule>, index: number): CompatPromptRule {
+  return {
+    id: rule.id?.trim() || `rule-${index + 1}`,
+    enabled: rule.enabled !== false,
+    provider: rule.provider?.trim() || "",
+    upstreamModelPattern: rule.upstreamModelPattern?.trim() || "",
+    hint: rule.hint?.trim() || ""
+  };
+}
+
+function normalizeCompatPromptRules(rules: Partial<CompatPromptRule>[]) {
+  return rules.map((rule, index) => normalizeCompatPromptRule(rule, index));
+}
+
+function formatCompatPromptRulesJson(rules: CompatPromptRule[]) {
+  return JSON.stringify(normalizeCompatPromptRules(rules), null, 2);
+}
+
+function extractCompatPromptRulesArray(payload: unknown): unknown[] | null {
+  if (Array.isArray(payload)) {
+    return payload;
+  }
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+
+  const source = payload as {
+    modelPromptRules?: unknown;
+    compatPromptConfig?: {
+      modelPromptRules?: unknown;
+    };
+  };
+  if (Array.isArray(source.modelPromptRules)) {
+    return source.modelPromptRules;
+  }
+  if (source.compatPromptConfig && Array.isArray(source.compatPromptConfig.modelPromptRules)) {
+    return source.compatPromptConfig.modelPromptRules;
+  }
+  return null;
+}
+
+function parseCompatPromptRulesJson(value: string): CompatPromptRule[] {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return [];
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    throw new Error("模型规则 JSON 格式无效。");
+  }
+  const sourceArray = extractCompatPromptRulesArray(parsed);
+  if (!sourceArray) {
+    throw new Error(
+      "模型规则 JSON 必须是数组，或包含 modelPromptRules / compatPromptConfig.modelPromptRules。"
+    );
+  }
+
+  return sourceArray.map((entry, index) => {
+    if (!entry || typeof entry !== "object") {
+      throw new Error(`第 ${index + 1} 条模型规则必须是对象。`);
+    }
+
+    const source = entry as Record<string, unknown>;
+    const hint = typeof source.hint === "string" ? source.hint.trim() : "";
+    if (!hint) {
+      throw new Error(`第 ${index + 1} 条模型规则缺少 hint。`);
+    }
+    return normalizeCompatPromptRule(
+      {
+        id: typeof source.id === "string" ? source.id : undefined,
+        enabled: typeof source.enabled === "boolean" ? source.enabled : undefined,
+        provider: typeof source.provider === "string" ? source.provider : undefined,
+        upstreamModelPattern:
+          typeof source.upstreamModelPattern === "string"
+            ? source.upstreamModelPattern
+            : undefined,
+        hint
+      },
+      index
+    );
+  });
+}
+
+function ensureCompatPromptRuleIdsUnique(rules: CompatPromptRule[]) {
+  const usedIds = new Set<string>();
+  return rules.map((rule, index) => {
+    const base = rule.id.trim() || `rule-${index + 1}`;
+    let nextId = base;
+    let suffix = 2;
+    while (usedIds.has(nextId)) {
+      nextId = `${base}-${suffix}`;
+      suffix += 1;
+    }
+    usedIds.add(nextId);
+    return {
+      ...rule,
+      id: nextId
+    };
+  });
+}
+
+function stringifyCompatPromptRuleForSearch(rule: CompatPromptRule) {
+  return [rule.id, rule.provider, rule.upstreamModelPattern, rule.hint].join(" ").toLowerCase();
+}
+
 function resolveThinkingTokens(contextWindow: number | null) {
   if (!contextWindow || !Number.isFinite(contextWindow) || contextWindow <= 0) {
     return 8192;
@@ -1108,6 +1253,14 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   const [testingUpstream, setTestingUpstream] = useState(false);
   const [compatPromptKeywordsInput, setCompatPromptKeywordsInput] = useState("");
   const [compatPromptHintInput, setCompatPromptHintInput] = useState("");
+  const [compatPromptRulesDraft, setCompatPromptRulesDraft] = useState<CompatPromptRule[]>([]);
+  const [compatPromptRuleSearch, setCompatPromptRuleSearch] = useState("");
+  const [compatPromptRulesJsonInput, setCompatPromptRulesJsonInput] = useState("[]");
+  const [showCompatPromptRulesJsonEditor, setShowCompatPromptRulesJsonEditor] = useState(false);
+  const [compatPromptRulesImportMode, setCompatPromptRulesImportMode] = useState<
+    "append" | "replace"
+  >("append");
+  const compatPromptRulesFileInputRef = useRef<HTMLInputElement | null>(null);
   const [compatPromptDefaults, setCompatPromptDefaults] = useState<CompatPromptConfig | null>(
     null
   );
@@ -2101,8 +2254,130 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   }
 
   function applyCompatPromptConfig(config: CompatPromptConfig) {
+    const normalizedRules = normalizeCompatPromptRules(config.modelPromptRules ?? []);
     setCompatPromptKeywordsInput(formatCompatPromptKeywordsInput(config.agentsMdKeywords));
     setCompatPromptHintInput(config.chineseReplyHint);
+    setCompatPromptRulesDraft(normalizedRules);
+    setCompatPromptRuleSearch("");
+    setCompatPromptRulesJsonInput(formatCompatPromptRulesJson(normalizedRules));
+  }
+
+  function addCompatPromptRule(overrides: Partial<CompatPromptRule> = {}) {
+    setCompatPromptRulesDraft((prev) => [
+      ...prev,
+      createCompatPromptRuleDraft({
+        enabled: true,
+        ...overrides
+      })
+    ]);
+  }
+
+  function updateCompatPromptRule(
+    index: number,
+    updater: (rule: CompatPromptRule) => CompatPromptRule
+  ) {
+    setCompatPromptRulesDraft((prev) =>
+      prev.map((item, itemIndex) => (itemIndex === index ? updater(item) : item))
+    );
+  }
+
+  function removeCompatPromptRule(index: number) {
+    setCompatPromptRulesDraft((prev) => prev.filter((_, itemIndex) => itemIndex !== index));
+  }
+
+  function duplicateCompatPromptRule(index: number) {
+    setCompatPromptRulesDraft((prev) => {
+      if (index < 0 || index >= prev.length) {
+        return prev;
+      }
+      const target = prev[index];
+      const duplicated = createCompatPromptRuleDraft({
+        enabled: target.enabled,
+        provider: target.provider,
+        upstreamModelPattern: target.upstreamModelPattern,
+        hint: target.hint
+      });
+      return [...prev.slice(0, index + 1), duplicated, ...prev.slice(index + 1)];
+    });
+  }
+
+  function exportCompatPromptRulesToJsonDraft() {
+    setCompatPromptRulesJsonInput(formatCompatPromptRulesJson(compatPromptRulesDraft));
+    notifyInfo(t("已生成最新 JSON 草稿。", "JSON draft refreshed from current rules."));
+  }
+
+  function applyImportedCompatPromptRules(
+    incomingRules: CompatPromptRule[],
+    mode: "append" | "replace",
+    sourceLabel: string
+  ) {
+    const normalizedIncoming = normalizeCompatPromptRules(incomingRules);
+    const mergedRules = ensureCompatPromptRuleIdsUnique(
+      mode === "append"
+        ? [...compatPromptRulesDraft, ...normalizedIncoming]
+        : [...normalizedIncoming]
+    );
+    if (mergedRules.length > 128) {
+      notifyError(t("模型规则最多 128 条。", "Model prompt rules are limited to 128."));
+      return;
+    }
+    setCompatPromptRulesDraft(mergedRules);
+    setCompatPromptRuleSearch("");
+    setCompatPromptRulesJsonInput(formatCompatPromptRulesJson(mergedRules));
+    notifySuccess(
+      mode === "append"
+        ? t(
+            `已从 ${sourceLabel} 批量追加 ${normalizedIncoming.length} 条规则。`,
+            `Appended ${normalizedIncoming.length} rules from ${sourceLabel}.`
+          )
+        : t(
+            `已从 ${sourceLabel} 批量覆盖规则列表（${normalizedIncoming.length} 条）。`,
+            `Replaced rules from ${sourceLabel} (${normalizedIncoming.length} items).`
+          )
+    );
+  }
+
+  function importCompatPromptRulesFromJsonDraft(mode: "append" | "replace" = "replace") {
+    try {
+      const nextRules = parseCompatPromptRulesJson(compatPromptRulesJsonInput);
+      applyImportedCompatPromptRules(nextRules, mode, "JSON");
+    } catch (err) {
+      notifyError(
+        err instanceof Error
+          ? err.message
+          : t("模型规则 JSON 无效。", "Invalid model rules JSON.")
+      );
+    }
+  }
+
+  function openCompatPromptRulesFileImporter(mode: "append" | "replace") {
+    setCompatPromptRulesImportMode(mode);
+    const input = compatPromptRulesFileInputRef.current;
+    if (!input) {
+      notifyError(t("导入控件不可用。", "Import control unavailable."));
+      return;
+    }
+    input.value = "";
+    input.click();
+  }
+
+  async function handleCompatPromptRulesFileChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0] ?? null;
+    event.target.value = "";
+    if (!file) {
+      return;
+    }
+    try {
+      const text = await file.text();
+      const nextRules = parseCompatPromptRulesJson(text);
+      applyImportedCompatPromptRules(nextRules, compatPromptRulesImportMode, file.name);
+    } catch (err) {
+      notifyError(
+        err instanceof Error
+          ? err.message
+          : t("批量导入失败。", "Batch import failed.")
+      );
+    }
   }
 
   async function loadGatewayConfig() {
@@ -2118,6 +2393,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   async function saveGatewayCompatPromptConfig() {
     const agentsMdKeywords = parseCompatPromptKeywordsInput(compatPromptKeywordsInput);
     const chineseReplyHint = compatPromptHintInput.trim();
+    const modelPromptRules = normalizeCompatPromptRules(compatPromptRulesDraft);
 
     if (!agentsMdKeywords.length) {
       notifyError(t("至少保留一个 AGENTS 关键词。", "Keep at least one AGENTS keyword."));
@@ -2127,6 +2403,22 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       notifyError(t("默认提示词不能为空。", "Default hint cannot be empty."));
       return;
     }
+    if (modelPromptRules.length > 128) {
+      notifyError(t("模型规则最多 128 条。", "Model prompt rules are limited to 128."));
+      return;
+    }
+    for (let i = 0; i < modelPromptRules.length; i += 1) {
+      if (!modelPromptRules[i].hint) {
+        notifyError(
+          t(
+            `第 ${i + 1} 条模型规则缺少 hint。`,
+            `Rule #${i + 1} is missing hint.`
+          )
+        );
+        return;
+      }
+    }
+    setCompatPromptRulesJsonInput(formatCompatPromptRulesJson(modelPromptRules));
 
     setSavingCompatPromptConfig(true);
     try {
@@ -2138,7 +2430,8 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
         body: JSON.stringify({
           compatPromptConfig: {
             agentsMdKeywords,
-            chineseReplyHint
+            chineseReplyHint,
+            modelPromptRules
           }
         })
       });
@@ -2149,7 +2442,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       const data = (await response.json()) as ConfigSummaryResponse;
       setCompatPromptDefaults(data.compatPromptDefaults);
       applyCompatPromptConfig(data.compatPromptConfig);
-      notifySuccess(t("网关默认提示词配置已保存。", "Gateway default prompt config saved."));
+      notifySuccess(t("网关注入提示词配置已保存。", "Gateway injected prompt config saved."));
     } catch (err) {
       notifyError(
         err instanceof Error
@@ -3567,6 +3860,26 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   );
   const compatPromptKeywordCount = parseCompatPromptKeywordsInput(compatPromptKeywordsInput).length;
   const compatPromptHintLength = compatPromptHintInput.trim().length;
+  const compatPromptRuleCount = compatPromptRulesDraft.length;
+  const compatPromptRuleEnabledCount = compatPromptRulesDraft.filter((item) => item.enabled).length;
+  const compatPromptRuleSearchKeyword = compatPromptRuleSearch.trim().toLowerCase();
+  const compatPromptRuleVisibleItems = compatPromptRulesDraft
+    .map((rule, index) => ({ rule, index }))
+    .filter(({ rule }) =>
+      compatPromptRuleSearchKeyword
+        ? stringifyCompatPromptRuleForSearch(rule).includes(compatPromptRuleSearchKeyword)
+        : true
+    );
+  const compatPromptUpstreamModelSuggestions = Array.from(
+    new Set(
+      channels
+        .flatMap((channel) => channel.upstreamModels)
+        .map((model) => model.model.trim())
+        .filter(Boolean)
+    )
+  )
+    .sort((a, b) => a.localeCompare(b))
+    .slice(0, 16);
   const routeModuleTitle = t(MODULE_LABEL[routeModule].zh, MODULE_LABEL[routeModule].en);
   const routeModuleSummary = t(MODULE_SUMMARY[routeModule].zh, MODULE_SUMMARY[routeModule].en);
 
@@ -3712,6 +4025,8 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                     <span className="tc-label">{t("提示词配置", "Prompt Config")}</span>
                     <Tag variant="light-outline">keywords={compatPromptKeywordCount}</Tag>
                     <Tag variant="light-outline">hint_chars={compatPromptHintLength}</Tag>
+                    <Tag variant="light-outline">rules={compatPromptRuleCount}</Tag>
+                    <Tag variant="light-outline">enabled={compatPromptRuleEnabledCount}</Tag>
                     {savingCompatPromptConfig ? (
                       <Tag theme="warning" variant="light-outline">{t("保存中", "Saving")}</Tag>
                     ) : null}
@@ -3898,6 +4213,8 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                   <>
                     <Tag variant="light-outline">keywords={compatPromptKeywordCount}</Tag>
                     <Tag variant="light-outline">hint_chars={compatPromptHintLength}</Tag>
+                    <Tag variant="light-outline">rules={compatPromptRuleCount}</Tag>
+                    <Tag variant="light-outline">enabled={compatPromptRuleEnabledCount}</Tag>
                     <Tag variant="light-outline">defaults={compatPromptDefaults ? "loaded" : "pending"}</Tag>
                   </>
                 ) : routeModule === "upstream" ? (
@@ -4424,11 +4741,11 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
 
               {routeModule === "prompt" ? (
                 <section className="tc-section">
-                  <h3>{t("网关默认提示词配置", "Gateway Default Prompt Config")}</h3>
+                  <h3>{t("网关注入提示词配置", "Gateway Injected Prompt Config")}</h3>
                   <p className="tc-upstream-advice">
                     {t(
-                      "这里控制在检测到 AGENTS.md 相关提示时，网关自动插入的默认中文回复与 `apply_patch` 约束。保存后会影响后续请求。",
-                      "This controls the default Chinese reply and `apply_patch` rules automatically injected when AGENTS.md-style prompts are detected. Changes affect future requests."
+                      "这里控制 AGENTS.md 检测场景下注入策略：未命中规则时使用默认提示词；命中上游真实模型规则时，用该模型专属提示词替换默认提示词。保存后会影响后续请求。",
+                      "This controls AGENTS.md injection behavior: use the default hint when no rule matches; when a real-upstream-model rule matches, its model-specific hint replaces the default hint."
                     )}
                   </p>
 
@@ -4454,6 +4771,270 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                     </label>
                   </div>
 
+                  <div className="tc-model-list-toolbar">
+                    <div className="tc-model-list-toolbar-left">
+                      <div className="tc-model-list-title">{t("模型定制规则", "Model-Specific Rules")}</div>
+                      <Tag variant="light-outline">
+                        {t("当前", "Current")} {compatPromptRuleCount} {t("条", "items")}
+                      </Tag>
+                      <Tag variant="light-outline">
+                        {t("启用", "Enabled")} {compatPromptRuleEnabledCount}
+                      </Tag>
+                    </div>
+                    <div className="tc-model-list-toolbar-left">
+                      <Input
+                        value={compatPromptRuleSearch}
+                        onChange={(value) => setCompatPromptRuleSearch(value)}
+                        clearable
+                        placeholder={t("搜索规则 ID / 模型 / 提示词", "Search rule ID / model / hint")}
+                        style={{ width: 280 }}
+                      />
+                      <Button
+                        theme="primary"
+                        variant="outline"
+                        onClick={() => addCompatPromptRule()}
+                        disabled={compatPromptRuleCount >= 128}
+                      >
+                        {t("新增规则", "Add Rule")}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        theme="default"
+                        onClick={() => openCompatPromptRulesFileImporter("append")}
+                        disabled={compatPromptRuleCount >= 128}
+                      >
+                        {t("批量导入并追加", "Batch Import (Append)")}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        theme="default"
+                        onClick={() => openCompatPromptRulesFileImporter("replace")}
+                      >
+                        {t("批量导入并覆盖", "Batch Import (Replace)")}
+                      </Button>
+                    </div>
+                  </div>
+                  <input
+                    ref={compatPromptRulesFileInputRef}
+                    type="file"
+                    accept=".json,application/json"
+                    style={{ display: "none" }}
+                    onChange={(event) => void handleCompatPromptRulesFileChange(event)}
+                  />
+
+                  {compatPromptUpstreamModelSuggestions.length > 0 ? (
+                    <>
+                      <p className="tc-upstream-advice">
+                        {t(
+                          "已发现上游真实模型。可一键创建规则，也可以手填任意上游真实模型名称。",
+                          "Detected real upstream models. You can add rules with one click, or type any upstream model manually."
+                        )}
+                      </p>
+                      <div className="tc-actions-row">
+                        {compatPromptUpstreamModelSuggestions.map((model) => (
+                          <Button
+                            key={model}
+                            variant="outline"
+                            size="small"
+                            onClick={() =>
+                              addCompatPromptRule({
+                                upstreamModelPattern: model
+                              })
+                            }
+                            disabled={compatPromptRuleCount >= 128}
+                          >
+                            {model}
+                          </Button>
+                        ))}
+                      </div>
+                    </>
+                  ) : null}
+
+                  {compatPromptRuleCount === 0 ? (
+                    <p className="tc-upstream-advice">
+                      {t(
+                        "当前没有模型规则。你可以点击“新增规则”开始按上游真实模型定制提示词。",
+                        "No model rules yet. Click 'Add Rule' to start customizing hints by real upstream model."
+                      )}
+                    </p>
+                  ) : compatPromptRuleVisibleItems.length === 0 ? (
+                    <p className="tc-upstream-advice">
+                      {t(
+                        "没有匹配搜索条件的规则。",
+                        "No rules matched the search filter."
+                      )}
+                    </p>
+                  ) : (
+                    <div className="tc-model-list">
+                      {compatPromptRuleVisibleItems.map(({ rule, index }) => (
+                        <div className="tc-model-item" key={`${rule.id}-${index}`}>
+                          <div className="tc-model-head">
+                            <strong>{t("规则", "Rule")} #{index + 1}</strong>
+                            <div className="tc-model-actions">
+                              <Tag
+                                theme={rule.enabled ? "success" : "default"}
+                                variant="light-outline"
+                              >
+                                {rule.enabled ? t("启用", "Enabled") : t("停用", "Disabled")}
+                              </Tag>
+                              <Button
+                                variant="outline"
+                                size="small"
+                                onClick={() => duplicateCompatPromptRule(index)}
+                                disabled={compatPromptRuleCount >= 128}
+                              >
+                                {t("复制", "Duplicate")}
+                              </Button>
+                              <Button
+                                theme="danger"
+                                variant="text"
+                                size="small"
+                                onClick={() => removeCompatPromptRule(index)}
+                              >
+                                {t("删除", "Delete")}
+                              </Button>
+                            </div>
+                          </div>
+
+                          <div className="tc-form-grid">
+                            <label className="tc-field">
+                              <span>{t("规则 ID", "Rule ID")}</span>
+                              <Input
+                                value={rule.id}
+                                onChange={(value) =>
+                                  updateCompatPromptRule(index, (prev) => ({
+                                    ...prev,
+                                    id: value
+                                  }))
+                                }
+                                clearable
+                              />
+                            </label>
+
+                            <label className="tc-switchline">
+                              <span>{t("启用规则", "Rule Enabled")}</span>
+                              <Switch
+                                value={rule.enabled}
+                                onChange={(value) =>
+                                  updateCompatPromptRule(index, (prev) => ({
+                                    ...prev,
+                                    enabled: Boolean(value)
+                                  }))
+                                }
+                              />
+                            </label>
+
+                            <label className="tc-field">
+                              <span>{t("供应商匹配（可选）", "Provider Pattern (optional)")}</span>
+                              <Input
+                                value={rule.provider}
+                                onChange={(value) =>
+                                  updateCompatPromptRule(index, (prev) => ({
+                                    ...prev,
+                                    provider: value
+                                  }))
+                                }
+                                placeholder={t("例如：doubao / glm / *", "e.g. doubao / glm / *")}
+                                clearable
+                              />
+                            </label>
+
+                            <label className="tc-field">
+                              <span>{t("上游真实模型匹配", "Upstream Real Model Pattern")}</span>
+                              <Input
+                                value={rule.upstreamModelPattern}
+                                onChange={(value) =>
+                                  updateCompatPromptRule(index, (prev) => ({
+                                    ...prev,
+                                    upstreamModelPattern: value
+                                  }))
+                                }
+                                placeholder={t(
+                                  "例如：doubao-seed-2.0-pro / glm-5 / *",
+                                  "e.g. doubao-seed-2.0-pro / glm-5 / *"
+                                )}
+                                clearable
+                              />
+                            </label>
+
+                            <label className="tc-field tc-field-wide">
+                              <span>{t("规则追加提示词", "Rule Extra Hint")}</span>
+                              <Textarea
+                                value={rule.hint}
+                                onChange={(value) =>
+                                  updateCompatPromptRule(index, (prev) => ({
+                                    ...prev,
+                                    hint: value
+                                  }))
+                                }
+                                autosize={{ minRows: 6, maxRows: 14 }}
+                                placeholder={t(
+                                  "请输入该模型命中时需要追加的提示词",
+                                  "Enter extra hint to append when this rule matches"
+                                )}
+                              />
+                            </label>
+
+                            <p className="tc-upstream-advice tc-field-wide">
+                              {t(
+                                "匹配建议：优先填写“上游真实模型匹配”，可搭配 provider 收敛范围。支持 `*`、`?` 通配。",
+                                "Matching tip: prioritize upstream real model pattern, then narrow with provider if needed. `*` and `?` wildcards are supported."
+                              )}
+                            </p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="tc-actions-row">
+                    <Button
+                      variant="outline"
+                      theme="default"
+                      onClick={() => setShowCompatPromptRulesJsonEditor((prev) => !prev)}
+                    >
+                      {showCompatPromptRulesJsonEditor
+                        ? t("收起 JSON 批量编辑", "Hide JSON Bulk Editor")
+                        : t("展开 JSON 批量编辑", "Show JSON Bulk Editor")}
+                    </Button>
+                  </div>
+
+                  {showCompatPromptRulesJsonEditor ? (
+                    <>
+                      <div className="tc-form-grid">
+                        <label className="tc-field tc-field-wide">
+                          <span>{t("高级：模型规则 JSON", "Advanced: Model Rules JSON")}</span>
+                          <Textarea
+                            value={compatPromptRulesJsonInput}
+                            onChange={(value) => setCompatPromptRulesJsonInput(value)}
+                            autosize={{ minRows: 10, maxRows: 22 }}
+                            placeholder={t("可用于批量导入导出规则", "Use for bulk import/export of rules")}
+                          />
+                        </label>
+                      </div>
+                      <div className="tc-actions-row">
+                        <Button variant="outline" theme="default" onClick={exportCompatPromptRulesToJsonDraft}>
+                          {t("从当前规则生成 JSON", "Generate JSON from Rules")}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          theme="default"
+                          onClick={() => importCompatPromptRulesFromJsonDraft("append")}
+                          disabled={compatPromptRuleCount >= 128}
+                        >
+                          {t("从 JSON 追加规则", "Append Rules from JSON")}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          theme="default"
+                          onClick={() => importCompatPromptRulesFromJsonDraft("replace")}
+                        >
+                          {t("从 JSON 覆盖规则", "Replace Rules from JSON")}
+                        </Button>
+                      </div>
+                    </>
+                  ) : null}
+
                   <div className="tc-actions-row">
                     <Button
                       theme="primary"
@@ -4461,7 +5042,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                       onClick={() => void saveGatewayCompatPromptConfig()}
                       disabled={loading}
                     >
-                      {t("保存全局提示词配置", "Save Global Prompt Config")}
+                      {t("保存提示词配置", "Save Prompt Config")}
                     </Button>
                     <Button
                       variant="outline"
@@ -4480,8 +5061,8 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
 
                   <p className="tc-tip">
                     {t(
-                      "说明：关键词用于定位 AGENTS.md 段落前的插入位置；默认提示词会原样注入，所以你可以按自己的工作流调整语言、补丁规范和行为约束。",
-                      "Keywords locate the insertion point before AGENTS.md sections; the default hint is injected as-is, so you can tailor language, patch rules, and behavior for your own workflow."
+                      "规则字段：provider / upstreamModelPattern 支持 `*`、`?` 通配；优先按上游真实模型命中。命中规则后将替换默认提示词。支持批量导入 `.json`（数组，或含 modelPromptRules/compatPromptConfig.modelPromptRules）。关键词用于定位 AGENTS.md 段落前的插入位置。",
+                      "Rule fields provider / upstreamModelPattern support `*` and `?` wildcards; matching prioritizes real upstream model. A matched rule replaces the default hint. Batch `.json` import is supported (array, or modelPromptRules/compatPromptConfig.modelPromptRules). Keywords still control where hints are injected before AGENTS.md sections."
                     )}
                   </p>
                 </section>

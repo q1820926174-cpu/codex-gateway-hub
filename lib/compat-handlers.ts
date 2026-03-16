@@ -17,6 +17,7 @@ import {
   extractLegacyChatCompletionText,
   extractResponseText,
   isStreamingRequest,
+  normalizeFunctionToolArgumentsForResponses,
   type LegacyChatMessage,
   type LegacyChatRequest,
   mapLegacyChatCompletionToResponses,
@@ -45,6 +46,7 @@ import {
   normalizeUpstreamModels,
   pickModelFromPool,
   normalizeUpstreamWireApiValue,
+  supportsGlmThinkingType,
   type GlmCodexThinkingThreshold
 } from "@/lib/key-config";
 import { normalizeUpstreamModelCode } from "@/lib/providers";
@@ -60,7 +62,10 @@ import {
   extractTokenUsageFromPayload,
   recordTokenUsageEvent
 } from "@/lib/usage-report";
-import { getCompatPromptConfig } from "@/lib/compat-config";
+import {
+  getCompatPromptConfig,
+  resolveCompatPromptHintForModel
+} from "@/lib/compat-config";
 import { appendAiCallLogEntry } from "@/lib/ai-call-log-store";
 import { persistAiCallImage } from "@/lib/ai-call-image-store";
 import { readResponseContext, writeResponseContext } from "@/lib/response-context-store";
@@ -708,6 +713,26 @@ async function resolveRuntimeKeyFromChannel(
 type ResolvedModelCandidate = RuntimeModelResolved & {
   mapping: ResolvedGatewayKey["modelMappings"][number] | null;
 };
+
+function isGpt53CodexModelName(model: string | null | undefined) {
+  const normalized = model?.trim().toLowerCase() || "";
+  return normalized === "gpt-5.3-codex" || normalized.startsWith("gpt-5.3-codex-");
+}
+
+function resolvePreferredThinkingTypeForCandidate(candidate: ResolvedModelCandidate) {
+  const explicit = candidate.mapping?.thinkingType ?? null;
+  if (explicit === "enabled" || explicit === "disabled" || explicit === "auto") {
+    return explicit;
+  }
+
+  const provider = candidate.runtimeKey.provider.trim().toLowerCase();
+  if (provider === "glm" && isGpt53CodexModelName(candidate.clientModel)) {
+    // Improve Codex UX on GLM route by defaulting to no-thinking unless explicitly overridden.
+    return "disabled" as const;
+  }
+
+  return null;
+}
 
 const modelFailoverRoundRobinCursor = new Map<string, number>();
 
@@ -1605,8 +1630,96 @@ function normalizeOptionalString(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : "";
 }
 
-function injectChineseReplyHintBeforeAgents(text: string) {
+type AgentsHintRewriteOptions = {
+  force?: boolean;
+  extraHint?: string;
+};
+
+const DOUBAO_GPT52_TOOL_ACCURACY_HINT = `
+Doubao gpt-5.2-codex tool accuracy mode:
+- Prioritize correct real tool calls over long narration.
+- For function-style apply_patch, arguments MUST be valid JSON: {"input":"<patch text>"}.
+- Do not end a task until post-action checks pass.
+- For ordered tasks, execute strictly in order and verify each step.
+`.trim();
+
+function isGpt52CodexModelName(model: string | null | undefined) {
+  const normalized = model?.trim().toLowerCase() || "";
+  return normalized === "gpt-5.2-codex" || normalized.startsWith("gpt-5.2-codex-");
+}
+
+function isDoubaoModelName(model: string | null | undefined) {
+  const normalized = model?.trim().toLowerCase() || "";
+  return (
+    normalized.includes("doubao") ||
+    normalized.includes("seed-2.0-code") ||
+    normalized.startsWith("doubao-")
+  );
+}
+
+function resolveLegacyModelSpecificCompatHint(params: {
+  provider: string | null | undefined;
+  clientModel: string | null | undefined;
+  upstreamModel: string | null | undefined;
+}) {
+  const normalizedProvider = params.provider?.trim().toLowerCase() || "";
+  if (
+    normalizedProvider === "doubao" ||
+    isGpt52CodexModelName(params.clientModel) ||
+    isDoubaoModelName(params.upstreamModel)
+  ) {
+    return DOUBAO_GPT52_TOOL_ACCURACY_HINT;
+  }
+  return "";
+}
+
+function resolveRuntimeCompatHint(params: {
+  provider: string | null | undefined;
+  clientModel: string | null | undefined;
+  upstreamModel: string | null | undefined;
+}) {
+  const configuredHint = resolveCompatPromptHintForModel(params);
+  if (configuredHint) {
+    return configuredHint;
+  }
+  return resolveLegacyModelSpecificCompatHint(params);
+}
+
+function shouldSkipAgentsHintRewrite(provider: string, model: string | null | undefined) {
+  const normalizedProvider = provider.trim().toLowerCase();
+  return normalizedProvider === "openai" && isGptFamilyModel(provider, model);
+}
+
+function shouldForceAgentsHint(req: Request) {
+  const clientMarker = normalizeOptionalString(
+    req.headers.get("x-codex-gateway-client")
+  ).toLowerCase();
+  if (clientMarker === "codex") {
+    return true;
+  }
+
+  const applyPatchToolType = normalizeOptionalString(
+    req.headers.get("x-codex-apply-patch-tool-type")
+  ).toLowerCase();
+  return applyPatchToolType === "function" || applyPatchToolType === "freeform";
+}
+
+function injectChineseReplyHintBeforeAgents(
+  text: string,
+  options: AgentsHintRewriteOptions = {}
+) {
   const compatPromptConfig = getCompatPromptConfig();
+  const baseHint = compatPromptConfig.chineseReplyHint;
+  const extraHint = normalizeOptionalString(options.extraHint);
+  // When a model-specific hint exists, it replaces the default hint for this request.
+  const activeHint = extraHint || baseHint;
+  if (!activeHint) {
+    return text;
+  }
+  if (text.includes(activeHint)) {
+    return text;
+  }
+
   let agentsIndex = -1;
   for (const keyword of compatPromptConfig.agentsMdKeywords) {
     const index = text.indexOf(keyword);
@@ -1614,23 +1727,38 @@ function injectChineseReplyHintBeforeAgents(text: string) {
       agentsIndex = index;
     }
   }
+  const insertHintToPrefix = (prefixText: string) => (prefixText.includes(activeHint) ? "" : activeHint);
+
   if (agentsIndex < 0) {
-    return text;
+    if (!options.force) {
+      return text;
+    }
+    const hintToInject = insertHintToPrefix(text);
+    if (!hintToInject) {
+      return text;
+    }
+    const prefix = text.startsWith("\n") || !text ? "" : "\n";
+    return `${hintToInject}${prefix}${text}`;
   }
-  if (text.slice(0, agentsIndex).includes(compatPromptConfig.chineseReplyHint)) {
+  const prefixText = text.slice(0, agentsIndex);
+  const hintToInject = insertHintToPrefix(prefixText);
+  if (!hintToInject) {
     return text;
   }
   const prefix = agentsIndex > 0 && text[agentsIndex - 1] !== "\n" ? "\n" : "";
   return (
     text.slice(0, agentsIndex) +
-    `${prefix}${compatPromptConfig.chineseReplyHint}\n` +
+    `${prefix}${hintToInject}\n` +
     text.slice(agentsIndex)
   );
 }
 
-function rewriteUserTextPartForAgentsHint(part: unknown): unknown {
+function rewriteUserTextPartForAgentsHint(
+  part: unknown,
+  options: AgentsHintRewriteOptions = {}
+): unknown {
   if (typeof part === "string") {
-    return injectChineseReplyHintBeforeAgents(part);
+    return injectChineseReplyHintBeforeAgents(part, options);
   }
   if (!part || typeof part !== "object") {
     return deepCloneUnknown(part);
@@ -1644,22 +1772,28 @@ function rewriteUserTextPartForAgentsHint(part: unknown): unknown {
   const nextPart = cloned as Record<string, unknown>;
   const type = normalizeOptionalString(nextPart.type).toLowerCase();
   if ((type === "text" || type === "input_text") && typeof nextPart.text === "string") {
-    nextPart.text = injectChineseReplyHintBeforeAgents(nextPart.text);
+    nextPart.text = injectChineseReplyHintBeforeAgents(nextPart.text, options);
   }
   return nextPart;
 }
 
-function rewriteLegacyContentForAgentsHint(content: unknown): unknown {
+function rewriteLegacyContentForAgentsHint(
+  content: unknown,
+  options: AgentsHintRewriteOptions = {}
+): unknown {
   if (typeof content === "string") {
-    return injectChineseReplyHintBeforeAgents(content);
+    return injectChineseReplyHintBeforeAgents(content, options);
   }
   if (Array.isArray(content)) {
-    return content.map((part) => rewriteUserTextPartForAgentsHint(part));
+    return content.map((part) => rewriteUserTextPartForAgentsHint(part, options));
   }
   return content;
 }
 
-function rewriteLegacyBodyForAgentsHint(body: LegacyChatRequest): LegacyChatRequest {
+function rewriteLegacyBodyForAgentsHint(
+  body: LegacyChatRequest,
+  options: AgentsHintRewriteOptions = {}
+): LegacyChatRequest {
   const messages = normalizeLegacyMessages(body.messages);
   if (!messages.length) {
     return body;
@@ -1671,7 +1805,7 @@ function rewriteLegacyBodyForAgentsHint(body: LegacyChatRequest): LegacyChatRequ
       message.role === "user"
         ? {
             ...message,
-            content: rewriteLegacyContentForAgentsHint(message.content)
+            content: rewriteLegacyContentForAgentsHint(message.content, options)
           }
         : message
     )
@@ -1700,9 +1834,12 @@ function isResponsesUserInputEntry(entry: unknown) {
   return role !== "assistant" && role !== "tool" && role !== "system" && role !== "developer";
 }
 
-function rewriteResponsesUserEntryForAgentsHint(entry: unknown): unknown {
+function rewriteResponsesUserEntryForAgentsHint(
+  entry: unknown,
+  options: AgentsHintRewriteOptions = {}
+): unknown {
   if (typeof entry === "string") {
-    return injectChineseReplyHintBeforeAgents(entry);
+    return injectChineseReplyHintBeforeAgents(entry, options);
   }
   if (!entry || typeof entry !== "object") {
     return entry;
@@ -1716,19 +1853,22 @@ function rewriteResponsesUserEntryForAgentsHint(entry: unknown): unknown {
   const nextEntry = cloned as Record<string, unknown>;
   const content = nextEntry.content;
   if (typeof content === "string") {
-    nextEntry.content = injectChineseReplyHintBeforeAgents(content);
+    nextEntry.content = injectChineseReplyHintBeforeAgents(content, options);
   } else if (Array.isArray(content)) {
-    nextEntry.content = content.map((part) => rewriteUserTextPartForAgentsHint(part));
+    nextEntry.content = content.map((part) => rewriteUserTextPartForAgentsHint(part, options));
   }
 
   return nextEntry;
 }
 
-function rewriteResponsesBodyForAgentsHint(body: ResponsesRequest): ResponsesRequest {
+function rewriteResponsesBodyForAgentsHint(
+  body: ResponsesRequest,
+  options: AgentsHintRewriteOptions = {}
+): ResponsesRequest {
   if (typeof body.input === "string") {
     return {
       ...body,
-      input: injectChineseReplyHintBeforeAgents(body.input)
+      input: injectChineseReplyHintBeforeAgents(body.input, options)
     };
   }
 
@@ -1737,7 +1877,7 @@ function rewriteResponsesBodyForAgentsHint(body: ResponsesRequest): ResponsesReq
       ...body,
       input: body.input.map((entry) =>
         isResponsesUserInputEntry(entry)
-          ? rewriteResponsesUserEntryForAgentsHint(entry)
+          ? rewriteResponsesUserEntryForAgentsHint(entry, options)
           : deepCloneUnknown(entry)
       )
     };
@@ -1747,7 +1887,7 @@ function rewriteResponsesBodyForAgentsHint(body: ResponsesRequest): ResponsesReq
     return {
       ...body,
       input: isResponsesUserInputEntry(body.input)
-        ? rewriteResponsesUserEntryForAgentsHint(body.input)
+        ? rewriteResponsesUserEntryForAgentsHint(body.input, options)
         : deepCloneUnknown(body.input)
     };
   }
@@ -2423,8 +2563,9 @@ function applyCodexThinkingModeForChat<T extends LegacyChatRequest>(
   };
   // GLM chat/completions follows documented `thinking.type` only.
   const normalizedProvider = provider.trim().toLowerCase();
+  const targetModel = typeof payload.model === "string" ? payload.model : "";
   const preferredType = normalizeThinkingType(preferredThinkingType);
-  if (normalizedProvider === "glm") {
+  if (supportsGlmThinkingType(normalizedProvider, targetModel)) {
     nextPayload.messages = sanitizeLegacyMessagesForGenericUpstream(payload.messages, {
       preserveReasoningContent: true
     });
@@ -2928,6 +3069,8 @@ function transformChatStreamToResponses(
   const pendingToolCalls = new Map<number, PendingToolCall>();
   const completedOutputItems: ResponseOutputItem[] = [];
   const isCustomToolCall = (callName: string) => options?.customToolNames?.has(callName.trim()) ?? false;
+  const isApplyPatchFunctionCall = (callName: string) =>
+    !isCustomToolCall(callName) && callName.trim().toLowerCase() === "apply_patch";
   const getToolCallPayload = (call: PendingToolCall, allowFallback = true) =>
     isCustomToolCall(call.name)
       ? extractCustomToolInputFromChatArguments(call.arguments, allowFallback)
@@ -3111,6 +3254,9 @@ function transformChatStreamToResponses(
       return;
     }
     const toolName = call.name || "unknown_tool";
+    if (item.type === "function_call" && isApplyPatchFunctionCall(toolName)) {
+      return;
+    }
     const payload = getToolCallPayload(call, item.type !== "custom_tool_call");
     if (payload == null) {
       return;
@@ -3200,7 +3346,10 @@ function transformChatStreamToResponses(
       if (item.type === "custom_tool_call") {
         item.input = payload ?? "";
       } else {
-        item.arguments = payload ?? "";
+        item.arguments = normalizeFunctionToolArgumentsForResponses(
+          toolName,
+          payload ?? ""
+        );
       }
       item.status = "completed";
       if (item.type === "custom_tool_call") {
@@ -5212,6 +5361,7 @@ export async function handleLegacyChatCompletions(
   route = "/v1/chat/completions"
 ) {
   const rawBody = (await req.json().catch(() => ({}))) as Parameters<typeof mapLegacyChatToResponses>[0];
+  const forceAgentsHint = shouldForceAgentsHint(req);
 
   const resolved = await resolveGatewayKey(
     req.headers.get("authorization"),
@@ -5246,9 +5396,17 @@ export async function handleLegacyChatCompletions(
   const modelCandidates = resolvedCandidates.candidates;
   const modelResolved = modelCandidates[0];
   const runtimeKey = modelResolved.runtimeKey;
-  const body = isGptFamilyModel(runtimeKey.provider, modelResolved.upstreamModel)
+  const modelSpecificHint = resolveRuntimeCompatHint({
+    provider: runtimeKey.provider,
+    clientModel: modelResolved.clientModel,
+    upstreamModel: modelResolved.upstreamModel
+  });
+  const body = shouldSkipAgentsHintRewrite(runtimeKey.provider, modelResolved.upstreamModel)
     ? rewrittenForFileIds.body
-    : rewriteLegacyBodyForAgentsHint(rewrittenForFileIds.body);
+    : rewriteLegacyBodyForAgentsHint(rewrittenForFileIds.body, {
+        force: forceAgentsHint,
+        extraHint: modelSpecificHint
+      });
   const promptSnapshot = extractPromptSnapshotFromLegacyMessages(
     normalizeLegacyMessages(body.messages as LegacyChatRequest["messages"])
   );
@@ -5278,7 +5436,7 @@ export async function handleLegacyChatCompletions(
               },
               candidate.runtimeKey.provider,
               candidate.profile?.glmCodexThinkingThreshold,
-              candidate.mapping?.thinkingType ?? null
+              resolvePreferredThinkingTypeForCandidate(candidate)
             ),
             candidate.runtimeKey
           )
@@ -5354,7 +5512,7 @@ export async function handleLegacyChatCompletions(
         const responsesPayload = applyCodexThinkingModeForResponses(
           candidatePayload,
           candidate.runtimeKey.provider,
-          candidate.mapping?.thinkingType ?? null
+          resolvePreferredThinkingTypeForCandidate(candidate)
         );
         return callResponsesApiStream(
           {
@@ -5399,7 +5557,7 @@ export async function handleLegacyChatCompletions(
             },
             candidate.runtimeKey.provider,
             candidate.profile?.glmCodexThinkingThreshold,
-            candidate.mapping?.thinkingType ?? null
+            resolvePreferredThinkingTypeForCandidate(candidate)
           ),
           candidate.runtimeKey
         )
@@ -5484,7 +5642,7 @@ export async function handleLegacyChatCompletions(
       const responsesPayload = applyCodexThinkingModeForResponses(
         candidatePayload,
         candidate.runtimeKey.provider,
-        candidate.mapping?.thinkingType ?? null
+        resolvePreferredThinkingTypeForCandidate(candidate)
       );
       return callResponsesApi(responsesPayload, candidate.runtimeKey);
     }
@@ -5521,6 +5679,7 @@ export async function handleAnthropicMessages(
   route = "/v1/messages"
 ) {
   const body = (await req.json().catch(() => ({}))) as AnthropicMessagesRequest;
+  const forceAgentsHint = shouldForceAgentsHint(req);
   const anthropicUpstreamHeaderOverrides = extractAnthropicUpstreamHeaderOverrides(req);
 
   const resolved = await resolveGatewayKey(
@@ -5531,22 +5690,20 @@ export async function handleAnthropicMessages(
     return anthropicErrorResponse(resolved.status, resolved.body.error);
   }
 
-  const legacyBody = rewriteLegacyBodyForAgentsHint(
-    mapAnthropicMessagesToLegacyChat(body, resolved.key.defaultModel)
-  );
-  const promptSnapshot = extractPromptSnapshotFromLegacyMessages(
-    normalizeLegacyMessages(legacyBody.messages as LegacyChatRequest["messages"])
-  );
-
-  const requestedModel = pickRequestedModel(body.model, resolved.key);
+  const anthropicRequestedModel = pickRequestedModel(body.model, resolved.key);
+  const baseLegacyBody = mapAnthropicMessagesToLegacyChat(body, resolved.key.defaultModel);
+  const requestedModel = anthropicRequestedModel;
   const modelMapping = resolveRequestedModelMapping(requestedModel, resolved.key);
   const mappedRequestedModel = modelMapping.mappedModel;
-  const promptTokensEstimate = estimateLegacyChatTokens(legacyBody, mappedRequestedModel);
+  const preliminaryPromptTokensEstimate = estimateLegacyChatTokens(
+    baseLegacyBody,
+    mappedRequestedModel
+  );
   const resolvedCandidates = await resolveModelCandidatesForRequest({
     baseKey: resolved.key,
     requestedModel,
     mappedModel: mappedRequestedModel,
-    promptTokensEstimate,
+    promptTokensEstimate: preliminaryPromptTokensEstimate,
     mappingResolution: modelMapping
   });
   if (!resolvedCandidates.ok) {
@@ -5561,6 +5718,21 @@ export async function handleAnthropicMessages(
   const modelCandidates = resolvedCandidates.candidates;
   const modelResolved = modelCandidates[0];
   const runtimeKey = modelResolved.runtimeKey;
+  const anthropicHint = resolveRuntimeCompatHint({
+    provider: runtimeKey.provider,
+    clientModel: modelResolved.clientModel,
+    upstreamModel: modelResolved.upstreamModel
+  });
+  const legacyBody = shouldSkipAgentsHintRewrite(runtimeKey.provider, modelResolved.upstreamModel)
+    ? baseLegacyBody
+    : rewriteLegacyBodyForAgentsHint(baseLegacyBody, {
+        force: forceAgentsHint,
+        extraHint: anthropicHint
+      });
+  const promptSnapshot = extractPromptSnapshotFromLegacyMessages(
+    normalizeLegacyMessages(legacyBody.messages as LegacyChatRequest["messages"])
+  );
+  const promptTokensEstimate = estimateLegacyChatTokens(legacyBody, mappedRequestedModel);
 
   const rewritten = await describeMediaWithVisionModel(legacyBody, runtimeKey, {
     route,
@@ -5586,7 +5758,7 @@ export async function handleAnthropicMessages(
               },
               candidate.runtimeKey.provider,
               candidate.profile?.glmCodexThinkingThreshold,
-              candidate.mapping?.thinkingType ?? null
+              resolvePreferredThinkingTypeForCandidate(candidate)
             ),
             candidate.runtimeKey
           )
@@ -5690,7 +5862,7 @@ export async function handleAnthropicMessages(
         const responsesPayload = applyCodexThinkingModeForResponses(
           candidatePayload,
           candidate.runtimeKey.provider,
-          candidate.mapping?.thinkingType ?? null
+          resolvePreferredThinkingTypeForCandidate(candidate)
         );
         return callResponsesApiStream(
           {
@@ -5749,7 +5921,7 @@ export async function handleAnthropicMessages(
             },
             candidate.runtimeKey.provider,
             candidate.profile?.glmCodexThinkingThreshold,
-            candidate.mapping?.thinkingType ?? null
+            resolvePreferredThinkingTypeForCandidate(candidate)
           ),
           candidate.runtimeKey
         )
@@ -5856,7 +6028,7 @@ export async function handleAnthropicMessages(
       const responsesPayload = applyCodexThinkingModeForResponses(
         candidatePayload,
         candidate.runtimeKey.provider,
-        candidate.mapping?.thinkingType ?? null
+        resolvePreferredThinkingTypeForCandidate(candidate)
       );
       return callResponsesApi(responsesPayload, candidate.runtimeKey);
     }
@@ -6019,7 +6191,7 @@ export async function handleLegacyCompletions(
         const responsesPayload = applyCodexThinkingModeForResponses(
           candidatePayload,
           candidate.runtimeKey.provider,
-          candidate.mapping?.thinkingType ?? null
+          resolvePreferredThinkingTypeForCandidate(candidate)
         );
         return callResponsesApiStream(
           {
@@ -6148,7 +6320,7 @@ export async function handleLegacyCompletions(
       const responsesPayload = applyCodexThinkingModeForResponses(
         candidatePayload,
         candidate.runtimeKey.provider,
-        candidate.mapping?.thinkingType ?? null
+        resolvePreferredThinkingTypeForCandidate(candidate)
       );
       return callResponsesApi(responsesPayload, candidate.runtimeKey);
     }
@@ -6184,6 +6356,7 @@ export async function handleLegacyCompletions(
 
 export async function handleResponses(req: Request, route = "/v1/responses") {
   const rawBody = (await req.json().catch(() => ({}))) as ResponsesRequest;
+  const forceAgentsHint = shouldForceAgentsHint(req);
 
   const resolved = await resolveGatewayKey(
     req.headers.get("authorization"),
@@ -6218,9 +6391,17 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
   const modelCandidates = resolvedCandidates.candidates;
   const modelResolved = modelCandidates[0];
   const runtimeKey = modelResolved.runtimeKey;
-  const body = isGptFamilyModel(runtimeKey.provider, modelResolved.upstreamModel)
+  const modelSpecificHint = resolveRuntimeCompatHint({
+    provider: runtimeKey.provider,
+    clientModel: modelResolved.clientModel,
+    upstreamModel: modelResolved.upstreamModel
+  });
+  const body = shouldSkipAgentsHintRewrite(runtimeKey.provider, modelResolved.upstreamModel)
     ? rewrittenForFileIds.body
-    : rewriteResponsesBodyForAgentsHint(rewrittenForFileIds.body);
+    : rewriteResponsesBodyForAgentsHint(rewrittenForFileIds.body, {
+        force: forceAgentsHint,
+        extraHint: modelSpecificHint
+      });
   const promptTokensEstimate = estimateResponsesRequestTokens(body, mappedRequestedModel);
   const responseContextScope = String(resolved.key.id);
   const mappedPrompt = mapResponsesRequestToLegacyChat(body, body.model?.trim() || runtimeKey.defaultModel);
@@ -6256,7 +6437,7 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
                   model: candidate.upstreamModel
                 },
                 candidate.runtimeKey.provider,
-                candidate.mapping?.thinkingType ?? null
+                resolvePreferredThinkingTypeForCandidate(candidate)
               ),
               model: candidate.upstreamModel,
               stream: true
@@ -6397,7 +6578,7 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
           candidateLegacyPayload,
           candidate.runtimeKey.provider,
           candidate.profile?.glmCodexThinkingThreshold,
-          candidate.mapping?.thinkingType ?? null
+          resolvePreferredThinkingTypeForCandidate(candidate)
         );
         contextBaseMessages = normalizeLegacyMessages(
           upstreamPayload.messages as LegacyChatRequest["messages"]
@@ -6456,7 +6637,7 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
                 model: candidate.upstreamModel
               },
               candidate.runtimeKey.provider,
-              candidate.mapping?.thinkingType ?? null
+              resolvePreferredThinkingTypeForCandidate(candidate)
             ),
             model: candidate.upstreamModel
           },
@@ -6601,7 +6782,7 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
         candidateLegacyPayload,
         candidate.runtimeKey.provider,
         candidate.profile?.glmCodexThinkingThreshold,
-        candidate.mapping?.thinkingType ?? null
+        resolvePreferredThinkingTypeForCandidate(candidate)
       );
       baseMessages = normalizeLegacyMessages(
         upstreamPayload.messages as LegacyChatRequest["messages"]

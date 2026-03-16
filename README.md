@@ -467,6 +467,18 @@ http_headers = { "x-codex-gateway-client" = "codex", "x-codex-apply-patch-tool-t
 
 如果配置正确，Codex 应该触发真实文件编辑，而不是把 patch 文本直接打印在对话里。 / When configured correctly, Codex should trigger real file edits instead of printing the patch in chat output.
 
+对比基线与第三方模型（`gpt-5.4` vs `gpt-5.3-codex`）可直接运行：
+
+```bash
+npm run bench:codex-prompts -- --out-dir .tmp/codex-bench/latest
+```
+
+脚本会在输出目录生成 `report.json` 与 `report.md`，默认检查：
+- 是否最终输出 `DONE`
+- 是否真实完成创建/修改/删除（`probe_codex.txt` 最终不存在）
+- 是否误把 patch 文本直接输出
+- token 消耗与工具使用方式（`apply_patch` / shell）
+
 ## Notes / 说明
 
 - `wireApi` 固定为 `responses` / `wireApi` is fixed to `responses`.
