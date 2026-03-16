@@ -1,6 +1,7 @@
 "use client";
 
 import { Button, Input, Checkbox, Tag } from "tdesign-react";
+import { CodeBlock } from "@/components/code-block";
 import { useLocale } from "@/components/locale-provider";
 import { copyTextToClipboard } from "@/lib/console-utils";
 import type { GatewayKey } from "@/components/console/types";
@@ -50,11 +51,11 @@ export function RuntimeModule({
   }
 
   const apiDocPanels = [
-    { title: t("查询当前运行时状态（GET）", "Query Runtime Status (GET)"), content: runtimeApiExamples.queryStatus, full: true },
-    { title: t("设置运行时覆盖模型（POST）", "Set Runtime Override (POST)"), content: runtimeApiExamples.switchModel },
-    { title: t("清空运行时覆盖（POST）", "Clear Runtime Override (POST)"), content: runtimeApiExamples.clearOverride },
-    { title: t("按 Key ID 启停（POST）", "Enable/Disable by Key ID (POST)"), content: runtimeApiExamples.toggleEnabledById },
-    { title: t("POST 参数结构", "POST Payload"), content: runtimeApiExamples.payloadSchema }
+    { title: t("查询当前运行时状态（GET）", "Query Runtime Status (GET)"), content: runtimeApiExamples.queryStatus, language: "bash", full: true },
+    { title: t("设置运行时覆盖模型（POST）", "Set Runtime Override (POST)"), content: runtimeApiExamples.switchModel, language: "bash" },
+    { title: t("清空运行时覆盖（POST）", "Clear Runtime Override (POST)"), content: runtimeApiExamples.clearOverride, language: "bash" },
+    { title: t("按 Key ID 启停（POST）", "Enable/Disable by Key ID (POST)"), content: runtimeApiExamples.toggleEnabledById, language: "bash" },
+    { title: t("POST 参数结构", "POST Payload"), content: runtimeApiExamples.payloadSchema, language: "json" }
   ];
 
   return (
@@ -116,7 +117,7 @@ export function RuntimeModule({
                   {t("复制命令", "Copy Command")}
                 </Button>
               </div>
-              <pre className="tc-json-fallback">{panel.content}</pre>
+              <CodeBlock value={panel.content} language={panel.language} />
             </div>
           ))}
         </div>

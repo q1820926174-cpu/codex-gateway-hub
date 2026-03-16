@@ -3,7 +3,7 @@ import { ModuleRouter } from "@/components/console/modules/ModuleRouter";
 import type { EditorModule } from "@/components/console/types";
 import { ensureEntryAccess } from "@/lib/entry-secret";
 
-const CONSOLE_MODULES = ["access", "prompt", "export", "upstream", "runtime", "logs", "calls", "usage", "docs"] as const;
+const CONSOLE_MODULES = ["access", "prompt", "export", "upstream", "runtime", "logs", "calls", "usage", "docs", "dashboard"] as const;
 
 function isConsoleModule(value: string): value is EditorModule {
   return (CONSOLE_MODULES as readonly string[]).includes(value);

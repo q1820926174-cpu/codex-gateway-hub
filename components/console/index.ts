@@ -5,6 +5,7 @@ export { ConsoleHeader } from "./ConsoleHeader";
 
 // Existing components
 export { WorkspaceHero } from "./workspace-hero";
+export { WorkspaceDashboard } from "./workspace-dashboard";
 export { ModuleSwitcherCards } from "./module-switcher-cards";
 
 // All types

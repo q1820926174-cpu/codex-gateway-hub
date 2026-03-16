@@ -60,6 +60,7 @@ import type { EChartsOption } from "echarts";
 const ReactECharts = dynamic(() => import("echarts-for-react"), { ssr: false });
 
 import { UsageLoadingSkeleton, UsagePulseLoader } from "@/components/ui/UsageLoadingSkeleton";
+import { WorkspaceDashboard } from "@/components/console/workspace-dashboard";
 import { UsageStatCard } from "@/components/ui/UsageStatCard";
 import { UsagePieChart, PIE_COLORS } from "@/components/ui/UsagePieChart";
 import type { PieSlice } from "@/components/ui/UsagePieChart";
@@ -158,7 +159,7 @@ const LOCALE_OPTIONS: Array<{ label: string; value: LocaleCode }> = [
   { label: "English", value: "en-US" }
 ];
 
-export type EditorModule = "access" | "prompt" | "export" | "upstream" | "runtime" | "logs" | "calls" | "usage" | "docs";
+export type EditorModule = "access" | "prompt" | "export" | "upstream" | "runtime" | "logs" | "calls" | "usage" | "docs" | "dashboard";
 type SettingsConsoleProps = {
   module?: EditorModule;
 };
@@ -173,6 +174,8 @@ const MODULE_LABEL: Record<EditorModule, { zh: string; en: string }> = {
   calls: { zh: "AI 调用日志", en: "AI Call Logs" },
   usage: { zh: "用量报表", en: "Usage Report" },
   docs: { zh: "接口文档", en: "API Docs" }
+  ,
+  dashboard: { zh: "工作台", en: "Dashboard" }
 };
 
 const MODULE_SUMMARY: Record<EditorModule, { zh: string; en: string }> = {
@@ -211,6 +214,11 @@ const MODULE_SUMMARY: Record<EditorModule, { zh: string; en: string }> = {
   docs: {
     zh: "查看网关与管理接口文档，复制即用示例。",
     en: "Browse gateway/ops API docs and copy ready-to-run examples."
+  }
+  ,
+  dashboard: {
+    zh: "系统运行概览与快速操作入口。",
+    en: "System overview and quick actions."
   }
 };
 
@@ -733,7 +741,7 @@ function formatCnDate(value: string) {
   return CN_DATE_FORMATTER.format(date);
 }
 
-function formatNumber(value: number) {
+export function formatNumber(value: number) {
   return NUMBER_FORMATTER.format(Number.isFinite(value) ? value : 0);
 }
 
@@ -745,7 +753,7 @@ function formatMinuteLabel(value: string) {
   return CN_MINUTE_FORMATTER.format(date);
 }
 
-function formatCompactNumber(value: number) {
+export function formatCompactNumber(value: number) {
   if (!Number.isFinite(value)) {
     return "0";
   }
@@ -1981,7 +1989,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   ]);
 
   useEffect(() => {
-    if (routeModule !== "usage") {
+    if (routeModule !== "usage" && routeModule !== "dashboard") {
       return;
     }
     void loadUsageReport(true);
@@ -3008,6 +3016,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       next === "calls" ||
       next === "usage" ||
       next === "docs"
+      || next === "dashboard"
     ) {
       router.push(`/console/${next}`);
     }
@@ -3453,7 +3462,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
             expanded={["key-mgmt"]}
             onChange={(value) => handleMenuRoute(String(value))}
           >
-            <Menu.MenuItem value="dashboard" icon={<LayoutDashboard size={18} />} disabled>
+            <Menu.MenuItem value="dashboard" icon={<LayoutDashboard size={18} />}>
               {t("工作台", "Dashboard")}
             </Menu.MenuItem>
             <Menu.SubMenu value="key-mgmt" title={t("Key 管理", "Key Management")} icon={<Settings size={18} />}>
@@ -3532,6 +3541,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
               <Tabs.TabPanel value="calls" label={t("AI 调用日志", "AI Call Logs")} />
               <Tabs.TabPanel value="usage" label={t("用量报表", "Usage Report")} />
               <Tabs.TabPanel value="docs" label={t("接口文档", "API Docs")} />
+              <Tabs.TabPanel value="dashboard" label={t("工作台", "Dashboard")} />
             </Tabs>
           </div>
 
@@ -3793,7 +3803,20 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                 )}
               </div>
 
-              {routeModule === "access" ? (
+              {routeModule === "dashboard" ? (
+                <WorkspaceDashboard
+                  keys={keys}
+                  channels={channels}
+                  usageReport={usageReport}
+                  loadingUsage={loadingUsage}
+                  onNavigate={handleMenuRoute}
+                  onRefreshUsage={() => void loadUsageReport()}
+                  t={t}
+                  enabledKeyCount={enabledKeyCount}
+                  enabledChannelCount={enabledChannelCount}
+                  gatewayV1Endpoint={gatewayV1Endpoint}
+                />
+              ) : routeModule === "access" ? (
                 <section className="tc-section">
                   <h3>{t("本地 Key 接入", "Local Key Access")}</h3>
                   <p className="tc-upstream-advice">
@@ -6192,7 +6215,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                             {t("复制命令", "Copy Command")}
                           </Button>
                         </div>
-                        <pre className="tc-json-fallback">{apiDocExamples.chatCompletions}</pre>
+                        <CodeBlock value={apiDocExamples.chatCompletions} language="bash" />
                       </div>
 
                       <div className="tc-log-panel">
@@ -6211,7 +6234,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                             {t("复制命令", "Copy Command")}
                           </Button>
                         </div>
-                        <pre className="tc-json-fallback">{apiDocExamples.responses}</pre>
+                        <CodeBlock value={apiDocExamples.responses} language="bash" />
                       </div>
 
                       <div className="tc-log-panel">
@@ -6230,7 +6253,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                             {t("复制命令", "Copy Command")}
                           </Button>
                         </div>
-                        <pre className="tc-json-fallback">{apiDocExamples.anthropicMessages}</pre>
+                        <CodeBlock value={apiDocExamples.anthropicMessages} language="bash" />
                       </div>
                     </div>
                   </div>
@@ -6318,7 +6341,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                               {t("复制命令", "Copy Command")}
                             </Button>
                           </div>
-                          <pre className="tc-json-fallback">{runtimeApiExamples.queryStatus}</pre>
+                          <CodeBlock value={runtimeApiExamples.queryStatus} language="bash" />
                         </div>
 
                         <div className="tc-log-panel">
@@ -6337,7 +6360,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                               {t("复制命令", "Copy Command")}
                             </Button>
                           </div>
-                          <pre className="tc-json-fallback">{runtimeApiExamples.switchModel}</pre>
+                          <CodeBlock value={runtimeApiExamples.switchModel} language="bash" />
                         </div>
 
                         <div className="tc-log-panel">
@@ -6356,7 +6379,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                               {t("复制命令", "Copy Command")}
                             </Button>
                           </div>
-                          <pre className="tc-json-fallback">{runtimeApiExamples.clearOverride}</pre>
+                          <CodeBlock value={runtimeApiExamples.clearOverride} language="bash" />
                         </div>
 
                         <div className="tc-log-panel">
@@ -6375,7 +6398,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                               {t("复制命令", "Copy Command")}
                             </Button>
                           </div>
-                          <pre className="tc-json-fallback">{runtimeApiExamples.toggleEnabledById}</pre>
+                          <CodeBlock value={runtimeApiExamples.toggleEnabledById} language="bash" />
                         </div>
 
                         <div className="tc-log-panel">
@@ -6394,7 +6417,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                               {t("复制结构", "Copy Payload")}
                             </Button>
                           </div>
-                          <pre className="tc-json-fallback">{runtimeApiExamples.payloadSchema}</pre>
+                          <CodeBlock value={runtimeApiExamples.payloadSchema} language="json" />
                         </div>
                       </div>
                     </div>

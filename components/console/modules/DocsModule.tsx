@@ -1,6 +1,7 @@
 "use client";
 
 import { Button, Tag } from "tdesign-react";
+import { CodeBlock } from "@/components/code-block";
 import { useLocale } from "@/components/locale-provider";
 import {
   API_DOC_GATEWAY_ENDPOINTS,
@@ -33,9 +34,9 @@ export function DocsModule({ gatewayV1Endpoint, gatewayOrigin, apiDocExamples }:
   ];
 
   const examplePanels = [
-    { title: "POST /v1/chat/completions", content: apiDocExamples.chatCompletions },
-    { title: "POST /v1/responses", content: apiDocExamples.responses },
-    { title: "POST /v1/messages", content: apiDocExamples.anthropicMessages }
+    { title: "POST /v1/chat/completions", content: apiDocExamples.chatCompletions, language: "bash" },
+    { title: "POST /v1/responses", content: apiDocExamples.responses, language: "bash" },
+    { title: "POST /v1/messages", content: apiDocExamples.anthropicMessages, language: "bash" }
   ];
 
   return (
@@ -100,7 +101,7 @@ export function DocsModule({ gatewayV1Endpoint, gatewayOrigin, apiDocExamples }:
                   {t("复制命令", "Copy Command")}
                 </Button>
               </div>
-              <pre className="tc-json-fallback">{panel.content}</pre>
+              <CodeBlock value={panel.content} language={panel.language} />
             </div>
           ))}
         </div>

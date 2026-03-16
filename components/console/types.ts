@@ -37,7 +37,7 @@ export const PROVIDER_META: Record<ProviderName, { label: string; tip: string }>
 export const DEFAULT_GATEWAY_ORIGIN = "http://127.0.0.1:3000";
 
 // --- Module system ---
-export type EditorModule = "access" | "prompt" | "export" | "upstream" | "runtime" | "logs" | "calls" | "usage" | "docs";
+export type EditorModule = "access" | "prompt" | "export" | "upstream" | "runtime" | "logs" | "calls" | "usage" | "docs" | "dashboard";
 
 export const MODULE_LABEL: Record<EditorModule, { zh: string; en: string }> = {
   access: { zh: "基础接入", en: "Access" },
@@ -48,7 +48,8 @@ export const MODULE_LABEL: Record<EditorModule, { zh: string; en: string }> = {
   logs: { zh: "请求日志", en: "Request Logs" },
   calls: { zh: "AI 调用日志", en: "AI Call Logs" },
   usage: { zh: "用量报表", en: "Usage Report" },
-  docs: { zh: "接口文档", en: "API Docs" }
+  docs: { zh: "接口文档", en: "API Docs" },
+  dashboard: { zh: "工作台", en: "Dashboard" }
 };
 
 export const MODULE_SUMMARY: Record<EditorModule, { zh: string; en: string }> = {
@@ -60,7 +61,8 @@ export const MODULE_SUMMARY: Record<EditorModule, { zh: string; en: string }> = 
   logs: { zh: "排查网关请求链路，查看请求体、响应体和错误。", en: "Inspect request chains with payloads, responses, and errors." },
   calls: { zh: "追踪真实模型调用，核对系统提示词与结果。", en: "Trace actual model invocations with prompts and outputs." },
   usage: { zh: "按 Key / 模型 / 时间段观察 Token 消耗趋势。", en: "Track token consumption by key, model, and time buckets." },
-  docs: { zh: "查看网关与管理接口文档，复制即用示例。", en: "Browse gateway/ops API docs and copy ready-to-run examples." }
+  docs: { zh: "查看网关与管理接口文档，复制即用示例。", en: "Browse gateway/ops API docs and copy ready-to-run examples." },
+  dashboard: { zh: "系统运行概览与快速操作入口。", en: "System overview and quick actions." }
 };
 
 // --- Coding presets ---
