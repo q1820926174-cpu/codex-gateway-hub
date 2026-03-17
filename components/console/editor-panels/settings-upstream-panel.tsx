@@ -30,6 +30,7 @@ import {
   shouldShowGlmThinkingThreshold
 } from "@/components/console/settings-console-helpers";
 import type { CodexApplyPatchToolType } from "@/lib/codex-export";
+import { ActiveFilterSummary } from "@/components/console/filters";
 
 type AnyStateSetter = (updater: any | ((prev: any) => any)) => void;
 type AnyItemUpdater = (id: any, updater: (prev: any) => any) => void;
@@ -85,7 +86,18 @@ export function SettingsUpstreamPanel(props: SettingsUpstreamPanelProps) {
     visionChannelOptions,
     resolveVisionModelOptions,
     testPrompt,
-    setTestPrompt
+    setTestPrompt,
+    channelModelSearch,
+    setChannelModelSearch,
+    channelModelStatusFilter,
+    setChannelModelStatusFilter,
+    channelModelWireApiFilter,
+    setChannelModelWireApiFilter,
+    channelModelVisionFilter,
+    setChannelModelVisionFilter,
+    channelModelVisibleItems,
+    channelModelActiveFilters,
+    resetChannelModelFilters
   } = props;
 
   return (
@@ -118,22 +130,14 @@ export function SettingsUpstreamPanel(props: SettingsUpstreamPanelProps) {
                       onClick={handleQuickExportModels}
                       disabled={!channelForm.upstreamModels.length}
                     >
-                      {t("导出模型池", "Export Model Pool")}
-                    </Button>
-                    <Button
-                      variant="outline"
-                      theme="default"
-                      onClick={handleQuickCopyModels}
-                      disabled={!channelForm.upstreamModels.length}
-                    >
-                      {t("复制模型池", "Copy Model Pool")}
+                      {t("批量导出", "Bulk Export")}
                     </Button>
                     <Button
                       variant="outline"
                       theme="default"
                       onClick={handleOpenQuickImportDialog}
                     >
-                      {t("导入模型池", "Import Model Pool")}
+                      {t("批量导入", "Bulk Import")}
                     </Button>
                   </div>
 
@@ -249,14 +253,93 @@ export function SettingsUpstreamPanel(props: SettingsUpstreamPanelProps) {
                       <Tag variant="light-outline">
                         {t("当前", "Current")} {channelForm.upstreamModels.length} {t("个", "items")}
                       </Tag>
+                      <Tag variant="light-outline">
+                        {t("可见", "Visible")} {channelModelVisibleItems.length}/{channelForm.upstreamModels.length}
+                      </Tag>
                     </div>
                     <Button theme="primary" variant="outline" onClick={addUpstreamModel}>
                       {t("继续添加模型", "Add Another Model")}
                     </Button>
                   </div>
 
+                  <div className="tc-log-toolbar">
+                    <div className="tc-log-toolbar-group tc-log-field-wide">
+                      <label className="tc-field">
+                        <span>{t("关键词", "Keyword")}</span>
+                        <Input
+                          value={channelModelSearch}
+                          onChange={(value) => setChannelModelSearch(value)}
+                          placeholder={t("搜索展示名、别名、模型 ID、视觉模型", "Search display name, alias, model ID, or vision model")}
+                          clearable
+                        />
+                      </label>
+                    </div>
+                    <div className="tc-log-toolbar-group">
+                      <label className="tc-field">
+                        <span>{t("状态", "Status")}</span>
+                        <Select
+                          value={channelModelStatusFilter}
+                          options={[
+                            { label: t("全部状态", "All Status"), value: "all" },
+                            { label: t("启用", "Enabled"), value: "enabled" },
+                            { label: t("停用", "Disabled"), value: "disabled" }
+                          ]}
+                          style={{ width: 150 }}
+                          onChange={(value) => setChannelModelStatusFilter(normalizeSelectValue(value))}
+                        />
+                      </label>
+                    </div>
+                    <div className="tc-log-toolbar-group">
+                      <label className="tc-field">
+                        <span>{t("协议", "Wire API")}</span>
+                        <Select
+                          value={channelModelWireApiFilter}
+                          options={[
+                            { label: t("全部协议", "All APIs"), value: "all" },
+                            ...UPSTREAM_WIRE_APIS.map((item) => ({ label: item, value: item }))
+                          ]}
+                          style={{ width: 180 }}
+                          onChange={(value) => setChannelModelWireApiFilter(normalizeSelectValue(value))}
+                        />
+                      </label>
+                    </div>
+                    <div className="tc-log-toolbar-group">
+                      <label className="tc-field">
+                        <span>{t("视觉能力", "Vision")}</span>
+                        <Select
+                          value={channelModelVisionFilter}
+                          options={[
+                            { label: t("全部", "All"), value: "all" },
+                            { label: t("原生支持视觉", "Vision Enabled"), value: "yes" },
+                            { label: t("需视觉兜底", "Needs Fallback"), value: "no" }
+                          ]}
+                          style={{ width: 170 }}
+                          onChange={(value) => setChannelModelVisionFilter(normalizeSelectValue(value))}
+                        />
+                      </label>
+                    </div>
+                    <div className="tc-log-toolbar-group tc-log-toolbar-actions">
+                      <Button variant="outline" onClick={resetChannelModelFilters}>
+                        {t("重置筛选", "Reset Filters")}
+                      </Button>
+                    </div>
+                  </div>
+
+                  <ActiveFilterSummary
+                    items={channelModelActiveFilters}
+                    onClearAll={resetChannelModelFilters}
+                  />
+
+                  {channelModelVisibleItems.length === 0 ? (
+                    <p className="tc-upstream-advice">
+                      {t(
+                        "当前没有命中筛选条件的模型。",
+                        "No upstream models matched the current filters."
+                      )}
+                    </p>
+                  ) : (
                   <div className="tc-model-list">
-                    {channelForm.upstreamModels.map((item, index) => (
+                    {channelModelVisibleItems.map((item, index) => (
                       <div className="tc-model-item" key={item.id}>
                         <div className="tc-model-head">
                           <strong>{t("模型", "Model")} #{index + 1}</strong>
@@ -512,6 +595,7 @@ export function SettingsUpstreamPanel(props: SettingsUpstreamPanelProps) {
                       </div>
                     ))}
                   </div>
+                  )}
 
                   <div className="tc-form-grid">
                     <label className="tc-field tc-field-wide">

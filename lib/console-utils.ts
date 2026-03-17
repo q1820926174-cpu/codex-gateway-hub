@@ -54,3 +54,55 @@ export async function copyTextToClipboard(text: string, successMessage?: string)
     console.error("Failed to copy text:", err);
   }
 }
+
+export function resolveDownloadFileName(
+  suggestedPath: string | null | undefined,
+  fallbackFileName: string
+) {
+  if (!suggestedPath) {
+    return fallbackFileName;
+  }
+  const trimmed = suggestedPath.trim();
+  if (!trimmed) {
+    return fallbackFileName;
+  }
+  const normalized = trimmed.replace(/\\/g, "/");
+  const candidate = normalized.split("/").pop()?.trim();
+  return candidate || fallbackFileName;
+}
+
+export function inferTextFileMimeType(fileName: string) {
+  const normalized = fileName.trim().toLowerCase();
+  if (normalized.endsWith(".json")) {
+    return "application/json";
+  }
+  if (normalized.endsWith(".toml")) {
+    return "application/toml";
+  }
+  if (normalized.endsWith(".md")) {
+    return "text/markdown";
+  }
+  if (normalized.endsWith(".sh")) {
+    return "text/x-shellscript";
+  }
+  if (normalized.endsWith(".env")) {
+    return "text/plain";
+  }
+  return "text/plain";
+}
+
+export function downloadTextAsFile(
+  fileName: string,
+  content: string,
+  mimeType = inferTextFileMimeType(fileName)
+) {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileName;
+  document.body.appendChild(anchor);
+  anchor.click();
+  document.body.removeChild(anchor);
+  URL.revokeObjectURL(url);
+}

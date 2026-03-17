@@ -65,6 +65,7 @@ import {
 } from "@/lib/usage-report";
 import {
   getCompatPromptConfig,
+  isCompatPromptInjectionExemptForModel,
   resolveCompatPromptHintForModel
 } from "@/lib/compat-config";
 import { appendAiCallLogEntry } from "@/lib/ai-call-log-store";
@@ -1092,7 +1093,6 @@ function normalizeUsageValues(
   };
 }
 
-
 async function enforceKeyDailyQuota(
   key: ResolvedGatewayKey,
   promptTokensEstimate: number
@@ -1249,6 +1249,9 @@ function resolveRuntimeCompatHint(params: {
   clientModel: string | null | undefined;
   upstreamModel: string | null | undefined;
 }) {
+  if (isCompatPromptInjectionExemptForModel(params)) {
+    return "";
+  }
   const configuredHint = resolveCompatPromptHintForModel(params);
   if (configuredHint) {
     return configuredHint;
@@ -1257,8 +1260,11 @@ function resolveRuntimeCompatHint(params: {
 }
 
 function shouldSkipAgentsHintRewrite(provider: string, model: string | null | undefined) {
-  const normalizedProvider = provider.trim().toLowerCase();
-  return normalizedProvider === "openai" && isGptFamilyModel(provider, model);
+  return isCompatPromptInjectionExemptForModel({
+    provider,
+    clientModel: "",
+    upstreamModel: model
+  });
 }
 
 function shouldForceAgentsHint(req: Request) {

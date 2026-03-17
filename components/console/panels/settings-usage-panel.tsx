@@ -26,6 +26,7 @@ import {
   pickUsageMetricValue,
   summarizeLogPreview
 } from "@/components/console/settings-console-helpers";
+import { ActiveFilterSummary, FilterPresetBar } from "@/components/console/filters";
 
 
 export function SettingsUsagePanel(props: any) {
@@ -46,13 +47,35 @@ export function SettingsUsagePanel(props: any) {
     usageKeyFilter,
     usageKeyOptions,
     setUsageKeyFilter,
+    usageModelFilter,
+    usageModelOptions,
+    setUsageModelFilter,
+    usageRouteFilter,
+    usageRouteOptions,
+    setUsageRouteFilter,
+    usageRequestWireFilter,
+    usageRequestWireOptions,
+    setUsageRequestWireFilter,
+    usageUpstreamWireFilter,
+    usageUpstreamWireOptions,
+    setUsageUpstreamWireFilter,
+    usageStreamFilter,
+    usageStreamOptions,
+    setUsageStreamFilter,
     usageTimelineLimit,
     setUsageTimelineLimit,
     loadUsageReport,
     clearUsageReport,
+    resetUsageFilters,
     loadingUsage,
     usageReport,
     locale,
+    usageActiveFilters,
+    usageSavedPresets,
+    usageSelectedPresetId,
+    applyUsagePresetById,
+    saveUsagePreset,
+    deleteUsagePreset,
     usagePrimaryMetricMeta,
     resolvedUsageBucketMinutes,
     usageTimelineChartOption,
@@ -71,6 +94,20 @@ export function SettingsUsagePanel(props: any) {
           "Shows per-minute aggregated token usage by local key and model. Supports auto refresh and key filter."
         )}
       </p>
+
+      <FilterPresetBar
+        presets={usageSavedPresets.map((item: any) => ({ id: item.id, name: item.name }))}
+        activePresetId={usageSelectedPresetId === "all" ? undefined : usageSelectedPresetId}
+        onSelectPreset={(id) => applyUsagePresetById(id || "all")}
+        onSavePreset={() => saveUsagePreset()}
+        onDeletePreset={(id) => {
+          if (id) {
+            applyUsagePresetById(id);
+            deleteUsagePreset();
+          }
+        }}
+        onReset={resetUsageFilters}
+      />
 
       <div className="tc-usage-toolbar">
         <div className="tc-usage-range">
@@ -218,6 +255,77 @@ export function SettingsUsagePanel(props: any) {
         </label>
 
         <label className="tc-field">
+          <span>{t("真实模型", "Upstream Model")}</span>
+          <Select
+            value={usageModelFilter || "__all__"}
+            options={usageModelOptions}
+            style={{ width: 220 }}
+            onChange={(value) => {
+              const next = normalizeSelectValue(value);
+              setUsageModelFilter(next === "__all__" ? "" : next);
+            }}
+          />
+        </label>
+
+        <label className="tc-field">
+          <span>{t("路由", "Route")}</span>
+          <Select
+            value={usageRouteFilter || "__all__"}
+            options={usageRouteOptions}
+            style={{ width: 180 }}
+            onChange={(value) => {
+              const next = normalizeSelectValue(value);
+              setUsageRouteFilter(next === "__all__" ? "" : next);
+            }}
+          />
+        </label>
+
+        <label className="tc-field">
+          <span>{t("请求协议", "Request API")}</span>
+          <Select
+            value={usageRequestWireFilter || "__all__"}
+            options={usageRequestWireOptions}
+            style={{ width: 190 }}
+            onChange={(value) => {
+              const next = normalizeSelectValue(value);
+              setUsageRequestWireFilter(next === "__all__" ? "" : next);
+            }}
+          />
+        </label>
+
+        <label className="tc-field">
+          <span>{t("上游协议", "Upstream API")}</span>
+          <Select
+            value={usageUpstreamWireFilter || "__all__"}
+            options={usageUpstreamWireOptions}
+            style={{ width: 190 }}
+            onChange={(value) => {
+              const next = normalizeSelectValue(value);
+              setUsageUpstreamWireFilter(next === "__all__" ? "" : next);
+            }}
+          />
+        </label>
+
+        <label className="tc-field">
+          <span>{t("流式模式", "Stream Mode")}</span>
+          <Select
+            value={usageStreamFilter || "__all__"}
+            options={usageStreamOptions}
+            style={{ width: 170 }}
+            onChange={(value) => {
+              const next = normalizeSelectValue(value);
+              if (next === "__all__") {
+                setUsageStreamFilter("");
+                return;
+              }
+              if (next === "stream" || next === "non_stream") {
+                setUsageStreamFilter(next);
+              }
+            }}
+          />
+        </label>
+
+        <label className="tc-field">
           <span>分钟明细上限</span>
           <Select
             value={String(usageTimelineLimit)}
@@ -256,6 +364,8 @@ export function SettingsUsagePanel(props: any) {
           </Button>
         </div>
       </div>
+
+      <ActiveFilterSummary items={usageActiveFilters} onClearAll={resetUsageFilters} />
 
       {!usageReport || usageReport.summary.requestCount === 0 ? (
         loadingUsage ? (
@@ -475,4 +585,3 @@ export function SettingsUsagePanel(props: any) {
     </section>
   );
 }
-

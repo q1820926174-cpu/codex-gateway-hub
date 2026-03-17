@@ -39,6 +39,8 @@ export async function POST(req: Request) {
     const result: RulePreviewResult = {
       matchedRuleId: debug.matchedRuleId,
       matchedRuleIndex: debug.matchedRuleIndex,
+      matchedExemption: debug.matchedExemption,
+      matchedExemptionIndex: debug.matchedExemptionIndex,
       scoreBreakdown: debug.scoreBreakdown
         ? {
             providerRank: debug.scoreBreakdown.providerRank,
@@ -55,4 +57,3 @@ export async function POST(req: Request) {
     return NextResponse.json(result);
   });
 }
-

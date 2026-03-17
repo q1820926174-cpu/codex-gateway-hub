@@ -14,6 +14,7 @@ export const dynamic = "force-dynamic";
 
 const compatPromptConfigSchema = z.object({
   agentsMdKeywords: z.array(z.string().trim().min(1).max(200)).min(1).max(32),
+  modelPromptExemptions: z.array(z.string().trim().min(1).max(200)).max(128).optional(),
   chineseReplyHint: z.string().trim().min(1).max(20000),
   modelPromptRules: z
     .array(

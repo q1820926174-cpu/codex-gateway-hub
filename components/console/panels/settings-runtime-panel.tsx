@@ -41,7 +41,8 @@ export function SettingsRuntimePanel(props: any) {
     loading,
     runtimeSwitchEndpoint,
     runtimeApiExamples,
-    copyTextToClipboard
+    copyTextToClipboard,
+    downloadRuntimeApiExample
   } = props;
 
   if (!selectedKey) {
@@ -120,18 +121,27 @@ export function SettingsRuntimePanel(props: any) {
           <div className="tc-log-panel tc-log-panel-full">
             <div className="tc-runtime-doc-head">
               <strong>{t("查询当前运行时状态（GET）", "Query Runtime Status (GET)")}</strong>
-              <Button
-                size="small"
-                variant="outline"
-                onClick={() =>
-                  void copyTextToClipboard(
-                    runtimeApiExamples.queryStatus,
-                    t("查询命令已复制。", "Query command copied.")
-                  )
-                }
-              >
-                {t("复制命令", "Copy Command")}
-              </Button>
+              <div className="tc-actions-row">
+                <Button
+                  size="small"
+                  variant="outline"
+                  onClick={() =>
+                    void copyTextToClipboard(
+                      runtimeApiExamples.queryStatus,
+                      t("查询命令已复制。", "Query command copied.")
+                    )
+                  }
+                >
+                  {t("复制命令", "Copy Command")}
+                </Button>
+                <Button
+                  size="small"
+                  variant="outline"
+                  onClick={() => downloadRuntimeApiExample("queryStatus")}
+                >
+                  {t("下载命令", "Download Command")}
+                </Button>
+              </div>
             </div>
             <CodeBlock value={runtimeApiExamples.queryStatus} language="bash" />
           </div>
@@ -139,18 +149,27 @@ export function SettingsRuntimePanel(props: any) {
           <div className="tc-log-panel">
             <div className="tc-runtime-doc-head">
               <strong>{t("设置运行时覆盖模型（POST）", "Set Runtime Override (POST)")}</strong>
-              <Button
-                size="small"
-                variant="outline"
-                onClick={() =>
-                  void copyTextToClipboard(
-                    runtimeApiExamples.switchModel,
-                    t("切换命令已复制。", "Switch command copied.")
-                  )
-                }
-              >
-                {t("复制命令", "Copy Command")}
-              </Button>
+              <div className="tc-actions-row">
+                <Button
+                  size="small"
+                  variant="outline"
+                  onClick={() =>
+                    void copyTextToClipboard(
+                      runtimeApiExamples.switchModel,
+                      t("切换命令已复制。", "Switch command copied.")
+                    )
+                  }
+                >
+                  {t("复制命令", "Copy Command")}
+                </Button>
+                <Button
+                  size="small"
+                  variant="outline"
+                  onClick={() => downloadRuntimeApiExample("switchModel")}
+                >
+                  {t("下载命令", "Download Command")}
+                </Button>
+              </div>
             </div>
             <CodeBlock value={runtimeApiExamples.switchModel} language="bash" />
           </div>
@@ -158,18 +177,27 @@ export function SettingsRuntimePanel(props: any) {
           <div className="tc-log-panel">
             <div className="tc-runtime-doc-head">
               <strong>{t("清空运行时覆盖（POST）", "Clear Runtime Override (POST)")}</strong>
-              <Button
-                size="small"
-                variant="outline"
-                onClick={() =>
-                  void copyTextToClipboard(
-                    runtimeApiExamples.clearOverride,
-                    t("清空命令已复制。", "Clear command copied.")
-                  )
-                }
-              >
-                {t("复制命令", "Copy Command")}
-              </Button>
+              <div className="tc-actions-row">
+                <Button
+                  size="small"
+                  variant="outline"
+                  onClick={() =>
+                    void copyTextToClipboard(
+                      runtimeApiExamples.clearOverride,
+                      t("清空命令已复制。", "Clear command copied.")
+                    )
+                  }
+                >
+                  {t("复制命令", "Copy Command")}
+                </Button>
+                <Button
+                  size="small"
+                  variant="outline"
+                  onClick={() => downloadRuntimeApiExample("clearOverride")}
+                >
+                  {t("下载命令", "Download Command")}
+                </Button>
+              </div>
             </div>
             <CodeBlock value={runtimeApiExamples.clearOverride} language="bash" />
           </div>
@@ -177,18 +205,27 @@ export function SettingsRuntimePanel(props: any) {
           <div className="tc-log-panel">
             <div className="tc-runtime-doc-head">
               <strong>{t("按 Key ID 启停（POST）", "Enable/Disable by Key ID (POST)")}</strong>
-              <Button
-                size="small"
-                variant="outline"
-                onClick={() =>
-                  void copyTextToClipboard(
-                    runtimeApiExamples.toggleEnabledById,
-                    t("启停命令已复制。", "Enable/disable command copied.")
-                  )
-                }
-              >
-                {t("复制命令", "Copy Command")}
-              </Button>
+              <div className="tc-actions-row">
+                <Button
+                  size="small"
+                  variant="outline"
+                  onClick={() =>
+                    void copyTextToClipboard(
+                      runtimeApiExamples.toggleEnabledById,
+                      t("启停命令已复制。", "Enable/disable command copied.")
+                    )
+                  }
+                >
+                  {t("复制命令", "Copy Command")}
+                </Button>
+                <Button
+                  size="small"
+                  variant="outline"
+                  onClick={() => downloadRuntimeApiExample("toggleEnabledById")}
+                >
+                  {t("下载命令", "Download Command")}
+                </Button>
+              </div>
             </div>
             <CodeBlock value={runtimeApiExamples.toggleEnabledById} language="bash" />
           </div>
@@ -196,18 +233,27 @@ export function SettingsRuntimePanel(props: any) {
           <div className="tc-log-panel">
             <div className="tc-runtime-doc-head">
               <strong>{t("POST 参数结构", "POST Payload")}</strong>
-              <Button
-                size="small"
-                variant="outline"
-                onClick={() =>
-                  void copyTextToClipboard(
-                    runtimeApiExamples.payloadSchema,
-                    t("参数结构已复制。", "Payload copied.")
-                  )
-                }
-              >
-                {t("复制结构", "Copy Payload")}
-              </Button>
+              <div className="tc-actions-row">
+                <Button
+                  size="small"
+                  variant="outline"
+                  onClick={() =>
+                    void copyTextToClipboard(
+                      runtimeApiExamples.payloadSchema,
+                      t("参数结构已复制。", "Payload copied.")
+                    )
+                  }
+                >
+                  {t("复制结构", "Copy Payload")}
+                </Button>
+                <Button
+                  size="small"
+                  variant="outline"
+                  onClick={() => downloadRuntimeApiExample("payloadSchema")}
+                >
+                  {t("下载结构", "Download Payload")}
+                </Button>
+              </div>
             </div>
             <CodeBlock value={runtimeApiExamples.payloadSchema} language="json" />
           </div>

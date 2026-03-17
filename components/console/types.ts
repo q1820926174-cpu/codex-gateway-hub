@@ -272,6 +272,22 @@ export type UsageTimelineRow = UsageModelRow & {
   minute: string;
 };
 
+export type UsageFilterOptions = {
+  upstreamModels: string[];
+  routes: string[];
+  requestWireApis: string[];
+  upstreamWireApis: string[];
+  streams: string[];
+};
+
+export const EMPTY_USAGE_FILTER_OPTIONS: UsageFilterOptions = {
+  upstreamModels: [],
+  routes: [],
+  requestWireApis: [],
+  upstreamWireApis: [],
+  streams: []
+};
+
 export type UsageReport = {
   windowMinutes: number;
   keyId: number | null;
@@ -289,6 +305,7 @@ export type UsageReport = {
   perKey: UsageSummaryRow[];
   perModel: UsageModelRow[];
   timeline: UsageTimelineRow[];
+  filterOptions: UsageFilterOptions;
 };
 
 export type UsageMetricKey = "requestCount" | "promptTokens" | "completionTokens" | "totalTokens";

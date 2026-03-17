@@ -821,6 +821,12 @@ body {
   border-top: 1px solid var(--tc-border);
   padding-top: 20px;
   margin-top: 8px;
+  align-items: flex-start;
+}
+
+.tc-footer-meta {
+  flex: 1 1 320px;
+  min-width: min(320px, 100%);
 }
 
 .tc-tip {
@@ -835,6 +841,12 @@ body {
   background: var(--tc-ok-bg);
   color: var(--tc-ok-text);
   border: 1px solid #bce6ca;
+}
+
+.tc-tip.warn {
+  background: var(--tc-warning-bg);
+  color: var(--tc-warning-text);
+  border: 1px solid #f2d39c;
 }
 
 .tc-tip.err {
@@ -942,6 +954,232 @@ body {
   background: #f8fafc;
   padding: 10px;
   margin-bottom: 12px;
+}
+
+.tc-filter-section {
+  border: 1px solid var(--tc-border);
+  border-radius: 10px;
+  background: var(--tc-surface);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.tc-filter-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.tc-filter-section-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.tc-filter-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tc-filter-chip-list {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.tc-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 13px;
+  color: #0f172a;
+  background: #f3f6fb;
+  border: 1px solid #dbe4f3;
+}
+
+.tc-filter-chip-primary {
+  background: var(--tc-brand-soft);
+  border-color: var(--tc-brand);
+  color: var(--tc-brand);
+}
+
+.tc-filter-chip-warning {
+  background: var(--tc-warning-bg);
+  border-color: var(--tc-warning-text);
+  color: var(--tc-warning-text);
+}
+
+.tc-filter-chip-success {
+  background: var(--tc-ok-bg);
+  border-color: var(--tc-ok-text);
+  color: var(--tc-ok-text);
+}
+
+.tc-filter-chip-clear-all {
+  border-radius: 999px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--tc-text);
+  padding: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.tc-filter-chip .tc-filter-chip-clear {
+  border: none;
+  background: transparent;
+  padding: 0;
+  color: var(--tc-text-muted);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.tc-filter-preset-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.tc-filter-presets {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.tc-filter-preset {
+  border-radius: 8px;
+  border: 1px solid var(--tc-border);
+  padding: 6px 10px;
+  background: #f8fafc;
+  cursor: pointer;
+  font-size: 13px;
+  color: #0f172a;
+}
+
+.tc-filter-preset-bar select {
+  margin-left: 8px;
+  border-radius: 6px;
+  border: 1px solid var(--tc-border);
+  padding: 4px 8px;
+  background: var(--tc-surface);
+}
+
+.tc-filter-preset-active {
+  background: var(--tc-brand-soft);
+  border-color: var(--tc-brand);
+  color: var(--tc-brand);
+}
+
+.tc-filter-preset-controls {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.tc-filter-section {
+  border: 1px solid var(--tc-border);
+  border-radius: 10px;
+  background: var(--tc-surface);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.tc-filter-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.tc-filter-section-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.tc-filter-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tc-filter-chip-list {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.tc-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 13px;
+  color: #0f172a;
+  background: #f3f6fb;
+  border: 1px solid #dbe4f3;
+}
+
+.tc-filter-chip .tc-filter-chip-clear {
+  border: none;
+  background: transparent;
+  padding: 0;
+  color: var(--tc-text-muted);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.tc-filter-preset-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.tc-filter-presets {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.tc-filter-preset {
+  border-radius: 8px;
+  border: 1px solid var(--tc-border);
+  padding: 6px 10px;
+  background: #f8fafc;
+  cursor: pointer;
+  font-size: 13px;
+  color: #0f172a;
+}
+
+.tc-filter-preset-active {
+  background: var(--tc-brand-soft);
+  border-color: var(--tc-brand);
+  color: var(--tc-brand);
+}
+
+.tc-filter-preset-controls {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
 }
 
 .tc-log-toolbar-group {

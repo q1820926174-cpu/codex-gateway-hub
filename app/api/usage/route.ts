@@ -33,6 +33,24 @@ function resolveKeyId(value: string | null) {
   return Math.floor(n);
 }
 
+function resolveStringFilter(value: string | null) {
+  if (!value) {
+    return null;
+  }
+  const normalized = value.trim();
+  return normalized || null;
+}
+
+function resolveBoolean(value: string | null) {
+  if (value === "true" || value === "1") {
+    return true;
+  }
+  if (value === "false" || value === "0") {
+    return false;
+  }
+  return null;
+}
+
 function resolveDateTime(value: string | null) {
   if (!value) {
     return null;
@@ -55,14 +73,19 @@ export async function GET(req: Request) {
       return authError;
     }
 
-    const url = new URL(req.url);
-    const report = await readTokenUsageReport({
-      minutes: resolveMinutes(url.searchParams.get("minutes")),
-      timelineLimit: resolveTimelineLimit(url.searchParams.get("limit")),
-      keyId: resolveKeyId(url.searchParams.get("keyId")),
-      fromTime: resolveDateTime(url.searchParams.get("from")),
-      toTime: resolveDateTime(url.searchParams.get("to"))
-    });
+  const url = new URL(req.url);
+  const report = await readTokenUsageReport({
+    minutes: resolveMinutes(url.searchParams.get("minutes")),
+    timelineLimit: resolveTimelineLimit(url.searchParams.get("limit")),
+    keyId: resolveKeyId(url.searchParams.get("keyId")),
+    fromTime: resolveDateTime(url.searchParams.get("from")),
+    toTime: resolveDateTime(url.searchParams.get("to")),
+    upstreamModel: resolveStringFilter(url.searchParams.get("model")),
+    route: resolveStringFilter(url.searchParams.get("route")),
+    requestWireApi: resolveStringFilter(url.searchParams.get("requestWireApi")),
+    upstreamWireApi: resolveStringFilter(url.searchParams.get("upstreamWireApi")),
+    stream: resolveBoolean(url.searchParams.get("stream"))
+  });
     return NextResponse.json(report);
   });
 }

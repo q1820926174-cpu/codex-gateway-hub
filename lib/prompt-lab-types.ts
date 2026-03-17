@@ -1,7 +1,7 @@
 export type PromptLabRunMode = "cli" | "import";
 export type PromptLabRunStatus = "queued" | "running" | "succeeded" | "failed";
 export type PromptLabRunPhaseStatus = "pending" | "running" | "succeeded" | "failed";
-export type PromptLabHintSource = "default" | "rule";
+export type PromptLabHintSource = "default" | "rule" | "exempt";
 
 export type PromptLabScoreBreakdown = {
   providerRank: -1 | 0 | 1 | 2;
@@ -14,6 +14,8 @@ export type PromptLabScoreBreakdown = {
 export type RulePreviewResult = {
   matchedRuleId: string | null;
   matchedRuleIndex: number | null;
+  matchedExemption: string | null;
+  matchedExemptionIndex: number | null;
   scoreBreakdown: PromptLabScoreBreakdown | null;
   hintSource: PromptLabHintSource;
   hintPreview: string;
@@ -102,4 +104,3 @@ export type PromptLabRun = {
 export type PromptLabRunWithReport = PromptLabRun & {
   report: PromptLabNormalizedReport | null;
 };
-

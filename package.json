@@ -3,7 +3,18 @@
   "private": false,
   "version": "0.1.0",
   "description": "OpenAI-compatible API gateway for Codex/Responses with multi-provider routing, model mapping, vision fallback, runtime switching, and usage analytics.",
+  "homepage": "https://github.com/q1820926174-cpu/codex-gateway-hub",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/q1820926174-cpu/codex-gateway-hub.git"
+  },
+  "bugs": {
+    "url": "https://github.com/q1820926174-cpu/codex-gateway-hub/issues"
+  },
   "license": "MIT",
+  "engines": {
+    "node": ">=20.9.0"
+  },
   "keywords": [
     "openai-compatible",
     "responses-api",

@@ -28,6 +28,7 @@ import { generateMappingId, generateModelId } from "@/lib/console-utils";
 
 export type CompatPromptConfig = {
   agentsMdKeywords: string[];
+  modelPromptExemptions: string[];
   chineseReplyHint: string;
   modelPromptRules: CompatPromptRule[];
 };
@@ -429,6 +430,29 @@ export function parseCompatPromptKeywordsInput(value: string) {
         .filter(Boolean)
     )
   );
+}
+
+export function formatCompatPromptExemptionsInput(patterns: string[]) {
+  return patterns.join("\n");
+}
+
+export function parseCompatPromptExemptionsInput(value: string) {
+  const output: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value.split(/\r?\n/)) {
+    const trimmed = item.trim();
+    if (!trimmed) {
+      continue;
+    }
+
+    const dedupeKey = trimmed.toLowerCase();
+    if (seen.has(dedupeKey)) {
+      continue;
+    }
+    seen.add(dedupeKey);
+    output.push(trimmed);
+  }
+  return output;
 }
 
 export function normalizeCompatPromptRule(

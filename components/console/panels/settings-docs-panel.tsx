@@ -29,7 +29,14 @@ import {
 
 
 export function SettingsDocsPanel(props: any) {
-  const { t, gatewayV1Endpoint, gatewayOrigin, apiDocExamples, copyTextToClipboard } = props;
+  const {
+    t,
+    gatewayV1Endpoint,
+    gatewayOrigin,
+    apiDocExamples,
+    copyTextToClipboard,
+    downloadApiDocExample
+  } = props;
   return (
     <section className="tc-section">
       <h3>{t("本端接口文档", "Gateway API Documentation")}</h3>
@@ -109,18 +116,27 @@ export function SettingsDocsPanel(props: any) {
           <div className="tc-log-panel">
             <div className="tc-runtime-doc-head">
               <strong>POST /v1/chat/completions</strong>
-              <Button
-                size="small"
-                variant="outline"
-                onClick={() =>
-                  void copyTextToClipboard(
-                    apiDocExamples.chatCompletions,
-                    t("示例命令已复制。", "Example command copied.")
-                  )
-                }
-              >
-                {t("复制命令", "Copy Command")}
-              </Button>
+              <div className="tc-actions-row">
+                <Button
+                  size="small"
+                  variant="outline"
+                  onClick={() =>
+                    void copyTextToClipboard(
+                      apiDocExamples.chatCompletions,
+                      t("示例命令已复制。", "Example command copied.")
+                    )
+                  }
+                >
+                  {t("复制命令", "Copy Command")}
+                </Button>
+                <Button
+                  size="small"
+                  variant="outline"
+                  onClick={() => downloadApiDocExample("chatCompletions")}
+                >
+                  {t("下载命令", "Download Command")}
+                </Button>
+              </div>
             </div>
             <CodeBlock value={apiDocExamples.chatCompletions} language="bash" />
           </div>
@@ -128,18 +144,27 @@ export function SettingsDocsPanel(props: any) {
           <div className="tc-log-panel">
             <div className="tc-runtime-doc-head">
               <strong>POST /v1/responses</strong>
-              <Button
-                size="small"
-                variant="outline"
-                onClick={() =>
-                  void copyTextToClipboard(
-                    apiDocExamples.responses,
-                    t("示例命令已复制。", "Example command copied.")
-                  )
-                }
-              >
-                {t("复制命令", "Copy Command")}
-              </Button>
+              <div className="tc-actions-row">
+                <Button
+                  size="small"
+                  variant="outline"
+                  onClick={() =>
+                    void copyTextToClipboard(
+                      apiDocExamples.responses,
+                      t("示例命令已复制。", "Example command copied.")
+                    )
+                  }
+                >
+                  {t("复制命令", "Copy Command")}
+                </Button>
+                <Button
+                  size="small"
+                  variant="outline"
+                  onClick={() => downloadApiDocExample("responses")}
+                >
+                  {t("下载命令", "Download Command")}
+                </Button>
+              </div>
             </div>
             <CodeBlock value={apiDocExamples.responses} language="bash" />
           </div>
@@ -147,18 +172,27 @@ export function SettingsDocsPanel(props: any) {
           <div className="tc-log-panel">
             <div className="tc-runtime-doc-head">
               <strong>POST /v1/messages</strong>
-              <Button
-                size="small"
-                variant="outline"
-                onClick={() =>
-                  void copyTextToClipboard(
-                    apiDocExamples.anthropicMessages,
-                    t("示例命令已复制。", "Example command copied.")
-                  )
-                }
-              >
-                {t("复制命令", "Copy Command")}
-              </Button>
+              <div className="tc-actions-row">
+                <Button
+                  size="small"
+                  variant="outline"
+                  onClick={() =>
+                    void copyTextToClipboard(
+                      apiDocExamples.anthropicMessages,
+                      t("示例命令已复制。", "Example command copied.")
+                    )
+                  }
+                >
+                  {t("复制命令", "Copy Command")}
+                </Button>
+                <Button
+                  size="small"
+                  variant="outline"
+                  onClick={() => downloadApiDocExample("anthropicMessages")}
+                >
+                  {t("下载命令", "Download Command")}
+                </Button>
+              </div>
             </div>
             <CodeBlock value={apiDocExamples.anthropicMessages} language="bash" />
           </div>
@@ -167,4 +201,3 @@ export function SettingsDocsPanel(props: any) {
     </section>
   );
 }
-

@@ -26,6 +26,7 @@ import {
   pickUsageMetricValue,
   summarizeLogPreview
 } from "@/components/console/settings-console-helpers";
+import { ActiveFilterSummary } from "@/components/console/filters";
 
 
 export function SettingsLogsPanel(props: any) {
@@ -39,6 +40,21 @@ export function SettingsLogsPanel(props: any) {
     clearApiLogs,
     loadingLogs,
     apiLogs,
+    loadedApiLogCount,
+    apiLogKeywordFilter,
+    setApiLogKeywordFilter,
+    apiLogRouteFilter,
+    apiLogRouteOptions,
+    setApiLogRouteFilter,
+    apiLogMethodFilter,
+    apiLogMethodOptions,
+    setApiLogMethodFilter,
+    apiLogStatusFilter,
+    setApiLogStatusFilter,
+    apiLogErrorOnly,
+    setApiLogErrorOnly,
+    apiLogActiveFilters,
+    resetApiLogFilters,
     statusClassName,
     statusTheme
   } = props;
@@ -63,6 +79,17 @@ export function SettingsLogsPanel(props: any) {
             />
           </label>
         </div>
+        <div className="tc-log-toolbar-group tc-log-field-wide">
+          <label className="tc-field">
+            <span>{t("关键词", "Keyword")}</span>
+            <Input
+              value={apiLogKeywordFilter}
+              onChange={(value) => setApiLogKeywordFilter(value)}
+              placeholder={t("搜索路由、路径、请求体、响应体、错误", "Search route, path, payload, response, or errors")}
+              clearable
+            />
+          </label>
+        </div>
         <div className="tc-log-toolbar-group">
           <label className="tc-field">
             <span>{t("拉取条数", "Fetch Limit")}</span>
@@ -84,7 +111,57 @@ export function SettingsLogsPanel(props: any) {
             />
           </label>
         </div>
+        <div className="tc-log-toolbar-group">
+          <label className="tc-field">
+            <span>{t("路由", "Route")}</span>
+            <Select
+              value={apiLogRouteFilter || "__all__"}
+              options={apiLogRouteOptions}
+              style={{ width: 180 }}
+              onChange={(value) => {
+                const next = normalizeSelectValue(value);
+                setApiLogRouteFilter(next === "__all__" ? "" : next);
+              }}
+            />
+          </label>
+        </div>
+        <div className="tc-log-toolbar-group">
+          <label className="tc-field">
+            <span>{t("方法", "Method")}</span>
+            <Select
+              value={apiLogMethodFilter}
+              options={apiLogMethodOptions}
+              style={{ width: 150 }}
+              onChange={(value) => setApiLogMethodFilter(normalizeSelectValue(value))}
+            />
+          </label>
+        </div>
+        <div className="tc-log-toolbar-group">
+          <label className="tc-field">
+            <span>{t("状态分层", "Status Bucket")}</span>
+            <Select
+              value={apiLogStatusFilter}
+              options={[
+                { label: t("全部状态", "All Status"), value: "all" },
+                { label: t("成功", "Success"), value: "success" },
+                { label: t("警告", "Warning"), value: "warning" },
+                { label: t("错误", "Error"), value: "error" }
+              ]}
+              style={{ width: 150 }}
+              onChange={(value) => setApiLogStatusFilter(normalizeSelectValue(value))}
+            />
+          </label>
+        </div>
+        <div className="tc-log-toolbar-group">
+          <label className="tc-switchline">
+            <span>{t("仅看错误", "Errors Only")}</span>
+            <Switch value={apiLogErrorOnly} onChange={(value) => setApiLogErrorOnly(Boolean(value))} />
+          </label>
+        </div>
         <div className="tc-log-toolbar-group tc-log-toolbar-actions">
+          <Button variant="outline" onClick={resetApiLogFilters}>
+            {t("重置筛选", "Reset Filters")}
+          </Button>
           <Button
             variant="outline"
             theme="danger"
@@ -96,12 +173,20 @@ export function SettingsLogsPanel(props: any) {
         </div>
       </div>
 
+      <ActiveFilterSummary items={apiLogActiveFilters} onClearAll={resetApiLogFilters} />
+
       {apiLogs.length === 0 ? (
         <p className="tc-upstream-advice">
           {t("暂无日志。先调用一次接口后再查看。", "No logs yet. Send one request first.")}
         </p>
       ) : (
         <div className="tc-log-list">
+          <p className="tc-upstream-advice">
+            {t(
+              `当前显示 ${apiLogs.length} 条，已加载 ${loadedApiLogCount} 条原始日志。`,
+              `Showing ${apiLogs.length} entries out of ${loadedApiLogCount} loaded logs.`
+            )}
+          </p>
           {apiLogs.map((item: any) => (
             <article
               className={`tc-log-item tc-log-item-${statusClassName(item.status)}`}
@@ -154,4 +239,3 @@ export function SettingsLogsPanel(props: any) {
     </section>
   );
 }
-

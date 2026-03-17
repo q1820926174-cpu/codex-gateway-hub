@@ -31,7 +31,6 @@ type UsageReportQuery = {
   toTime?: Date | null;
 };
 
-
 export type KeyDailyUsageSnapshot = {
   keyId: number;
   requestCount: number;
@@ -66,6 +65,22 @@ export type KeyDailyLimitCheckResult =
       };
       snapshot: KeyDailyUsageSnapshot;
     };
+
+export type UsageFilterOptions = {
+  upstreamModels: string[];
+  routes: string[];
+  requestWireApis: string[];
+  upstreamWireApis: string[];
+  streams: string[];
+};
+
+export const EMPTY_USAGE_FILTER_OPTIONS: UsageFilterOptions = {
+  upstreamModels: [],
+  routes: [],
+  requestWireApis: [],
+  upstreamWireApis: [],
+  streams: []
+};
 
 type TokenUsageDelegate = {
   create: (args: any) => Promise<any>;
@@ -112,7 +127,6 @@ function toMinuteBucket(date: Date) {
   next.setSeconds(0, 0);
   return next;
 }
-
 
 function startOfLocalDay(date: Date) {
   const next = new Date(date);
@@ -220,7 +234,6 @@ export async function clearTokenUsageEvents() {
   }
   await delegate.deleteMany({});
 }
-
 
 export async function readKeyDailyUsageSnapshot(
   keyId: number,
@@ -343,7 +356,25 @@ export async function checkKeyDailyLimits(input: {
   };
 }
 
-export async function readTokenUsageReport(query: UsageReportQuery) {
+function normalizeFilterString(value?: string | null) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : "";
+}
+
+function toOptionList(rows: Array<Record<string, unknown>>, key: string) {
+  return rows
+    .map((item) => String(item[key] ?? "").trim())
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b));
+}
+
+export async function readTokenUsageReport(query: UsageReportQuery & {
+  upstreamModel?: string | null;
+  route?: string | null;
+  requestWireApi?: string | null;
+  upstreamWireApi?: string | null;
+  stream?: boolean | null;
+}) {
   const minutes = clampMinutes(query.minutes);
   const timelineLimit = clampTimelineLimit(query.timelineLimit);
   const now = new Date();
@@ -396,7 +427,8 @@ export async function readTokenUsageReport(query: UsageReportQuery) {
       },
       perKey: [],
       perModel: [],
-      timeline: []
+      timeline: [],
+      filterOptions: EMPTY_USAGE_FILTER_OPTIONS
     };
   }
 
@@ -410,8 +442,37 @@ export async function readTokenUsageReport(query: UsageReportQuery) {
   if (query.keyId && query.keyId > 0) {
     where.keyId = query.keyId;
   }
+  const upstreamModelFilter = normalizeFilterString(query.upstreamModel);
+  if (upstreamModelFilter) {
+    where.upstreamModel = upstreamModelFilter;
+  }
+  const routeFilter = normalizeFilterString(query.route);
+  if (routeFilter) {
+    where.route = routeFilter;
+  }
+  const requestWireApiFilter = normalizeFilterString(query.requestWireApi);
+  if (requestWireApiFilter) {
+    where.requestWireApi = requestWireApiFilter;
+  }
+  const upstreamWireApiFilter = normalizeFilterString(query.upstreamWireApi);
+  if (upstreamWireApiFilter) {
+    where.upstreamWireApi = upstreamWireApiFilter;
+  }
+  const streamFilter = query.stream ?? null;
+  if (streamFilter !== null) {
+    where.stream = streamFilter;
+  }
 
-  const [perKeyRaw, perModelRaw, timelineRaw] = await Promise.all([
+  const [
+    perKeyRaw,
+    perModelRaw,
+    timelineRaw,
+    upstreamModelFiltersRaw,
+    routeFiltersRaw,
+    requestWireApiFiltersRaw,
+    upstreamWireApiFiltersRaw,
+    streamFiltersRaw
+  ] = await Promise.all([
     delegate.groupBy({
       by: ["keyId", "keyName"],
       where,
@@ -441,6 +502,31 @@ export async function readTokenUsageReport(query: UsageReportQuery) {
         completionTokens: true,
         totalTokens: true
       }
+    }),
+    delegate.groupBy({
+      by: ["upstreamModel"],
+      where,
+      _count: { _all: true }
+    }),
+    delegate.groupBy({
+      by: ["route"],
+      where,
+      _count: { _all: true }
+    }),
+    delegate.groupBy({
+      by: ["requestWireApi"],
+      where,
+      _count: { _all: true }
+    }),
+    delegate.groupBy({
+      by: ["upstreamWireApi"],
+      where,
+      _count: { _all: true }
+    }),
+    delegate.groupBy({
+      by: ["stream"],
+      where,
+      _count: { _all: true }
     })
   ]);
 
@@ -502,6 +588,16 @@ export async function readTokenUsageReport(query: UsageReportQuery) {
     }
   );
 
+  const filterOptions = {
+    upstreamModels: toOptionList(upstreamModelFiltersRaw, "upstreamModel"),
+    routes: toOptionList(routeFiltersRaw, "route"),
+    requestWireApis: toOptionList(requestWireApiFiltersRaw, "requestWireApi"),
+    upstreamWireApis: toOptionList(upstreamWireApiFiltersRaw, "upstreamWireApi"),
+    streams: streamFiltersRaw
+      .map((item) => (item.stream ? "stream" : "non_stream"))
+      .filter(Boolean)
+  };
+
   return {
     windowMinutes: effectiveWindowMinutes,
     keyId: query.keyId ?? null,
@@ -513,6 +609,7 @@ export async function readTokenUsageReport(query: UsageReportQuery) {
       uniqueKeys: perKey.length,
       uniqueModels: perModel.length
     },
+    filterOptions,
     perKey,
     perModel,
     timeline

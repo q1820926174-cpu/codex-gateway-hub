@@ -8,6 +8,10 @@ export const DEFAULT_AGENTS_MD_KEYWORDS = [
   "agents.md"
 ] as const;
 
+export const DEFAULT_COMPAT_PROMPT_EXEMPTIONS = [
+  "gpt-*"
+] as const;
+
 export const DEFAULT_CHINESE_REPLY_HINT = `
 You are a Codex-compatible coding agent routed to a third-party model.
 Primary objective: correct tool calls and verifiable execution results.
@@ -55,6 +59,7 @@ const MAX_PATTERN_FIELD_LENGTH = 200;
 const MAX_RULE_HINT_LENGTH = 20_000;
 const MAX_RULE_ID_LENGTH = 120;
 const MAX_MODEL_PROMPT_RULES = 128;
+const MAX_MODEL_PROMPT_EXEMPTIONS = 128;
 
 type CompatPromptRuleSource = {
   id?: unknown;
@@ -74,12 +79,14 @@ export type CompatPromptRule = {
 
 export type CompatPromptConfig = {
   agentsMdKeywords: string[];
+  modelPromptExemptions: string[];
   chineseReplyHint: string;
   modelPromptRules: CompatPromptRule[];
 };
 
 export type CompatPromptConfigInput = {
   agentsMdKeywords?: unknown;
+  modelPromptExemptions?: unknown;
   chineseReplyHint?: unknown;
   modelPromptRules?: unknown;
 };
@@ -90,6 +97,7 @@ type GatewayConfigFile = {
 
 const DEFAULT_COMPAT_PROMPT_CONFIG: CompatPromptConfig = {
   agentsMdKeywords: [...DEFAULT_AGENTS_MD_KEYWORDS],
+  modelPromptExemptions: [...DEFAULT_COMPAT_PROMPT_EXEMPTIONS],
   chineseReplyHint: DEFAULT_CHINESE_REPLY_HINT,
   modelPromptRules: []
 };
@@ -129,6 +137,30 @@ function normalizeChineseReplyHint(value: unknown) {
     return DEFAULT_COMPAT_PROMPT_CONFIG.chineseReplyHint;
   }
   return value.trim();
+}
+
+function normalizeModelPromptExemptions(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [...DEFAULT_COMPAT_PROMPT_CONFIG.modelPromptExemptions];
+  }
+
+  const normalized: string[] = [];
+  const seen = new Set<string>();
+  for (let index = 0; index < value.length && normalized.length < MAX_MODEL_PROMPT_EXEMPTIONS; index += 1) {
+    const pattern = normalizePatternField(value[index]);
+    if (!pattern) {
+      continue;
+    }
+
+    const dedupeKey = pattern.toLowerCase();
+    if (seen.has(dedupeKey)) {
+      continue;
+    }
+    seen.add(dedupeKey);
+    normalized.push(pattern);
+  }
+
+  return normalized;
 }
 
 function normalizePatternField(value: unknown) {
@@ -214,6 +246,7 @@ function cloneModelPromptRule(rule: CompatPromptRule): CompatPromptRule {
 function cloneCompatPromptConfig(config: CompatPromptConfig): CompatPromptConfig {
   return {
     agentsMdKeywords: [...config.agentsMdKeywords],
+    modelPromptExemptions: [...config.modelPromptExemptions],
     chineseReplyHint: config.chineseReplyHint,
     modelPromptRules: config.modelPromptRules.map((rule) => cloneModelPromptRule(rule))
   };
@@ -289,25 +322,32 @@ type CompatPromptRuleScoreDetail = {
 
 export type CompatPromptHintResolutionDebug = {
   hint: string;
-  hintSource: "default" | "rule";
+  hintSource: "default" | "rule" | "exempt";
   matchedRuleId: string | null;
   matchedRuleIndex: number | null;
+  matchedExemption: string | null;
+  matchedExemptionIndex: number | null;
   scoreBreakdown: CompatPromptRuleScoreDetail | null;
 };
 
-function buildRuleScoreDetail(rule: CompatPromptRule, provider: string, upstreamModel: string) {
-  const providerRank = rankPatternMatch(rule.provider, provider);
+function buildPatternScoreDetail(
+  providerPattern: string,
+  upstreamModelPattern: string,
+  provider: string,
+  upstreamModel: string
+) {
+  const providerRank = rankPatternMatch(providerPattern, provider);
   if (providerRank < 0) {
     return null;
   }
 
-  const upstreamRank = rankPatternMatch(rule.upstreamModelPattern, upstreamModel);
+  const upstreamRank = rankPatternMatch(upstreamModelPattern, upstreamModel);
   if (upstreamRank < 0) {
     return null;
   }
 
-  const hasProvider = !!rule.provider.trim();
-  const hasUpstream = !!rule.upstreamModelPattern.trim();
+  const hasProvider = !!providerPattern.trim();
+  const hasUpstream = !!upstreamModelPattern.trim();
   const score =
     upstreamRank * 100 +
     providerRank * 25 +
@@ -321,6 +361,80 @@ function buildRuleScoreDetail(rule: CompatPromptRule, provider: string, upstream
     hasUpstream,
     score
   } satisfies CompatPromptRuleScoreDetail;
+}
+
+function buildRuleScoreDetail(rule: CompatPromptRule, provider: string, upstreamModel: string) {
+  return buildPatternScoreDetail(rule.provider, rule.upstreamModelPattern, provider, upstreamModel);
+}
+
+function parseCompatPromptExemptionPattern(pattern: string) {
+  const normalized = normalizePatternField(pattern);
+  if (!normalized) {
+    return null;
+  }
+
+  const separatorIndex = normalized.indexOf(":");
+  if (separatorIndex <= 0 || separatorIndex >= normalized.length - 1) {
+    return {
+      providerPattern: "",
+      upstreamModelPattern: normalized
+    };
+  }
+
+  const providerPattern = normalizePatternField(normalized.slice(0, separatorIndex));
+  const upstreamModelPattern = normalizePatternField(normalized.slice(separatorIndex + 1));
+  if (!upstreamModelPattern) {
+    return {
+      providerPattern: "",
+      upstreamModelPattern: normalized
+    };
+  }
+
+  return {
+    providerPattern,
+    upstreamModelPattern
+  };
+}
+
+function findBestCompatPromptExemptionMatch(
+  exemptions: string[],
+  input: CompatPromptHintMatchInput
+) {
+  const provider = normalizeModelMatchValue(input.provider);
+  const upstreamModel = normalizeModelMatchValue(input.upstreamModel);
+
+  let best: {
+    pattern: string;
+    index: number;
+    score: CompatPromptRuleScoreDetail;
+  } | null = null;
+
+  for (let index = 0; index < exemptions.length; index += 1) {
+    const parsed = parseCompatPromptExemptionPattern(exemptions[index]);
+    if (!parsed) {
+      continue;
+    }
+
+    const score = buildPatternScoreDetail(
+      parsed.providerPattern,
+      parsed.upstreamModelPattern,
+      provider,
+      upstreamModel
+    );
+    if (!score) {
+      continue;
+    }
+
+    if (!best || score.score > best.score.score || (score.score === best.score.score && index < best.index)) {
+      best = {
+        pattern: exemptions[index],
+        index,
+        score
+      };
+    }
+  }
+
+  return best;
 }
 
 function findBestCompatPromptRuleMatch(
@@ -378,6 +492,7 @@ function readCompatPromptConfigFromDisk(): CompatPromptConfig {
     const parsed = JSON.parse(raw) as GatewayConfigFile;
     return {
       agentsMdKeywords: normalizeAgentsMdKeywords(parsed.compatPromptConfig?.agentsMdKeywords),
+      modelPromptExemptions: normalizeModelPromptExemptions(parsed.compatPromptConfig?.modelPromptExemptions),
       chineseReplyHint: normalizeChineseReplyHint(parsed.compatPromptConfig?.chineseReplyHint),
       modelPromptRules: normalizeModelPromptRules(parsed.compatPromptConfig?.modelPromptRules)
     };
@@ -408,6 +523,7 @@ export function getCompatPromptConfig(): CompatPromptConfig {
 export async function saveCompatPromptConfig(input: CompatPromptConfigInput) {
   const normalized: CompatPromptConfig = {
     agentsMdKeywords: normalizeAgentsMdKeywords(input.agentsMdKeywords),
+    modelPromptExemptions: normalizeModelPromptExemptions(input.modelPromptExemptions),
     chineseReplyHint: normalizeChineseReplyHint(input.chineseReplyHint),
     modelPromptRules: normalizeModelPromptRules(input.modelPromptRules)
   };
@@ -438,10 +554,31 @@ export function resolveCompatPromptHintForModel(input: CompatPromptHintMatchInpu
   return resolveCompatPromptHintFromRules(config.modelPromptRules, input);
 }
 
+export function isCompatPromptInjectionExemptForModel(input: CompatPromptHintMatchInput) {
+  const config = getCompatPromptConfig();
+  return !!findBestCompatPromptExemptionMatch(config.modelPromptExemptions, input);
+}
+
 export function resolveCompatPromptHintDebugForModel(
   input: CompatPromptHintMatchInput
 ): CompatPromptHintResolutionDebug {
   const config = getCompatPromptConfig();
+  const exemptionMatch = findBestCompatPromptExemptionMatch(
+    config.modelPromptExemptions,
+    input
+  );
+  if (exemptionMatch) {
+    return {
+      hint: "",
+      hintSource: "exempt",
+      matchedRuleId: null,
+      matchedRuleIndex: null,
+      matchedExemption: exemptionMatch.pattern,
+      matchedExemptionIndex: exemptionMatch.index,
+      scoreBreakdown: exemptionMatch.score
+    };
+  }
+
   const match = findBestCompatPromptRuleMatch(config.modelPromptRules, input);
   if (!match) {
     return {
@@ -449,6 +586,8 @@ export function resolveCompatPromptHintDebugForModel(
       hintSource: "default",
       matchedRuleId: null,
       matchedRuleIndex: null,
+      matchedExemption: null,
+      matchedExemptionIndex: null,
       scoreBreakdown: null
     };
   }
@@ -458,6 +597,8 @@ export function resolveCompatPromptHintDebugForModel(
     hintSource: "rule",
     matchedRuleId: match.ruleId,
     matchedRuleIndex: match.ruleIndex,
+    matchedExemption: null,
+    matchedExemptionIndex: null,
     scoreBreakdown: match.score
   };
 }

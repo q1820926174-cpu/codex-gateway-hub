@@ -62,10 +62,12 @@ export function SettingsExportPanel(props: SettingsExportPanelProps) {
   const {
     t,
     copyCcSwitchCodexAuthJson,
+    downloadCcSwitchCodexAuthJson,
     loading,
     keyForm,
     codexAuthJsonPreview,
     copyCcSwitchCodexConfigToml,
+    downloadCcSwitchCodexConfigToml,
     codexConfigTomlPreview,
     nativeCodexApplyPatchToolType,
     setNativeCodexApplyPatchToolType,
@@ -77,8 +79,10 @@ export function SettingsExportPanel(props: SettingsExportPanelProps) {
     formatGlmThinkingThresholdLabel,
     selectedKeyId,
     copyNativeCodexBundleFile,
+    downloadNativeCodexBundleFile,
     nativeCodexEmptyState,
     copyCcSwitchClaudeConfigJson,
+    downloadCcSwitchClaudeConfigJson,
     claudeConfigPreview,
     openCcSwitchCodexImport,
     openCcSwitchClaudeImport,
@@ -107,14 +111,24 @@ export function SettingsExportPanel(props: SettingsExportPanelProps) {
                   <div className="tc-runtime-doc">
                     <div className="tc-runtime-doc-head">
                       <h4>{t("Codex auth.json 预览", "Codex auth.json Preview")}</h4>
-                      <Button
-                        variant="outline"
-                        theme="default"
-                        onClick={() => void copyCcSwitchCodexAuthJson()}
-                        disabled={loading || !keyForm.localKey.trim()}
-                      >
-                        {t("一键复制 auth.json（含密钥）", "Copy auth.json (with key)")}
-                      </Button>
+                      <div className="tc-actions-row">
+                        <Button
+                          variant="outline"
+                          theme="default"
+                          onClick={() => void copyCcSwitchCodexAuthJson()}
+                          disabled={loading || !keyForm.localKey.trim()}
+                        >
+                          {t("一键复制 auth.json（含密钥）", "Copy auth.json (with key)")}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          theme="default"
+                          onClick={() => downloadCcSwitchCodexAuthJson()}
+                          disabled={loading || !keyForm.localKey.trim()}
+                        >
+                          {t("下载 auth.json", "Download auth.json")}
+                        </Button>
+                      </div>
                     </div>
                     <CodeBlock
                       value={
@@ -131,14 +145,24 @@ export function SettingsExportPanel(props: SettingsExportPanelProps) {
                     </p>
                     <div className="tc-runtime-doc-head">
                       <h4>{t("Codex config.toml 预览", "Codex config.toml Preview")}</h4>
-                      <Button
-                        variant="outline"
-                        theme="default"
-                        onClick={() => void copyCcSwitchCodexConfigToml()}
-                        disabled={loading || !keyForm.localKey.trim()}
-                      >
-                        {t("一键复制 config.toml", "Copy config.toml")}
-                      </Button>
+                      <div className="tc-actions-row">
+                        <Button
+                          variant="outline"
+                          theme="default"
+                          onClick={() => void copyCcSwitchCodexConfigToml()}
+                          disabled={loading || !keyForm.localKey.trim()}
+                        >
+                          {t("一键复制 config.toml", "Copy config.toml")}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          theme="default"
+                          onClick={() => downloadCcSwitchCodexConfigToml()}
+                          disabled={loading || !keyForm.localKey.trim()}
+                        >
+                          {t("下载 config.toml", "Download config.toml")}
+                        </Button>
+                      </div>
                     </div>
                     <CodeBlock
                       value={
@@ -212,20 +236,37 @@ export function SettingsExportPanel(props: SettingsExportPanelProps) {
 
                     <div className="tc-runtime-doc-head">
                       <h4>{t("~/.codex/.env 片段", "~/.codex/.env Snippet")}</h4>
-                      <Button
-                        variant="outline"
-                        theme="default"
-                        onClick={() =>
-                          void copyNativeCodexBundleFile(
-                            "envSnippet",
-                            t("原生 Codex .env 片段已复制。", "Native Codex .env snippet copied."),
-                            t("复制原生 Codex .env 片段失败", "Failed to copy native Codex .env snippet")
-                          )
-                        }
-                        disabled={loading || !nativeCodexExportBundle}
-                      >
-                        {t("复制 .env 片段", "Copy .env Snippet")}
-                      </Button>
+                      <div className="tc-actions-row">
+                        <Button
+                          variant="outline"
+                          theme="default"
+                          onClick={() =>
+                            void copyNativeCodexBundleFile(
+                              "envSnippet",
+                              t("原生 Codex .env 片段已复制。", "Native Codex .env snippet copied."),
+                              t("复制原生 Codex .env 片段失败", "Failed to copy native Codex .env snippet")
+                            )
+                          }
+                          disabled={loading || !nativeCodexExportBundle}
+                        >
+                          {t("复制 .env 片段", "Copy .env Snippet")}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          theme="default"
+                          onClick={() =>
+                            downloadNativeCodexBundleFile(
+                              "envSnippet",
+                              ".env",
+                              t("原生 Codex .env 片段已下载。", "Native Codex .env snippet downloaded."),
+                              t("下载原生 Codex .env 片段失败", "Failed to download native Codex .env snippet")
+                            )
+                          }
+                          disabled={loading || !nativeCodexExportBundle}
+                        >
+                          {t("下载 .env 片段", "Download .env Snippet")}
+                        </Button>
+                      </div>
                     </div>
                     <CodeBlock
                       value={nativeCodexExportBundle?.files.envSnippet.content || nativeCodexEmptyState}
@@ -238,23 +279,43 @@ export function SettingsExportPanel(props: SettingsExportPanelProps) {
 
                     <div className="tc-runtime-doc-head">
                       <h4>{t("原生 Codex config.toml 片段", "Native Codex config.toml Snippet")}</h4>
-                      <Button
-                        variant="outline"
-                        theme="default"
-                        onClick={() =>
-                          void copyNativeCodexBundleFile(
-                            "configTomlSnippet",
-                            t("原生 Codex config.toml 片段已复制。", "Native Codex config.toml snippet copied."),
-                            t(
-                              "复制原生 Codex config.toml 片段失败",
-                              "Failed to copy native Codex config.toml snippet"
+                      <div className="tc-actions-row">
+                        <Button
+                          variant="outline"
+                          theme="default"
+                          onClick={() =>
+                            void copyNativeCodexBundleFile(
+                              "configTomlSnippet",
+                              t("原生 Codex config.toml 片段已复制。", "Native Codex config.toml snippet copied."),
+                              t(
+                                "复制原生 Codex config.toml 片段失败",
+                                "Failed to copy native Codex config.toml snippet"
+                              )
                             )
-                          )
-                        }
-                        disabled={loading || !nativeCodexExportBundle}
-                      >
-                        {t("复制原生 config.toml", "Copy Native config.toml")}
-                      </Button>
+                          }
+                          disabled={loading || !nativeCodexExportBundle}
+                        >
+                          {t("复制原生 config.toml", "Copy Native config.toml")}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          theme="default"
+                          onClick={() =>
+                            downloadNativeCodexBundleFile(
+                              "configTomlSnippet",
+                              "config.toml",
+                              t("原生 Codex config.toml 片段已下载。", "Native Codex config.toml snippet downloaded."),
+                              t(
+                                "下载原生 Codex config.toml 片段失败",
+                                "Failed to download native Codex config.toml snippet"
+                              )
+                            )
+                          }
+                          disabled={loading || !nativeCodexExportBundle}
+                        >
+                          {t("下载原生 config.toml", "Download Native config.toml")}
+                        </Button>
+                      </div>
                     </div>
                     <CodeBlock
                       value={
@@ -269,26 +330,49 @@ export function SettingsExportPanel(props: SettingsExportPanelProps) {
 
                     <div className="tc-runtime-doc-head">
                       <h4>{t("原生 Codex model_catalog_json", "Native Codex model_catalog_json")}</h4>
-                      <Button
-                        variant="outline"
-                        theme="default"
-                        onClick={() =>
-                          void copyNativeCodexBundleFile(
-                            "modelCatalogJson",
-                            t(
-                              "原生 Codex model_catalog_json 已复制。",
-                              "Native Codex model_catalog_json copied."
-                            ),
-                            t(
-                              "复制原生 Codex model_catalog_json 失败",
-                              "Failed to copy native Codex model_catalog_json"
+                      <div className="tc-actions-row">
+                        <Button
+                          variant="outline"
+                          theme="default"
+                          onClick={() =>
+                            void copyNativeCodexBundleFile(
+                              "modelCatalogJson",
+                              t(
+                                "原生 Codex model_catalog_json 已复制。",
+                                "Native Codex model_catalog_json copied."
+                              ),
+                              t(
+                                "复制原生 Codex model_catalog_json 失败",
+                                "Failed to copy native Codex model_catalog_json"
+                              )
                             )
-                          )
-                        }
-                        disabled={loading || !nativeCodexExportBundle}
-                      >
-                        {t("复制 model_catalog_json", "Copy model_catalog_json")}
-                      </Button>
+                          }
+                          disabled={loading || !nativeCodexExportBundle}
+                        >
+                          {t("复制 model_catalog_json", "Copy model_catalog_json")}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          theme="default"
+                          onClick={() =>
+                            downloadNativeCodexBundleFile(
+                              "modelCatalogJson",
+                              "export.catalog.json",
+                              t(
+                                "原生 Codex model_catalog_json 已下载。",
+                                "Native Codex model_catalog_json downloaded."
+                              ),
+                              t(
+                                "下载原生 Codex model_catalog_json 失败",
+                                "Failed to download native Codex model_catalog_json"
+                              )
+                            )
+                          }
+                          disabled={loading || !nativeCodexExportBundle}
+                        >
+                          {t("下载 model_catalog_json", "Download model_catalog_json")}
+                        </Button>
+                      </div>
                     </div>
                     <CodeBlock
                       value={
@@ -305,23 +389,43 @@ export function SettingsExportPanel(props: SettingsExportPanelProps) {
 
                     <div className="tc-runtime-doc-head">
                       <h4>{t("原生 Codex instructions", "Native Codex instructions")}</h4>
-                      <Button
-                        variant="outline"
-                        theme="default"
-                        onClick={() =>
-                          void copyNativeCodexBundleFile(
-                            "modelInstructionsMd",
-                            t("原生 Codex instructions 已复制。", "Native Codex instructions copied."),
-                            t(
-                              "复制原生 Codex instructions 失败",
-                              "Failed to copy native Codex instructions"
+                      <div className="tc-actions-row">
+                        <Button
+                          variant="outline"
+                          theme="default"
+                          onClick={() =>
+                            void copyNativeCodexBundleFile(
+                              "modelInstructionsMd",
+                              t("原生 Codex instructions 已复制。", "Native Codex instructions copied."),
+                              t(
+                                "复制原生 Codex instructions 失败",
+                                "Failed to copy native Codex instructions"
+                              )
                             )
-                          )
-                        }
-                        disabled={loading || !nativeCodexExportBundle}
-                      >
-                        {t("复制 instructions", "Copy instructions")}
-                      </Button>
+                          }
+                          disabled={loading || !nativeCodexExportBundle}
+                        >
+                          {t("复制 instructions", "Copy instructions")}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          theme="default"
+                          onClick={() =>
+                            downloadNativeCodexBundleFile(
+                              "modelInstructionsMd",
+                              "export.instructions.md",
+                              t("原生 Codex instructions 已下载。", "Native Codex instructions downloaded."),
+                              t(
+                                "下载原生 Codex instructions 失败",
+                                "Failed to download native Codex instructions"
+                              )
+                            )
+                          }
+                          disabled={loading || !nativeCodexExportBundle}
+                        >
+                          {t("下载 instructions", "Download instructions")}
+                        </Button>
+                      </div>
                     </div>
                     <CodeBlock
                       value={
@@ -338,20 +442,37 @@ export function SettingsExportPanel(props: SettingsExportPanelProps) {
 
                     <div className="tc-runtime-doc-head">
                       <h4>{t("可选 AGENTS.md", "Optional AGENTS.md")}</h4>
-                      <Button
-                        variant="outline"
-                        theme="default"
-                        onClick={() =>
-                          void copyNativeCodexBundleFile(
-                            "agentsMd",
-                            t("原生 Codex AGENTS.md 已复制。", "Native Codex AGENTS.md copied."),
-                            t("复制原生 Codex AGENTS.md 失败", "Failed to copy native Codex AGENTS.md")
-                          )
-                        }
-                        disabled={loading || !nativeCodexExportBundle}
-                      >
-                        {t("复制 AGENTS.md", "Copy AGENTS.md")}
-                      </Button>
+                      <div className="tc-actions-row">
+                        <Button
+                          variant="outline"
+                          theme="default"
+                          onClick={() =>
+                            void copyNativeCodexBundleFile(
+                              "agentsMd",
+                              t("原生 Codex AGENTS.md 已复制。", "Native Codex AGENTS.md copied."),
+                              t("复制原生 Codex AGENTS.md 失败", "Failed to copy native Codex AGENTS.md")
+                            )
+                          }
+                          disabled={loading || !nativeCodexExportBundle}
+                        >
+                          {t("复制 AGENTS.md", "Copy AGENTS.md")}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          theme="default"
+                          onClick={() =>
+                            downloadNativeCodexBundleFile(
+                              "agentsMd",
+                              "AGENTS.md",
+                              t("原生 Codex AGENTS.md 已下载。", "Native Codex AGENTS.md downloaded."),
+                              t("下载原生 Codex AGENTS.md 失败", "Failed to download native Codex AGENTS.md")
+                            )
+                          }
+                          disabled={loading || !nativeCodexExportBundle}
+                        >
+                          {t("下载 AGENTS.md", "Download AGENTS.md")}
+                        </Button>
+                      </div>
                     </div>
                     <CodeBlock
                       value={nativeCodexExportBundle?.files.agentsMd.content || nativeCodexEmptyState}
@@ -365,14 +486,24 @@ export function SettingsExportPanel(props: SettingsExportPanelProps) {
 
                     <div className="tc-runtime-doc-head">
                       <h4>{t("Claude Code 配置预览（JSON）", "Claude Code Config Preview (JSON)")}</h4>
-                      <Button
-                        variant="outline"
-                        theme="default"
-                        onClick={() => void copyCcSwitchClaudeConfigJson()}
-                        disabled={loading || !keyForm.localKey.trim()}
-                      >
-                        {t("一键复制 Claude 配置（含密钥）", "Copy Claude Config (with key)")}
-                      </Button>
+                      <div className="tc-actions-row">
+                        <Button
+                          variant="outline"
+                          theme="default"
+                          onClick={() => void copyCcSwitchClaudeConfigJson()}
+                          disabled={loading || !keyForm.localKey.trim()}
+                        >
+                          {t("一键复制 Claude 配置（含密钥）", "Copy Claude Config (with key)")}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          theme="default"
+                          onClick={() => downloadCcSwitchClaudeConfigJson()}
+                          disabled={loading || !keyForm.localKey.trim()}
+                        >
+                          {t("下载 Claude 配置", "Download Claude Config")}
+                        </Button>
+                      </div>
                     </div>
                     <CodeBlock
                       value={
@@ -440,7 +571,12 @@ export function SettingsExportPanel(props: SettingsExportPanelProps) {
                       {t("复制 Claude 上下文/Thinking 补丁", "Copy Claude Context/Thinking Patch")}
                     </Button>
                   </div>
+                  <p className="tc-upstream-advice">
+                    {t(
+                      "说明：通过 CC Switch 导入链接导入时，会自动附带网关用量/配额查询脚本，可直接在 CC Switch 中查看每日 Token / 请求额度与今日使用量。",
+                      "Note: CC Switch import links now include a gateway usage/quota query script, so you can view daily token/request quotas and today's usage directly in CC Switch."
+                    )}
+                  </p>
                 </section>
   );
 }
-

@@ -12,6 +12,11 @@ import {
 import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import {
+  BulkJsonExportDialog,
+  BulkJsonImportDialog,
+  type BulkJsonImportPreview
+} from "@/components/console/bulk-json-dialogs";
+import {
   createCodexExportBundle,
   type CodexApplyPatchToolType,
   type CodexExportBundle
@@ -22,8 +27,13 @@ import {
   serializeOverflowModelSelection
 } from "@/lib/overflow-model";
 import {
+  MAX_COMPAT_PROMPT_RULES,
+  MAX_KEY_MODEL_MAPPINGS,
+  MAX_UPSTREAM_MODELS,
+  quickExportCompatPromptRules,
   quickExportKeyMappings,
   quickExportModels,
+  quickImportCompatPromptRules,
   quickImportKeyMappings,
   quickImportModels
 } from "@/lib/quick-import-export";
@@ -86,6 +96,7 @@ import {
   DOUBAO_THINKING_TYPES,
   EMPTY_AI_CALL_FILTER_OPTIONS,
   EMPTY_AI_CALL_STATS,
+  EMPTY_USAGE_FILTER_OPTIONS,
   GLM_CODEX_THINKING_THRESHOLDS,
   LOCALE_OPTIONS,
   MODULE_LABEL,
@@ -117,13 +128,16 @@ import type {
   UpstreamModelConfig,
   UpstreamWireApi,
   UsageBucketMode,
+  UsageFilterOptions,
   UsageMetricKey,
   UsageReport,
   UsageTimelineRow
 } from "@/components/console/types";
 import {
+  downloadTextAsFile as saveTextAsFile,
   generateLocalKey,
-  generateMappingId
+  generateMappingId,
+  resolveDownloadFileName
 } from "@/lib/console-utils";
 import {
   MarkdownLogBlock,
@@ -137,6 +151,7 @@ import {
   formatClaudeModelWithContext,
   formatCnDate,
   formatCompactNumber,
+  formatCompatPromptExemptionsInput,
   formatCompatPromptKeywordsInput,
   formatCompatPromptRulesJson,
   formatMinuteLabel,
@@ -152,6 +167,7 @@ import {
   normalizeGlmCodexThinkingThreshold,
   normalizeModelCode,
   normalizeSelectValue,
+  parseCompatPromptExemptionsInput,
   parseCompatPromptKeywordsInput,
   parseCompatPromptRulesJson,
   parsePromptLabModelListInput,
@@ -188,6 +204,10 @@ import {
   SettingsPromptPanel,
   SettingsUpstreamPanel
 } from "@/components/console/settings-console-editor-panels";
+import {
+  ActiveFilterSummary,
+  FilterSection
+} from "@/components/console/filters";
 
 export type { EditorModule } from "@/components/console/types";
 export { formatCompactNumber, formatNumber } from "@/components/console/settings-console-helpers";
@@ -195,6 +215,199 @@ export { formatCompactNumber, formatNumber } from "@/components/console/settings
 type SettingsConsoleProps = {
   module?: EditorModule;
 };
+
+type BulkJsonImportTarget = "compatPromptRules" | "upstreamModels" | "keyMappings";
+
+type BulkImportPreviewState<T> = BulkJsonImportPreview & {
+  items: T[];
+  note: string;
+};
+
+type FilterChipTone = "default" | "primary" | "success" | "warning";
+
+type ActiveFilterChip = {
+  key: string;
+  label: string;
+  value: string;
+  tone?: FilterChipTone;
+  onClear?: () => void;
+};
+
+type SavedFilterPreset<T> = {
+  id: string;
+  name: string;
+  value: T;
+  updatedAt: string;
+};
+
+type SelectorStatusFilter = "all" | "enabled" | "disabled";
+type BoolFilter = "all" | "yes" | "no";
+type ApiLogStatusFilter = "all" | "success" | "warning" | "error";
+type PromptRuleIssueFilter = "all" | "error" | "warn" | "attention" | "clean";
+
+type AiCallFilterPresetValue = {
+  limit: number;
+  keyId: number | null;
+  dateRange: string[];
+  keyword: string;
+  route: string;
+  requestWireApi: string;
+  upstreamWireApi: string;
+  model: string;
+  requestedModel: string;
+  clientModel: string;
+  stream: "" | "stream" | "non_stream";
+  callType: "" | "main" | "vision_fallback";
+};
+
+type UsageFilterPresetValue = {
+  minutes: number;
+  dateRange: string[];
+  metric: UsageMetricKey;
+  bucketMode: UsageBucketMode;
+  keyId: number | null;
+  model: string;
+  route: string;
+  requestWireApi: string;
+  upstreamWireApi: string;
+  stream: "" | "stream" | "non_stream";
+  timelineLimit: number;
+};
+
+function normalizeSearchText(value: string | null | undefined) {
+  return value?.trim().toLowerCase() ?? "";
+}
+
+function matchesTextSearch(source: Array<string | number | null | undefined>, keyword: string) {
+  const normalized = normalizeSearchText(keyword);
+  if (!normalized) {
+    return true;
+  }
+  return source
+    .filter((item): item is string | number => item !== null && item !== undefined)
+    .map((item) => String(item).toLowerCase())
+    .some((item) => item.includes(normalized));
+}
+
+function ensureOptionVisible(
+  options: Array<{ label: string; value: string }>,
+  option: { label: string; value: string } | null
+) {
+  if (!option || options.some((item) => item.value === option.value)) {
+    return options;
+  }
+  return [option, ...options];
+}
+
+function cloneKeyFormState(form: KeyFormState): KeyFormState {
+  return {
+    ...form,
+    modelMappings: form.modelMappings.map((item) => ({
+      ...item
+    }))
+  };
+}
+
+function serializeKeyFormState(form: KeyFormState) {
+  return JSON.stringify({
+    ...form,
+    upstreamChannelId:
+      typeof form.upstreamChannelId === "number" ? form.upstreamChannelId : null,
+    contextSwitchThreshold: Number(form.contextSwitchThreshold),
+    contextOverflowModel: form.contextOverflowModel ?? "",
+    dailyRequestLimit: form.dailyRequestLimit ?? "",
+    dailyTokenLimit: form.dailyTokenLimit ?? "",
+    modelMappings: form.modelMappings.map((item) => ({
+      ...item,
+      upstreamChannelId:
+        typeof item.upstreamChannelId === "number" ? item.upstreamChannelId : null,
+      thinkingType: item.thinkingType ?? null,
+      contextSwitchThreshold: Number(item.contextSwitchThreshold),
+      contextOverflowModel: item.contextOverflowModel ?? null
+    }))
+  });
+}
+
+function parseOptionalPositiveIntegerInput(value: string, label: string) {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const parsed = Number(trimmed);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${label}必须是大于 0 的整数，或留空表示不限。`);
+  }
+  return parsed;
+}
+
+function readFilterPresets<T>(storageKey: string) {
+  if (typeof window === "undefined") {
+    return [] as Array<SavedFilterPreset<T>>;
+  }
+  try {
+    const raw = window.localStorage.getItem(storageKey);
+    if (!raw) {
+      return [] as Array<SavedFilterPreset<T>>;
+    }
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed)
+      ? parsed.filter(
+          (item): item is SavedFilterPreset<T> =>
+            Boolean(item) &&
+            typeof item === "object" &&
+            typeof (item as SavedFilterPreset<T>).id === "string" &&
+            typeof (item as SavedFilterPreset<T>).name === "string"
+        )
+      : [];
+  } catch {
+    return [] as Array<SavedFilterPreset<T>>;
+  }
+}
+
+function writeFilterPresets<T>(storageKey: string, presets: Array<SavedFilterPreset<T>>) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.setItem(storageKey, JSON.stringify(presets));
+}
+
+function createFilterPresetId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `preset-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function upsertFilterPreset<T>(
+  presets: Array<SavedFilterPreset<T>>,
+  name: string,
+  value: T
+) {
+  const normalizedName = name.trim();
+  if (!normalizedName) {
+    return presets;
+  }
+  const now = new Date().toISOString();
+  const nextPreset: SavedFilterPreset<T> = {
+    id: createFilterPresetId(),
+    name: normalizedName,
+    value,
+    updatedAt: now
+  };
+  const existingIndex = presets.findIndex(
+    (item) => item.name.trim().toLowerCase() === normalizedName.toLowerCase()
+  );
+  if (existingIndex >= 0) {
+    const cloned = presets.slice();
+    cloned[existingIndex] = {
+      ...cloned[existingIndex],
+      value,
+      updatedAt: now
+    };
+    return cloned.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+  return [nextPreset, ...presets].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
 
 export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   const router = useRouter();
@@ -219,26 +432,186 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   };
   const routeModule = module;
 
+  function createIdleBulkImportPreview<T>(): BulkImportPreviewState<T> {
+    return {
+      state: "idle",
+      items: [],
+      note: "",
+      itemCount: 0,
+      enabledCount: null,
+      appendTotal: 0,
+      replaceTotal: 0,
+      warnCount: 0,
+      errorCount: 0,
+      message: "",
+      tone: "info"
+    };
+  }
+
+  function buildBulkImportPreview<T>({
+    rawValue,
+    currentCount,
+    parse,
+    getEnabledCount,
+    inspectItems,
+    limit,
+    readyMessage,
+    warningMessage,
+    errorMessage,
+    appendLimitMessage,
+    replaceLimitMessage
+  }: {
+    rawValue: string;
+    currentCount: number;
+    parse: (value: string) => { ok: true; items: T[]; note: string } | { ok: false; error: string };
+    getEnabledCount?: (item: T) => boolean;
+    inspectItems?: (items: T[]) => Array<{ level: "warn" | "error"; message: string }>;
+    limit: number;
+    readyMessage: (note: string) => string;
+    warningMessage: (warnCount: number) => string;
+    errorMessage: (errorCount: number) => string;
+    appendLimitMessage: () => string;
+    replaceLimitMessage: () => string;
+  }): BulkImportPreviewState<T> {
+    const trimmed = rawValue.trim();
+    if (!trimmed) {
+      return createIdleBulkImportPreview<T>();
+    }
+
+    const result = parse(trimmed);
+    if (!result.ok) {
+      return {
+        ...createIdleBulkImportPreview<T>(),
+        state: "error",
+        message: result.error,
+        tone: "err"
+      };
+    }
+
+    const items = result.items;
+    const issues = inspectItems ? inspectItems(items) : [];
+    const warnCount = issues.filter((item) => item.level === "warn").length;
+    const errorCount = issues.filter((item) => item.level === "error").length;
+    const enabledCount = getEnabledCount ? items.filter((item) => getEnabledCount(item)).length : null;
+    const appendTotal = currentCount + items.length;
+    const replaceTotal = items.length;
+
+    if (appendTotal > limit) {
+      return {
+        state: "ready",
+        items,
+        note: result.note,
+        itemCount: items.length,
+        enabledCount,
+        appendTotal,
+        replaceTotal,
+        warnCount,
+        errorCount,
+        message: appendLimitMessage(),
+        tone: "err"
+      };
+    }
+
+    if (replaceTotal > limit) {
+      return {
+        state: "ready",
+        items,
+        note: result.note,
+        itemCount: items.length,
+        enabledCount,
+        appendTotal,
+        replaceTotal,
+        warnCount,
+        errorCount,
+        message: replaceLimitMessage(),
+        tone: "err"
+      };
+    }
+
+    if (errorCount > 0) {
+      return {
+        state: "ready",
+        items,
+        note: result.note,
+        itemCount: items.length,
+        enabledCount,
+        appendTotal,
+        replaceTotal,
+        warnCount,
+        errorCount,
+        message: errorMessage(errorCount),
+        tone: "err"
+      };
+    }
+
+    if (warnCount > 0) {
+      return {
+        state: "ready",
+        items,
+        note: result.note,
+        itemCount: items.length,
+        enabledCount,
+        appendTotal,
+        replaceTotal,
+        warnCount,
+        errorCount,
+        message: warningMessage(warnCount),
+        tone: "warn"
+      };
+    }
+
+    return {
+      state: "ready",
+      items,
+      note: result.note,
+      itemCount: items.length,
+      enabledCount,
+      appendTotal,
+      replaceTotal,
+      warnCount,
+      errorCount,
+      message: readyMessage(result.note),
+      tone: "ok"
+    };
+  }
+
   const [keys, setKeys] = useState<GatewayKey[]>([]);
   const [channels, setChannels] = useState<UpstreamChannel[]>([]);
   const [wireApi, setWireApi] = useState("responses");
 
   const [selectedKeyId, setSelectedKeyId] = useState<number | null>(null);
   const [selectedChannelId, setSelectedChannelId] = useState<number | null>(null);
+  const [keySelectorSearch, setKeySelectorSearch] = useState("");
+  const [keySelectorStatusFilter, setKeySelectorStatusFilter] =
+    useState<SelectorStatusFilter>("all");
+  const [channelSelectorSearch, setChannelSelectorSearch] = useState("");
+  const [channelSelectorStatusFilter, setChannelSelectorStatusFilter] =
+    useState<SelectorStatusFilter>("all");
+  const [channelSelectorProviderFilter, setChannelSelectorProviderFilter] = useState("all");
 
   const [keyForm, setKeyForm] = useState<KeyFormState>(() => createEmptyKeyFormState());
+  const [savedKeyForm, setSavedKeyForm] = useState<KeyFormState>(() => createEmptyKeyFormState());
   const [channelForm, setChannelForm] = useState<ChannelFormState>(() => createEmptyChannelFormState());
+  const [keyMappingSearch, setKeyMappingSearch] = useState("");
+  const [keyMappingStatusFilter, setKeyMappingStatusFilter] = useState<SelectorStatusFilter>("all");
+  const [keyMappingBindingFilter, setKeyMappingBindingFilter] = useState<"all" | "inherit" | "bound">("all");
+  const [keyMappingOverflowFilter, setKeyMappingOverflowFilter] = useState<BoolFilter>("all");
+  const [channelModelSearch, setChannelModelSearch] = useState("");
+  const [channelModelStatusFilter, setChannelModelStatusFilter] =
+    useState<SelectorStatusFilter>("all");
+  const [channelModelWireApiFilter, setChannelModelWireApiFilter] = useState("all");
+  const [channelModelVisionFilter, setChannelModelVisionFilter] = useState<BoolFilter>("all");
 
   const [quickImportJson, setQuickImportJson] = useState("");
+  const [quickImportSource, setQuickImportSource] = useState("");
   const [quickImportDialogVisible, setQuickImportDialogVisible] = useState(false);
   const [quickExportDialogVisible, setQuickExportDialogVisible] = useState(false);
-  const [quickExportJson, setQuickExportJson] = useState("");
   const [quickImportKeyMappingJson, setQuickImportKeyMappingJson] = useState("");
+  const [quickImportKeyMappingSource, setQuickImportKeyMappingSource] = useState("");
   const [quickImportKeyMappingDialogVisible, setQuickImportKeyMappingDialogVisible] =
     useState(false);
   const [quickExportKeyMappingDialogVisible, setQuickExportKeyMappingDialogVisible] =
     useState(false);
-  const [quickExportKeyMappingJson, setQuickExportKeyMappingJson] = useState("");
 
   const [runtimeModel, setRuntimeModel] = useState("");
   const [syncDefaultModel, setSyncDefaultModel] = useState(false);
@@ -250,6 +623,11 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   const [loadingLogs, setLoadingLogs] = useState(false);
   const [autoRefreshLogs, setAutoRefreshLogs] = useState(true);
   const [logLimit, setLogLimit] = useState(100);
+  const [apiLogKeywordFilter, setApiLogKeywordFilter] = useState("");
+  const [apiLogRouteFilter, setApiLogRouteFilter] = useState("");
+  const [apiLogMethodFilter, setApiLogMethodFilter] = useState("all");
+  const [apiLogStatusFilter, setApiLogStatusFilter] = useState<ApiLogStatusFilter>("all");
+  const [apiLogErrorOnly, setApiLogErrorOnly] = useState(false);
   const [aiCallLogs, setAiCallLogs] = useState<AiCallLogEntry[]>([]);
   const [loadingAiCallLogs, setLoadingAiCallLogs] = useState(false);
   const [autoRefreshAiCallLogs, setAutoRefreshAiCallLogs] = useState(false);
@@ -271,8 +649,14 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     EMPTY_AI_CALL_FILTER_OPTIONS
   );
   const [aiCallStats, setAiCallStats] = useState<AiCallLogStats>(EMPTY_AI_CALL_STATS);
+  const [aiCallPresetName, setAiCallPresetName] = useState("");
+  const [aiCallSelectedPresetId, setAiCallSelectedPresetId] = useState("all");
+  const [aiCallSavedPresets, setAiCallSavedPresets] = useState<
+    Array<SavedFilterPreset<AiCallFilterPresetValue>>
+  >(() => readFilterPresets<AiCallFilterPresetValue>("codex-gateway-hub:ai-call-presets"));
   const [previewImage, setPreviewImage] = useState<{ url: string; title: string } | null>(null);
   const deferredAiCallLogs = useDeferredValue(aiCallLogs);
+  const deferredApiLogs = useDeferredValue(apiLogs);
   const [usageReport, setUsageReport] = useState<UsageReport | null>(null);
   const [loadingUsage, setLoadingUsage] = useState(false);
   const [autoRefreshUsage, setAutoRefreshUsage] = useState(true);
@@ -282,6 +666,18 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   const [usageBucketMode, setUsageBucketMode] = useState<UsageBucketMode>("auto");
   const [usageTimelineLimit, setUsageTimelineLimit] = useState(600);
   const [usageKeyFilter, setUsageKeyFilter] = useState<number | null>(null);
+  const [usageModelFilter, setUsageModelFilter] = useState("");
+  const [usageRouteFilter, setUsageRouteFilter] = useState("");
+  const [usageRequestWireFilter, setUsageRequestWireFilter] = useState("");
+  const [usageUpstreamWireFilter, setUsageUpstreamWireFilter] = useState("");
+  const [usageStreamFilter, setUsageStreamFilter] = useState<"" | "stream" | "non_stream">("");
+  const [usageFilterOptions, setUsageFilterOptions] =
+    useState<UsageFilterOptions>(EMPTY_USAGE_FILTER_OPTIONS);
+  const [usagePresetName, setUsagePresetName] = useState("");
+  const [usageSelectedPresetId, setUsageSelectedPresetId] = useState("all");
+  const [usageSavedPresets, setUsageSavedPresets] = useState<
+    Array<SavedFilterPreset<UsageFilterPresetValue>>
+  >(() => readFilterPresets<UsageFilterPresetValue>("codex-gateway-hub:usage-presets"));
 
   const [loading, setLoading] = useState(false);
   const [savingKey, setSavingKey] = useState(false);
@@ -290,15 +686,27 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   const [switchingModel, setSwitchingModel] = useState(false);
   const [testingUpstream, setTestingUpstream] = useState(false);
   const [compatPromptKeywordsInput, setCompatPromptKeywordsInput] = useState("");
+  const [compatPromptExemptionsInput, setCompatPromptExemptionsInput] = useState("");
   const [compatPromptHintInput, setCompatPromptHintInput] = useState("");
   const [compatPromptRulesDraft, setCompatPromptRulesDraft] = useState<CompatPromptRule[]>([]);
   const [compatPromptRuleSearch, setCompatPromptRuleSearch] = useState("");
+  const [compatPromptRuleStatusFilter, setCompatPromptRuleStatusFilter] =
+    useState<SelectorStatusFilter>("all");
+  const [compatPromptRuleProviderFilter, setCompatPromptRuleProviderFilter] = useState("all");
+  const [compatPromptRuleIssueFilter, setCompatPromptRuleIssueFilter] =
+    useState<PromptRuleIssueFilter>("all");
   const [compatPromptRulesJsonInput, setCompatPromptRulesJsonInput] = useState("[]");
   const [showCompatPromptRulesJsonEditor, setShowCompatPromptRulesJsonEditor] = useState(false);
-  const [compatPromptRulesImportMode, setCompatPromptRulesImportMode] = useState<
-    "append" | "replace"
-  >("append");
-  const compatPromptRulesFileInputRef = useRef<HTMLInputElement | null>(null);
+  const [compatPromptRulesImportDialogVisible, setCompatPromptRulesImportDialogVisible] =
+    useState(false);
+  const [compatPromptRulesExportDialogVisible, setCompatPromptRulesExportDialogVisible] =
+    useState(false);
+  const [compatPromptRulesQuickImportJson, setCompatPromptRulesQuickImportJson] = useState("");
+  const [compatPromptRulesQuickImportSource, setCompatPromptRulesQuickImportSource] =
+    useState("");
+  const bulkJsonFileInputRef = useRef<HTMLInputElement | null>(null);
+  const [bulkJsonFileImportTarget, setBulkJsonFileImportTarget] =
+    useState<BulkJsonImportTarget | null>(null);
   const [compatPromptDefaults, setCompatPromptDefaults] = useState<CompatPromptConfig | null>(
     null
   );
@@ -342,6 +750,10 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   const selectedChannelForKey = useMemo(
     () => channels.find((item) => item.id === keyForm.upstreamChannelId) ?? null,
     [channels, keyForm.upstreamChannelId]
+  );
+  const isKeyDirty = useMemo(
+    () => serializeKeyFormState(keyForm) !== serializeKeyFormState(savedKeyForm),
+    [keyForm, savedKeyForm]
   );
   const resolveMappingChannel = (mapping: KeyModelMapping) => {
     if (typeof mapping.upstreamChannelId === "number") {
@@ -581,27 +993,89 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     () => channels.filter((item) => item.enabled).length,
     [channels]
   );
+  const filteredKeys = useMemo(
+    () =>
+      keys.filter((item) => {
+        if (keySelectorStatusFilter === "enabled" && !item.enabled) {
+          return false;
+        }
+        if (keySelectorStatusFilter === "disabled" && item.enabled) {
+          return false;
+        }
+        return matchesTextSearch(
+          [
+            item.name,
+            item.localKey,
+            item.upstreamChannelName,
+            item.provider,
+            item.defaultModel,
+            item.activeModelOverride
+          ],
+          keySelectorSearch
+        );
+      }),
+    [keySelectorSearch, keySelectorStatusFilter, keys]
+  );
+  const filteredChannels = useMemo(
+    () =>
+      channels.filter((item) => {
+        if (channelSelectorStatusFilter === "enabled" && !item.enabled) {
+          return false;
+        }
+        if (channelSelectorStatusFilter === "disabled" && item.enabled) {
+          return false;
+        }
+        if (channelSelectorProviderFilter !== "all" && item.provider !== channelSelectorProviderFilter) {
+          return false;
+        }
+        return matchesTextSearch(
+          [item.name, item.provider, item.upstreamBaseUrl, item.defaultModel],
+          channelSelectorSearch
+        );
+      }),
+    [channelSelectorProviderFilter, channelSelectorSearch, channelSelectorStatusFilter, channels]
+  );
 
   const keySelectOptions = useMemo(
-    () => [
-      { label: `+ ${t("新建本地 Key", "New Local Key")}`, value: "__new__" },
-      ...keys.map((item) => ({
+    () => {
+      const filteredOptions = filteredKeys.map((item) => ({
         label: `${item.name} · ${maskLocalKey(item.localKey)}`,
         value: String(item.id)
-      }))
-    ],
-    [keys, t]
+      }));
+      const selectedOption =
+        selectedKey && !isNewKey
+          ? {
+              label: `${selectedKey.name} · ${maskLocalKey(selectedKey.localKey)}`,
+              value: String(selectedKey.id)
+            }
+          : null;
+      return [
+        { label: `+ ${t("新建本地 Key", "New Local Key")}`, value: "__new__" },
+        ...ensureOptionVisible(filteredOptions, selectedOption)
+      ];
+    },
+    [filteredKeys, isNewKey, selectedKey, t]
   );
 
   const channelSelectOptions = useMemo(
-    () => [
-      { label: `+ ${t("新建上游渠道", "New Upstream")}`, value: "__new__" },
-      ...channels.map((item) => ({
+    () => {
+      const filteredOptions = filteredChannels.map((item) => ({
         label: `${item.name} · ${PROVIDER_META[item.provider].label} · ${t("模型", "models")}${item.upstreamModels.length}`,
         value: String(item.id)
-      }))
-    ],
-    [channels, t]
+      }));
+      const selectedOption =
+        selectedChannel && !isNewChannel
+          ? {
+              label: `${selectedChannel.name} · ${PROVIDER_META[selectedChannel.provider].label} · ${t("模型", "models")}${selectedChannel.upstreamModels.length}`,
+              value: String(selectedChannel.id)
+            }
+          : null;
+      return [
+        { label: `+ ${t("新建上游渠道", "New Upstream")}`, value: "__new__" },
+        ...ensureOptionVisible(filteredOptions, selectedOption)
+      ];
+    },
+    [filteredChannels, isNewChannel, selectedChannel, t]
   );
 
   const keyBindChannelOptions = useMemo(
@@ -635,6 +1109,66 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       }))
     ],
     [keys, t]
+  );
+
+  const apiLogRouteOptions = useMemo(() => {
+    const values = Array.from(
+      new Set(
+        apiLogs
+          .map((item) => item.route?.trim())
+          .filter((item): item is string => Boolean(item))
+      )
+    ).sort((a, b) => a.localeCompare(b));
+    return [
+      { label: t("全部路由", "All Routes"), value: "__all__" },
+      ...values.map((item) => ({ label: item, value: item }))
+    ];
+  }, [apiLogs, t]);
+
+  const apiLogMethodOptions = useMemo(() => {
+    const values = Array.from(
+      new Set(
+        apiLogs
+          .map((item) => item.method?.trim().toUpperCase())
+          .filter((item): item is string => Boolean(item))
+      )
+    ).sort((a, b) => a.localeCompare(b));
+    return [
+      { label: t("全部方法", "All Methods"), value: "__all__" },
+      ...values.map((item) => ({ label: item, value: item }))
+    ];
+  }, [apiLogs, t]);
+
+  const filteredApiLogs = useMemo(
+    () =>
+      deferredApiLogs.filter((item) => {
+        if (apiLogRouteFilter && apiLogRouteFilter !== "__all__" && item.route !== apiLogRouteFilter) {
+          return false;
+        }
+        if (apiLogMethodFilter !== "all" && item.method.toUpperCase() !== apiLogMethodFilter) {
+          return false;
+        }
+        const statusBucket =
+          item.status === null ? "error" : item.status >= 500 ? "error" : item.status >= 400 ? "warning" : "success";
+        if (apiLogStatusFilter !== "all" && statusBucket !== apiLogStatusFilter) {
+          return false;
+        }
+        if (apiLogErrorOnly && !item.error) {
+          return false;
+        }
+        return matchesTextSearch(
+          [item.id, item.route, item.method, item.path, item.requestBody, item.responseBody, item.error],
+          apiLogKeywordFilter
+        );
+      }),
+    [
+      apiLogErrorOnly,
+      apiLogKeywordFilter,
+      apiLogMethodFilter,
+      apiLogRouteFilter,
+      apiLogStatusFilter,
+      deferredApiLogs
+    ]
   );
 
   const aiCallKeyOptions = useMemo(
@@ -734,6 +1268,46 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     ],
     [t]
   );
+  const usageModelOptions = useMemo(
+    () => [
+      { label: t("全部真实模型", "All Upstream Models"), value: "__all__" },
+      ...usageFilterOptions.upstreamModels.map((item: string) => ({
+        label: item,
+        value: item
+      }))
+    ],
+    [t, usageFilterOptions.upstreamModels]
+  );
+  const usageRouteOptions = useMemo(
+    () => [
+      { label: t("全部路由", "All Routes"), value: "__all__" },
+      ...usageFilterOptions.routes.map((item: string) => ({
+        label: item,
+        value: item
+      }))
+    ],
+    [t, usageFilterOptions.routes]
+  );
+  const usageRequestWireOptions = useMemo(
+    () => [
+      { label: t("全部请求协议", "All Request APIs"), value: "__all__" },
+      ...usageFilterOptions.requestWireApis.map((item: string) => ({
+        label: item,
+        value: item
+      }))
+    ],
+    [t, usageFilterOptions.requestWireApis]
+  );
+  const usageUpstreamWireOptions = useMemo(
+    () => [
+      { label: t("全部上游协议", "All Upstream APIs"), value: "__all__" },
+      ...usageFilterOptions.upstreamWireApis.map((item: string) => ({
+        label: item,
+        value: item
+      }))
+    ],
+    [t, usageFilterOptions.upstreamWireApis]
+  );
   const expandedAiCallLogIdSet = useMemo(
     () => new Set(expandedAiCallLogIds),
     [expandedAiCallLogIds]
@@ -756,6 +1330,398 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   const usageRangeTagLabel = hasCustomUsageDateRange
     ? `${t("范围", "Range")} ${usageDateRange[0]} ~ ${usageDateRange[1]}`
     : `${t("窗口", "Window")} ${usageMinutes} ${t("分钟", "minutes")}`;
+  const keyMappingVisibleItems = keyForm.modelMappings.filter((item) => {
+    if (keyMappingStatusFilter === "enabled" && !item.enabled) {
+      return false;
+    }
+    if (keyMappingStatusFilter === "disabled" && item.enabled) {
+      return false;
+    }
+    if (keyMappingBindingFilter === "inherit" && item.upstreamChannelId !== null) {
+      return false;
+    }
+    if (keyMappingBindingFilter === "bound" && item.upstreamChannelId === null) {
+      return false;
+    }
+    if (keyMappingOverflowFilter === "yes" && !item.dynamicModelSwitch) {
+      return false;
+    }
+    if (keyMappingOverflowFilter === "no" && item.dynamicModelSwitch) {
+      return false;
+    }
+    return matchesTextSearch(
+      [
+        item.clientModel,
+        item.targetModel,
+        resolveMappingChannel(item)?.name,
+        item.contextOverflowModel,
+        item.thinkingType
+      ],
+      keyMappingSearch
+    );
+  });
+  const channelModelVisibleItems = channelForm.upstreamModels.filter((item) => {
+    if (channelModelStatusFilter === "enabled" && !item.enabled) {
+      return false;
+    }
+    if (channelModelStatusFilter === "disabled" && item.enabled) {
+      return false;
+    }
+    if (channelModelWireApiFilter !== "all" && item.upstreamWireApi !== channelModelWireApiFilter) {
+      return false;
+    }
+    if (channelModelVisionFilter === "yes" && !item.supportsVision) {
+      return false;
+    }
+    if (channelModelVisionFilter === "no" && item.supportsVision) {
+      return false;
+    }
+    return matchesTextSearch(
+      [item.name, item.aliasModel, item.model, item.contextWindow, item.visionModel],
+      channelModelSearch
+    );
+  });
+
+  const keySelectorFilterChips: ActiveFilterChip[] = [];
+  if (keySelectorSearch.trim()) {
+    keySelectorFilterChips.push({
+      key: "key-search",
+      label: t("检索", "Search"),
+      value: keySelectorSearch.trim(),
+      tone: "primary",
+      onClear: () => setKeySelectorSearch("")
+    });
+  }
+  if (keySelectorStatusFilter !== "all") {
+    keySelectorFilterChips.push({
+      key: "key-status",
+      label: t("状态", "Status"),
+      value:
+        keySelectorStatusFilter === "enabled"
+          ? t("启用", "Enabled")
+          : t("停用", "Disabled"),
+      onClear: () => setKeySelectorStatusFilter("all")
+    });
+  }
+
+  const channelSelectorFilterChips: ActiveFilterChip[] = [];
+  if (channelSelectorSearch.trim()) {
+    channelSelectorFilterChips.push({
+      key: "channel-search",
+      label: t("检索", "Search"),
+      value: channelSelectorSearch.trim(),
+      tone: "primary",
+      onClear: () => setChannelSelectorSearch("")
+    });
+  }
+  if (channelSelectorStatusFilter !== "all") {
+    channelSelectorFilterChips.push({
+      key: "channel-status",
+      label: t("状态", "Status"),
+      value:
+        channelSelectorStatusFilter === "enabled"
+          ? t("启用", "Enabled")
+          : t("停用", "Disabled"),
+      onClear: () => setChannelSelectorStatusFilter("all")
+    });
+  }
+  if (channelSelectorProviderFilter !== "all") {
+    channelSelectorFilterChips.push({
+      key: "channel-provider",
+      label: t("供应商", "Provider"),
+      value: PROVIDER_META[channelSelectorProviderFilter as ProviderName]?.label ?? channelSelectorProviderFilter,
+      onClear: () => setChannelSelectorProviderFilter("all")
+    });
+  }
+
+  const apiLogActiveFilters: ActiveFilterChip[] = [];
+  if (apiLogKeywordFilter.trim()) {
+    apiLogActiveFilters.push({
+      key: "api-keyword",
+      label: t("关键词", "Keyword"),
+      value: apiLogKeywordFilter.trim(),
+      tone: "primary",
+      onClear: () => setApiLogKeywordFilter("")
+    });
+  }
+  if (apiLogRouteFilter && apiLogRouteFilter !== "__all__") {
+    apiLogActiveFilters.push({
+      key: "api-route",
+      label: t("路由", "Route"),
+      value: apiLogRouteFilter,
+      onClear: () => setApiLogRouteFilter("")
+    });
+  }
+  if (apiLogMethodFilter !== "all") {
+    apiLogActiveFilters.push({
+      key: "api-method",
+      label: t("方法", "Method"),
+      value: apiLogMethodFilter,
+      onClear: () => setApiLogMethodFilter("all")
+    });
+  }
+  if (apiLogStatusFilter !== "all") {
+    apiLogActiveFilters.push({
+      key: "api-status",
+      label: t("状态", "Status"),
+      value: apiLogStatusFilter,
+      tone: apiLogStatusFilter === "error" ? "warning" : "default",
+      onClear: () => setApiLogStatusFilter("all")
+    });
+  }
+  if (apiLogErrorOnly) {
+    apiLogActiveFilters.push({
+      key: "api-error-only",
+      label: t("仅错误", "Errors Only"),
+      value: t("已开启", "On"),
+      tone: "warning",
+      onClear: () => setApiLogErrorOnly(false)
+    });
+  }
+
+  const aiCallActiveFilters: ActiveFilterChip[] = [];
+  if (aiCallKeyFilter) {
+    aiCallActiveFilters.push({
+      key: "calls-key",
+      label: t("Key", "Key"),
+      value: keys.find((item) => item.id === aiCallKeyFilter)?.name ?? `#${aiCallKeyFilter}`,
+      onClear: () => setAiCallKeyFilter(null)
+    });
+  }
+  if (hasCustomAiCallDateRange) {
+    aiCallActiveFilters.push({
+      key: "calls-range",
+      label: t("时间", "Time"),
+      value: `${aiCallDateRange[0]} ~ ${aiCallDateRange[1]}`,
+      tone: "primary",
+      onClear: () => setAiCallDateRange([])
+    });
+  }
+  if (aiCallKeywordFilter.trim()) {
+    aiCallActiveFilters.push({
+      key: "calls-keyword",
+      label: t("关键词", "Keyword"),
+      value: aiCallKeywordFilter.trim(),
+      tone: "primary",
+      onClear: () => setAiCallKeywordFilter("")
+    });
+  }
+  if (aiCallRouteFilter.trim()) {
+    aiCallActiveFilters.push({
+      key: "calls-route",
+      label: t("路由", "Route"),
+      value: aiCallRouteFilter,
+      onClear: () => setAiCallRouteFilter("")
+    });
+  }
+  if (aiCallRequestWireFilter.trim()) {
+    aiCallActiveFilters.push({
+      key: "calls-request-wire",
+      label: t("请求协议", "Request API"),
+      value: aiCallRequestWireFilter,
+      onClear: () => setAiCallRequestWireFilter("")
+    });
+  }
+  if (aiCallUpstreamWireFilter.trim()) {
+    aiCallActiveFilters.push({
+      key: "calls-upstream-wire",
+      label: t("上游协议", "Upstream API"),
+      value: aiCallUpstreamWireFilter,
+      onClear: () => setAiCallUpstreamWireFilter("")
+    });
+  }
+  if (aiCallModelFilter.trim()) {
+    aiCallActiveFilters.push({
+      key: "calls-model",
+      label: t("真实模型", "Upstream Model"),
+      value: aiCallModelFilter,
+      onClear: () => setAiCallModelFilter("")
+    });
+  }
+  if (aiCallRequestedModelFilter.trim()) {
+    aiCallActiveFilters.push({
+      key: "calls-requested-model",
+      label: t("请求模型", "Requested Model"),
+      value: aiCallRequestedModelFilter,
+      onClear: () => setAiCallRequestedModelFilter("")
+    });
+  }
+  if (aiCallClientModelFilter.trim()) {
+    aiCallActiveFilters.push({
+      key: "calls-client-model",
+      label: t("客户端模型", "Client Model"),
+      value: aiCallClientModelFilter,
+      onClear: () => setAiCallClientModelFilter("")
+    });
+  }
+  if (aiCallStreamFilter) {
+    aiCallActiveFilters.push({
+      key: "calls-stream",
+      label: t("流式", "Stream"),
+      value: aiCallStreamFilter === "stream" ? "stream" : "non-stream",
+      onClear: () => setAiCallStreamFilter("")
+    });
+  }
+  if (aiCallTypeFilter) {
+    aiCallActiveFilters.push({
+      key: "calls-type",
+      label: t("调用类型", "Call Type"),
+      value: aiCallTypeFilter === "main" ? t("主调用", "Main") : t("辅助视觉", "Vision Fallback"),
+      tone: aiCallTypeFilter === "vision_fallback" ? "warning" : "default",
+      onClear: () => setAiCallTypeFilter("")
+    });
+  }
+
+  const usageActiveFilters: ActiveFilterChip[] = [];
+  if (hasCustomUsageDateRange) {
+    usageActiveFilters.push({
+      key: "usage-range",
+      label: t("时间", "Time"),
+      value: `${usageDateRange[0]} ~ ${usageDateRange[1]}`,
+      tone: "primary",
+      onClear: () => setUsageDateRange([])
+    });
+  } else if (usageMinutes !== 180) {
+    usageActiveFilters.push({
+      key: "usage-window",
+      label: t("窗口", "Window"),
+      value: `${usageMinutes} ${t("分钟", "min")}`,
+      onClear: () => setUsageMinutes(180)
+    });
+  }
+  if (usageKeyFilter) {
+    usageActiveFilters.push({
+      key: "usage-key",
+      label: t("Key", "Key"),
+      value: keys.find((item) => item.id === usageKeyFilter)?.name ?? `#${usageKeyFilter}`,
+      onClear: () => setUsageKeyFilter(null)
+    });
+  }
+  if (usageModelFilter.trim()) {
+    usageActiveFilters.push({
+      key: "usage-model",
+      label: t("真实模型", "Upstream Model"),
+      value: usageModelFilter,
+      onClear: () => setUsageModelFilter("")
+    });
+  }
+  if (usageRouteFilter.trim()) {
+    usageActiveFilters.push({
+      key: "usage-route",
+      label: t("路由", "Route"),
+      value: usageRouteFilter,
+      onClear: () => setUsageRouteFilter("")
+    });
+  }
+  if (usageRequestWireFilter.trim()) {
+    usageActiveFilters.push({
+      key: "usage-request-wire",
+      label: t("请求协议", "Request API"),
+      value: usageRequestWireFilter,
+      onClear: () => setUsageRequestWireFilter("")
+    });
+  }
+  if (usageUpstreamWireFilter.trim()) {
+    usageActiveFilters.push({
+      key: "usage-upstream-wire",
+      label: t("上游协议", "Upstream API"),
+      value: usageUpstreamWireFilter,
+      onClear: () => setUsageUpstreamWireFilter("")
+    });
+  }
+  if (usageStreamFilter) {
+    usageActiveFilters.push({
+      key: "usage-stream",
+      label: t("流式", "Stream"),
+      value: usageStreamFilter === "stream" ? "stream" : "non-stream",
+      onClear: () => setUsageStreamFilter("")
+    });
+  }
+  if (usageBucketMode !== "auto") {
+    usageActiveFilters.push({
+      key: "usage-bucket",
+      label: t("时间桶", "Bucket"),
+      value: `${usageBucketMode} ${t("分钟", "min")}`,
+      onClear: () => setUsageBucketMode("auto")
+    });
+  }
+
+  const keyMappingActiveFilters: ActiveFilterChip[] = [];
+  if (keyMappingSearch.trim()) {
+    keyMappingActiveFilters.push({
+      key: "mapping-search",
+      label: t("检索", "Search"),
+      value: keyMappingSearch.trim(),
+      tone: "primary",
+      onClear: () => setKeyMappingSearch("")
+    });
+  }
+  if (keyMappingStatusFilter !== "all") {
+    keyMappingActiveFilters.push({
+      key: "mapping-status",
+      label: t("状态", "Status"),
+      value: keyMappingStatusFilter === "enabled" ? t("启用", "Enabled") : t("停用", "Disabled"),
+      onClear: () => setKeyMappingStatusFilter("all")
+    });
+  }
+  if (keyMappingBindingFilter !== "all") {
+    keyMappingActiveFilters.push({
+      key: "mapping-binding",
+      label: t("绑定方式", "Binding"),
+      value:
+        keyMappingBindingFilter === "inherit"
+          ? t("继承 Key 渠道", "Inherit Key Channel")
+          : t("独立绑定渠道", "Bound Channel"),
+      onClear: () => setKeyMappingBindingFilter("all")
+    });
+  }
+  if (keyMappingOverflowFilter !== "all") {
+    keyMappingActiveFilters.push({
+      key: "mapping-overflow",
+      label: t("溢出切模", "Overflow"),
+      value: keyMappingOverflowFilter === "yes" ? t("已开启", "On") : t("未开启", "Off"),
+      onClear: () => setKeyMappingOverflowFilter("all")
+    });
+  }
+
+  const channelModelActiveFilters: ActiveFilterChip[] = [];
+  if (channelModelSearch.trim()) {
+    channelModelActiveFilters.push({
+      key: "channel-model-search",
+      label: t("检索", "Search"),
+      value: channelModelSearch.trim(),
+      tone: "primary",
+      onClear: () => setChannelModelSearch("")
+    });
+  }
+  if (channelModelStatusFilter !== "all") {
+    channelModelActiveFilters.push({
+      key: "channel-model-status",
+      label: t("状态", "Status"),
+      value:
+        channelModelStatusFilter === "enabled" ? t("启用", "Enabled") : t("停用", "Disabled"),
+      onClear: () => setChannelModelStatusFilter("all")
+    });
+  }
+  if (channelModelWireApiFilter !== "all") {
+    channelModelActiveFilters.push({
+      key: "channel-model-wire",
+      label: t("协议", "Wire API"),
+      value: channelModelWireApiFilter,
+      onClear: () => setChannelModelWireApiFilter("all")
+    });
+  }
+  if (channelModelVisionFilter !== "all") {
+    channelModelActiveFilters.push({
+      key: "channel-model-vision",
+      label: t("视觉", "Vision"),
+      value:
+        channelModelVisionFilter === "yes"
+          ? t("原生支持视觉", "Vision Enabled")
+          : t("需视觉兜底", "Needs Fallback"),
+      onClear: () => setChannelModelVisionFilter("all")
+    });
+  }
 
   const usageTimelinePoints = useMemo(() => {
     if (!usageReport || usageReport.timeline.length === 0) {
@@ -1159,7 +2125,16 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     setAiCallDateRange(buildRecentDateRange(minutes));
   }
 
+  function resetApiLogFilters() {
+    setApiLogKeywordFilter("");
+    setApiLogRouteFilter("");
+    setApiLogMethodFilter("all");
+    setApiLogStatusFilter("all");
+    setApiLogErrorOnly(false);
+  }
+
   function resetAiCallFilters() {
+    setAiCallSelectedPresetId("all");
     setAiCallKeyFilter(null);
     setAiCallDateRange([]);
     setAiCallKeywordFilter("");
@@ -1171,6 +2146,194 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     setAiCallClientModelFilter("");
     setAiCallStreamFilter("");
     setAiCallTypeFilter("");
+  }
+
+  function buildAiCallFilterPresetValue(): AiCallFilterPresetValue {
+    return {
+      limit: aiCallLogLimit,
+      keyId: aiCallKeyFilter,
+      dateRange: aiCallDateRange.slice(0, 2),
+      keyword: aiCallKeywordFilter,
+      route: aiCallRouteFilter,
+      requestWireApi: aiCallRequestWireFilter,
+      upstreamWireApi: aiCallUpstreamWireFilter,
+      model: aiCallModelFilter,
+      requestedModel: aiCallRequestedModelFilter,
+      clientModel: aiCallClientModelFilter,
+      stream: aiCallStreamFilter,
+      callType: aiCallTypeFilter
+    };
+  }
+
+  function applyAiCallPresetValue(value: AiCallFilterPresetValue) {
+    setAiCallLogLimit(value.limit);
+    setAiCallKeyFilter(value.keyId);
+    setAiCallDateRange(value.dateRange.slice(0, 2));
+    setAiCallKeywordFilter(value.keyword);
+    setAiCallRouteFilter(value.route);
+    setAiCallRequestWireFilter(value.requestWireApi);
+    setAiCallUpstreamWireFilter(value.upstreamWireApi);
+    setAiCallModelFilter(value.model);
+    setAiCallRequestedModelFilter(value.requestedModel);
+    setAiCallClientModelFilter(value.clientModel);
+    setAiCallStreamFilter(value.stream);
+    setAiCallTypeFilter(value.callType);
+  }
+
+  function saveAiCallPreset() {
+    const nextName =
+      aiCallPresetName.trim() ||
+      `${t("调用视图", "Call View")} ${new Date().toLocaleTimeString(locale === "en-US" ? "en-US" : "zh-CN", {
+        hour: "2-digit",
+        minute: "2-digit"
+      })}`;
+    const nextPresets = upsertFilterPreset(
+      aiCallSavedPresets,
+      nextName,
+      buildAiCallFilterPresetValue()
+    );
+    setAiCallSavedPresets(nextPresets);
+    const selectedPreset =
+      nextPresets.find((item) => item.name.trim().toLowerCase() === nextName.trim().toLowerCase()) ??
+      null;
+    setAiCallSelectedPresetId(selectedPreset?.id ?? "all");
+    setAiCallPresetName(nextName);
+    notifySuccess(t("调用日志筛选视图已保存。", "AI call filter view saved."));
+  }
+
+  function applyAiCallPresetById(id: string) {
+    setAiCallSelectedPresetId(id);
+    if (id === "all") {
+      return;
+    }
+    const preset = aiCallSavedPresets.find((item) => item.id === id);
+    if (!preset) {
+      return;
+    }
+    applyAiCallPresetValue(preset.value);
+    setAiCallPresetName(preset.name);
+    notifySuccess(t("已应用调用日志筛选视图。", "AI call filter view applied."));
+  }
+
+  function deleteAiCallPreset() {
+    if (aiCallSelectedPresetId === "all") {
+      return;
+    }
+    const nextPresets = aiCallSavedPresets.filter((item) => item.id !== aiCallSelectedPresetId);
+    setAiCallSavedPresets(nextPresets);
+    setAiCallSelectedPresetId("all");
+    notifySuccess(t("已删除调用日志筛选视图。", "AI call filter view deleted."));
+  }
+
+  function resetUsageFilters() {
+    setUsageSelectedPresetId("all");
+    setUsageMinutes(180);
+    setUsageDateRange([]);
+    setUsageMetric("totalTokens");
+    setUsageBucketMode("auto");
+    setUsageKeyFilter(null);
+    setUsageModelFilter("");
+    setUsageRouteFilter("");
+    setUsageRequestWireFilter("");
+    setUsageUpstreamWireFilter("");
+    setUsageStreamFilter("");
+    setUsageTimelineLimit(600);
+  }
+
+  function buildUsageFilterPresetValue(): UsageFilterPresetValue {
+    return {
+      minutes: usageMinutes,
+      dateRange: usageDateRange.slice(0, 2),
+      metric: usageMetric,
+      bucketMode: usageBucketMode,
+      keyId: usageKeyFilter,
+      model: usageModelFilter,
+      route: usageRouteFilter,
+      requestWireApi: usageRequestWireFilter,
+      upstreamWireApi: usageUpstreamWireFilter,
+      stream: usageStreamFilter,
+      timelineLimit: usageTimelineLimit
+    };
+  }
+
+  function applyUsagePresetValue(value: UsageFilterPresetValue) {
+    setUsageMinutes(value.minutes);
+    setUsageDateRange(value.dateRange.slice(0, 2));
+    setUsageMetric(value.metric);
+    setUsageBucketMode(value.bucketMode);
+    setUsageKeyFilter(value.keyId);
+    setUsageModelFilter(value.model);
+    setUsageRouteFilter(value.route);
+    setUsageRequestWireFilter(value.requestWireApi);
+    setUsageUpstreamWireFilter(value.upstreamWireApi);
+    setUsageStreamFilter(value.stream);
+    setUsageTimelineLimit(value.timelineLimit);
+  }
+
+  function saveUsagePreset() {
+    const nextName =
+      usagePresetName.trim() ||
+      `${t("用量视图", "Usage View")} ${new Date().toLocaleTimeString(locale === "en-US" ? "en-US" : "zh-CN", {
+        hour: "2-digit",
+        minute: "2-digit"
+      })}`;
+    const nextPresets = upsertFilterPreset(
+      usageSavedPresets,
+      nextName,
+      buildUsageFilterPresetValue()
+    );
+    setUsageSavedPresets(nextPresets);
+    const selectedPreset =
+      nextPresets.find((item) => item.name.trim().toLowerCase() === nextName.trim().toLowerCase()) ??
+      null;
+    setUsageSelectedPresetId(selectedPreset?.id ?? "all");
+    setUsagePresetName(nextName);
+    notifySuccess(t("用量筛选视图已保存。", "Usage filter view saved."));
+  }
+
+  function applyUsagePresetById(id: string) {
+    setUsageSelectedPresetId(id);
+    if (id === "all") {
+      return;
+    }
+    const preset = usageSavedPresets.find((item) => item.id === id);
+    if (!preset) {
+      return;
+    }
+    applyUsagePresetValue(preset.value);
+    setUsagePresetName(preset.name);
+    notifySuccess(t("已应用用量筛选视图。", "Usage filter view applied."));
+  }
+
+  function deleteUsagePreset() {
+    if (usageSelectedPresetId === "all") {
+      return;
+    }
+    const nextPresets = usageSavedPresets.filter((item) => item.id !== usageSelectedPresetId);
+    setUsageSavedPresets(nextPresets);
+    setUsageSelectedPresetId("all");
+    notifySuccess(t("已删除用量筛选视图。", "Usage filter view deleted."));
+  }
+
+  function resetKeyMappingFilters() {
+    setKeyMappingSearch("");
+    setKeyMappingStatusFilter("all");
+    setKeyMappingBindingFilter("all");
+    setKeyMappingOverflowFilter("all");
+  }
+
+  function resetChannelModelFilters() {
+    setChannelModelSearch("");
+    setChannelModelStatusFilter("all");
+    setChannelModelWireApiFilter("all");
+    setChannelModelVisionFilter("all");
+  }
+
+  function resetPromptRuleFilters() {
+    setCompatPromptRuleSearch("");
+    setCompatPromptRuleStatusFilter("all");
+    setCompatPromptRuleProviderFilter("all");
+    setCompatPromptRuleIssueFilter("all");
   }
 
   function toggleAiCallLogExpanded(id: string) {
@@ -1188,6 +2351,14 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   }
 
   useEffect(() => {
+    writeFilterPresets("codex-gateway-hub:ai-call-presets", aiCallSavedPresets);
+  }, [aiCallSavedPresets]);
+
+  useEffect(() => {
+    writeFilterPresets("codex-gateway-hub:usage-presets", usageSavedPresets);
+  }, [usageSavedPresets]);
+
+  useEffect(() => {
     void bootstrap();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1199,6 +2370,18 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     }
     setRuntimeModel("");
   }, [selectedKey]);
+
+  useEffect(() => {
+    if (routeModule !== "access" || !isKeyDirty) {
+      return;
+    }
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [isKeyDirty, routeModule]);
 
   useEffect(() => {
     if (routeModule !== "logs") {
@@ -1265,6 +2448,11 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     usageMinutes,
     usageTimelineLimit,
     usageKeyFilter,
+    usageModelFilter,
+    usageRouteFilter,
+    usageRequestWireFilter,
+    usageUpstreamWireFilter,
+    usageStreamFilter,
     usageDateFrom,
     usageDateTo
   ]);
@@ -1336,6 +2524,9 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   function applyCompatPromptConfig(config: CompatPromptConfig) {
     const normalizedRules = normalizeCompatPromptRules(config.modelPromptRules ?? []);
     setCompatPromptKeywordsInput(formatCompatPromptKeywordsInput(config.agentsMdKeywords));
+    setCompatPromptExemptionsInput(
+      formatCompatPromptExemptionsInput(config.modelPromptExemptions ?? [])
+    );
     setCompatPromptHintInput(config.chineseReplyHint);
     setCompatPromptRulesDraft(normalizedRules);
     setCompatPromptRuleSearch("");
@@ -1387,6 +2578,13 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     notifyInfo(t("已生成最新 JSON 草稿。", "JSON draft refreshed from current rules."));
   }
 
+  function buildCompatPromptRulesExportJson(format: "array" | "wrapped" = "wrapped") {
+    if (format === "array") {
+      return `${formatCompatPromptRulesJson(normalizeCompatPromptRules(compatPromptRulesDraft))}\n`;
+    }
+    return `${quickExportCompatPromptRules(normalizeCompatPromptRules(compatPromptRulesDraft))}\n`;
+  }
+
   function applyImportedCompatPromptRules(
     incomingRules: CompatPromptRule[],
     mode: "append" | "replace",
@@ -1398,8 +2596,13 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
         ? [...compatPromptRulesDraft, ...normalizedIncoming]
         : [...normalizedIncoming]
     );
-    if (mergedRules.length > 128) {
-      notifyError(t("模型规则最多 128 条。", "Model prompt rules are limited to 128."));
+    if (mergedRules.length > MAX_COMPAT_PROMPT_RULES) {
+      notifyError(
+        t(
+          `模型规则最多 ${MAX_COMPAT_PROMPT_RULES} 条。`,
+          `Model prompt rules are limited to ${MAX_COMPAT_PROMPT_RULES}.`
+        )
+      );
       return;
     }
     setCompatPromptRulesDraft(mergedRules);
@@ -1431,18 +2634,119 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     }
   }
 
-  function openCompatPromptRulesFileImporter(mode: "append" | "replace") {
-    setCompatPromptRulesImportMode(mode);
-    const input = compatPromptRulesFileInputRef.current;
+  function handleOpenCompatPromptRulesImportDialog() {
+    setCompatPromptRulesQuickImportJson("");
+    setCompatPromptRulesQuickImportSource("");
+    setCompatPromptRulesImportDialogVisible(true);
+  }
+
+  function handleOpenCompatPromptRulesExportDialog() {
+    setCompatPromptRulesExportDialogVisible(true);
+  }
+
+  function handleCompatPromptRulesQuickImportJsonChange(value: string) {
+    setCompatPromptRulesQuickImportJson(value);
+    setCompatPromptRulesQuickImportSource(
+      value.trim() ? t("当前来源：手动粘贴", "Current source: Manual Paste") : ""
+    );
+  }
+
+  function clearBulkJsonImportDraft(target: BulkJsonImportTarget) {
+    if (target === "compatPromptRules") {
+      setCompatPromptRulesQuickImportJson("");
+      setCompatPromptRulesQuickImportSource("");
+      return;
+    }
+    if (target === "upstreamModels") {
+      setQuickImportJson("");
+      setQuickImportSource("");
+      return;
+    }
+    setQuickImportKeyMappingJson("");
+    setQuickImportKeyMappingSource("");
+  }
+
+  function applyBulkJsonImportDraft(
+    target: BulkJsonImportTarget,
+    text: string,
+    sourceLabel: string
+  ) {
+    if (target === "compatPromptRules") {
+      setCompatPromptRulesQuickImportJson(text);
+      setCompatPromptRulesQuickImportSource(sourceLabel);
+      setCompatPromptRulesImportDialogVisible(true);
+      return;
+    }
+    if (target === "upstreamModels") {
+      setQuickImportJson(text);
+      setQuickImportSource(sourceLabel);
+      setQuickImportDialogVisible(true);
+      return;
+    }
+    setQuickImportKeyMappingJson(text);
+    setQuickImportKeyMappingSource(sourceLabel);
+    setQuickImportKeyMappingDialogVisible(true);
+  }
+
+  function openBulkJsonFileImporter(target: BulkJsonImportTarget) {
+    const input = bulkJsonFileInputRef.current;
     if (!input) {
       notifyError(t("导入控件不可用。", "Import control unavailable."));
       return;
     }
+    setBulkJsonFileImportTarget(target);
     input.value = "";
     input.click();
   }
 
-  async function handleCompatPromptRulesFileChange(event: ChangeEvent<HTMLInputElement>) {
+  async function loadBulkJsonFromClipboard(target: BulkJsonImportTarget) {
+    if (!navigator.clipboard?.readText) {
+      notifyError(
+        t(
+          "当前浏览器不支持读取剪贴板。",
+          "Clipboard read is not supported in this browser."
+        )
+      );
+      return;
+    }
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text.trim()) {
+        notifyError(t("剪贴板内容为空。", "Clipboard content is empty."));
+        return;
+      }
+      applyBulkJsonImportDraft(target, text, t("当前来源：剪贴板", "Current source: Clipboard"));
+      notifySuccess(
+        t("已从剪贴板载入 JSON。", "Loaded JSON from clipboard.")
+      );
+    } catch (err) {
+      notifyError(
+        err instanceof Error
+          ? err.message
+          : t(
+              "读取剪贴板失败，请检查浏览器权限。",
+              "Failed to read clipboard. Please check browser permissions."
+            )
+      );
+    }
+  }
+
+  async function loadCompatPromptRulesFromClipboardToDraft() {
+    await loadBulkJsonFromClipboard("compatPromptRules");
+  }
+
+  async function copyCompatPromptRulesToClipboard(format: "array" | "wrapped" = "wrapped") {
+    await copyTextToClipboard(
+      buildCompatPromptRulesExportJson(format),
+      t("模型规则 JSON 已复制到剪贴板。", "Model rules JSON copied to clipboard.")
+    );
+  }
+
+  function openCompatPromptRulesFileImporter() {
+    openBulkJsonFileImporter("compatPromptRules");
+  }
+
+  async function handleBulkJsonFileChange(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0] ?? null;
     event.target.value = "";
     if (!file) {
@@ -1450,8 +2754,48 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     }
     try {
       const text = await file.text();
-      const nextRules = parseCompatPromptRulesJson(text);
-      applyImportedCompatPromptRules(nextRules, compatPromptRulesImportMode, file.name);
+      const target = bulkJsonFileImportTarget;
+      if (!target) {
+        notifyError(t("导入目标不可用。", "Import target is unavailable."));
+        return;
+      }
+      applyBulkJsonImportDraft(
+        target,
+        text,
+        t(`当前来源：${file.name}`, `Current source: ${file.name}`)
+      );
+      notifySuccess(
+        t(
+          `已载入 ${file.name}，确认后即可导入。`,
+          `Loaded ${file.name}. Review and import when ready.`
+        )
+      );
+    } catch (err) {
+      notifyError(
+        err instanceof Error
+          ? err.message
+          : t("读取导入文件失败。", "Failed to read import file.")
+      );
+    } finally {
+      setBulkJsonFileImportTarget(null);
+    }
+  }
+
+  function applyCompatPromptRulesQuickImport(mode: "append" | "replace") {
+    try {
+      const result = quickImportCompatPromptRules(compatPromptRulesQuickImportJson);
+      if (!result.ok) {
+        throw new Error(result.error);
+      }
+      const nextRules = normalizeCompatPromptRules(result.rules);
+      applyImportedCompatPromptRules(
+        nextRules,
+        mode,
+        compatPromptRulesQuickImportSource || t("当前来源：手动输入 JSON", "Current source: Manual JSON")
+      );
+      setCompatPromptRulesImportDialogVisible(false);
+      setCompatPromptRulesQuickImportJson("");
+      setCompatPromptRulesQuickImportSource("");
     } catch (err) {
       notifyError(
         err instanceof Error
@@ -1473,6 +2817,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
 
   async function saveGatewayCompatPromptConfig() {
     const agentsMdKeywords = parseCompatPromptKeywordsInput(compatPromptKeywordsInput);
+    const modelPromptExemptions = parseCompatPromptExemptionsInput(compatPromptExemptionsInput);
     const chineseReplyHint = compatPromptHintInput.trim();
     const modelPromptRules = normalizeCompatPromptRules(compatPromptRulesDraft);
     const ruleCheckIssues = inspectCompatPromptRules(modelPromptRules);
@@ -1485,8 +2830,22 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       notifyError(t("默认提示词不能为空。", "Default hint cannot be empty."));
       return;
     }
-    if (modelPromptRules.length > 128) {
-      notifyError(t("模型规则最多 128 条。", "Model prompt rules are limited to 128."));
+    if (modelPromptExemptions.length > 128) {
+      notifyError(
+        t(
+          "提示词豁免名单最多 128 条。",
+          "Prompt exemption list is limited to 128 entries."
+        )
+      );
+      return;
+    }
+    if (modelPromptRules.length > MAX_COMPAT_PROMPT_RULES) {
+      notifyError(
+        t(
+          `模型规则最多 ${MAX_COMPAT_PROMPT_RULES} 条。`,
+          `Model prompt rules are limited to ${MAX_COMPAT_PROMPT_RULES}.`
+        )
+      );
       return;
     }
     for (let i = 0; i < modelPromptRules.length; i += 1) {
@@ -1531,6 +2890,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
         body: JSON.stringify({
           compatPromptConfig: {
             agentsMdKeywords,
+            modelPromptExemptions,
             chineseReplyHint,
             modelPromptRules
           }
@@ -1556,7 +2916,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     }
   }
 
-  async function loadKeys() {
+  async function loadKeys(preferredSelectedId?: number | null) {
     const response = await fetch("/api/keys", { cache: "no-store" });
     if (!response.ok) {
       throw new Error(`加载本地 Key 失败 (${response.status})`);
@@ -1566,18 +2926,25 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     setWireApi(data.wireApi);
 
     if (data.items.length === 0) {
+      const emptyDraft = createEmptyKeyFormState(generateLocalKey());
       setSelectedKeyId(null);
-      setKeyForm(createEmptyKeyFormState(generateLocalKey()));
+      setKeyForm(emptyDraft);
+      setSavedKeyForm(cloneKeyFormState(emptyDraft));
       return;
     }
 
     const nextSelectedId =
-      selectedKeyId !== null && data.items.some((item) => item.id === selectedKeyId)
-        ? selectedKeyId
-        : data.items[0].id;
-    const key = data.items.find((item) => item.id === nextSelectedId)!;
+      typeof preferredSelectedId === "number" &&
+      data.items.some((item) => item.id === preferredSelectedId)
+        ? preferredSelectedId
+        : selectedKeyId !== null && data.items.some((item) => item.id === selectedKeyId)
+          ? selectedKeyId
+          : data.items[0].id;
+    const key = data.items.find((item) => item.id === nextSelectedId) ?? data.items[0];
+    const nextForm = toKeyForm(key);
     setSelectedKeyId(key.id);
-    setKeyForm(toKeyForm(key));
+    setKeyForm(nextForm);
+    setSavedKeyForm(cloneKeyFormState(nextForm));
   }
 
   async function loadChannels() {
@@ -1759,6 +3126,23 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       if (usageKeyFilter) {
         params.set("keyId", String(usageKeyFilter));
       }
+      if (usageModelFilter.trim()) {
+        params.set("model", usageModelFilter.trim());
+      }
+      if (usageRouteFilter.trim()) {
+        params.set("route", usageRouteFilter.trim());
+      }
+      if (usageRequestWireFilter.trim()) {
+        params.set("requestWireApi", usageRequestWireFilter.trim());
+      }
+      if (usageUpstreamWireFilter.trim()) {
+        params.set("upstreamWireApi", usageUpstreamWireFilter.trim());
+      }
+      if (usageStreamFilter === "stream") {
+        params.set("stream", "true");
+      } else if (usageStreamFilter === "non_stream") {
+        params.set("stream", "false");
+      }
       const response = await fetch(`/api/usage?${params.toString()}`, { cache: "no-store" });
       if (!response.ok) {
         const body = (await response.json().catch(() => ({}))) as { error?: string };
@@ -1766,6 +3150,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       }
       const body = (await response.json()) as UsageReport;
       setUsageReport(body);
+      setUsageFilterOptions(body.filterOptions ?? EMPTY_USAGE_FILTER_OPTIONS);
     } catch (err) {
       if (!silent) {
         notifyError(err instanceof Error ? err.message : "加载用量报表失败");
@@ -1800,10 +3185,12 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
               },
               perKey: [],
               perModel: [],
-              timeline: []
+              timeline: [],
+              filterOptions: EMPTY_USAGE_FILTER_OPTIONS
             }
           : prev
       );
+      setUsageFilterOptions(EMPTY_USAGE_FILTER_OPTIONS);
       notifySuccess("用量记录已清空。");
     } catch (err) {
       notifyError(err instanceof Error ? err.message : "清空用量报表失败");
@@ -1812,18 +3199,76 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     }
   }
 
+  function confirmDiscardKeyDraft(message: string) {
+    if (!isKeyDirty) {
+      return true;
+    }
+    return window.confirm(message);
+  }
+
+  function restoreKeyDraft() {
+    setKeyForm(cloneKeyFormState(savedKeyForm));
+    notifyInfo(
+      selectedKey
+        ? t("已恢复到最近一次保存的 Key 内容。", "Restored to the latest saved key state.")
+        : t("已恢复到当前新建草稿的初始状态。", "Restored to the initial new-key draft.")
+    );
+  }
+
+  async function refreshKeyWorkspace() {
+    if (
+      routeModule === "access" &&
+      !confirmDiscardKeyDraft(
+        t(
+          "刷新会覆盖当前未保存的 Key 草稿，确认继续吗？",
+          "Refreshing now will overwrite the current unsaved key draft. Continue?"
+        )
+      )
+    ) {
+      return;
+    }
+    await bootstrap();
+  }
+
   function createNewKeyDraft() {
+    if (
+      !confirmDiscardKeyDraft(
+        t(
+          "当前 Key 草稿还有未保存修改。继续新建会丢失这些内容，确认继续吗？",
+          "You have unsaved key changes. Creating a new key now will discard them. Continue?"
+        )
+      )
+    ) {
+      return;
+    }
+    const emptyDraft = createEmptyKeyFormState(generateLocalKey());
     setSelectedKeyId(null);
-    setKeyForm(createEmptyKeyFormState(generateLocalKey()));
+    setKeyForm(emptyDraft);
+    setSavedKeyForm(cloneKeyFormState(emptyDraft));
   }
 
   function openExistingKeyById(id: number) {
+    if (selectedKeyId === id) {
+      return;
+    }
+    if (
+      !confirmDiscardKeyDraft(
+        t(
+          "当前 Key 草稿还有未保存修改。切换 Key 会丢失这些内容，确认继续吗？",
+          "You have unsaved key changes. Switching keys now will discard them. Continue?"
+        )
+      )
+    ) {
+      return;
+    }
     const key = keys.find((item) => item.id === id);
     if (!key) {
       return;
     }
+    const nextForm = toKeyForm(key);
     setSelectedKeyId(key.id);
-    setKeyForm(toKeyForm(key));
+    setKeyForm(nextForm);
+    setSavedKeyForm(cloneKeyFormState(nextForm));
   }
 
   function createNewChannelDraft() {
@@ -1966,6 +3411,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   }
 
   async function saveKey() {
+    const creatingNewKey = isNewKey;
     setSavingKey(true);
     try {
       if (!keyForm.name.trim()) {
@@ -1981,29 +3427,42 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       if (keyForm.dynamicModelSwitch && !overflowModel) {
         throw new Error("启用动态切模时，必须设置溢出模型。");
       }
-      const dailyRequestLimitInput = keyForm.dailyRequestLimit.trim();
-      const dailyRequestLimit = Number(dailyRequestLimitInput || "0");
-      if (
-        dailyRequestLimitInput &&
-        (!Number.isInteger(dailyRequestLimit) || dailyRequestLimit <= 0)
-      ) {
-        throw new Error("每日请求上限必须是大于 0 的整数，或留空表示不限。");
-      }
-      const dailyTokenLimitInput = keyForm.dailyTokenLimit.trim();
-      const dailyTokenLimit = Number(dailyTokenLimitInput || "0");
-      if (
-        dailyTokenLimitInput &&
-        (!Number.isInteger(dailyTokenLimit) || dailyTokenLimit <= 0)
-      ) {
-        throw new Error("每日 Token 上限必须是大于 0 的整数，或留空表示不限。");
-      }
-      for (const m of keyForm.modelMappings) {
+      const dailyRequestLimit = parseOptionalPositiveIntegerInput(
+        keyForm.dailyRequestLimit,
+        "每日请求上限"
+      );
+      const dailyTokenLimit = parseOptionalPositiveIntegerInput(
+        keyForm.dailyTokenLimit,
+        "每日 Token 上限"
+      );
+      for (let index = 0; index < keyForm.modelMappings.length; index += 1) {
+        const m = keyForm.modelMappings[index];
+        if (!m.clientModel.trim()) {
+          throw new Error(
+            `映射 #${index + 1} 缺少客户端模型名。请填写后再保存，或删除这条映射。`
+          );
+        }
+        if (!m.targetModel.trim()) {
+          throw new Error(
+            `映射 #${index + 1} 缺少内部模型名。请填写后再保存，或删除这条映射。`
+          );
+        }
         if (m.dynamicModelSwitch && !(m.contextOverflowModel?.trim())) {
           throw new Error(`映射「${m.clientModel}」启用了动态切模但未设置溢出模型。`);
         }
       }
-      const modelMappings = keyForm.modelMappings
-        .map((item) => ({
+      const seenClientModels = new Map<string, number>();
+      keyForm.modelMappings.forEach((item, index) => {
+        const normalizedClientModel = item.clientModel.trim().toLowerCase();
+        const previousIndex = seenClientModels.get(normalizedClientModel);
+        if (previousIndex !== undefined) {
+          throw new Error(
+            `映射 #${previousIndex + 1} 与 #${index + 1} 使用了重复的客户端模型名「${item.clientModel.trim()}」。`
+          );
+        }
+        seenClientModels.set(normalizedClientModel, index);
+      });
+      const modelMappings = keyForm.modelMappings.map((item) => ({
           id: item.id,
           clientModel: item.clientModel.trim(),
           targetModel: item.targetModel.trim(),
@@ -2019,8 +3478,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
           dynamicModelSwitch: item.dynamicModelSwitch,
           contextSwitchThreshold: item.contextSwitchThreshold,
           contextOverflowModel: item.contextOverflowModel?.trim() || undefined
-        }))
-        .filter((item) => item.clientModel && item.targetModel);
+        }));
 
       const payload = {
         name: keyForm.name.trim(),
@@ -2030,8 +3488,8 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
         dynamicModelSwitch: keyForm.dynamicModelSwitch,
         contextSwitchThreshold: Number(keyForm.contextSwitchThreshold),
         contextOverflowModel: overflowModel || undefined,
-        dailyRequestLimit: dailyRequestLimitInput ? dailyRequestLimit : undefined,
-        dailyTokenLimit: dailyTokenLimitInput ? dailyTokenLimit : undefined,
+        dailyRequestLimit,
+        dailyTokenLimit,
         clearContextOverflowModel: overflowModel.length === 0,
         enabled: keyForm.enabled
       };
@@ -2044,13 +3502,17 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
         body: JSON.stringify(payload)
       });
 
+      const body = (await response.json().catch(() => ({}))) as GatewayKey & { error?: string };
       if (!response.ok) {
-        const body = (await response.json().catch(() => ({}))) as { error?: string };
         throw new Error(body.error ?? `保存失败 (${response.status})`);
       }
 
-      await loadKeys();
-      notifySuccess(isNewKey ? "本地 Key 创建成功。" : "本地 Key 已更新。");
+      await loadKeys(body.id);
+      notifySuccess(
+        creatingNewKey
+          ? t("本地 Key 创建成功，已停留在刚创建的结果上。", "Local key created and kept selected.")
+          : t("本地 Key 已更新。", "Local key updated.")
+      );
     } catch (err) {
       notifyError(err instanceof Error ? err.message : "保存失败");
     } finally {
@@ -2362,36 +3824,117 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     }
   }
 
-  function downloadTextAsFile(fileName: string, content: string, mimeType = "application/json") {
-    const blob = new Blob([content], { type: mimeType });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = fileName;
-    document.body.appendChild(anchor);
-    anchor.click();
-    document.body.removeChild(anchor);
-    URL.revokeObjectURL(url);
+  function downloadTextSnippet(fileName: string, content: string, successMessage: string) {
+    saveTextAsFile(fileName, content);
+    notifySuccess(successMessage);
   }
 
   function downloadCompatPromptRulesJsonFile(format: "array" | "wrapped" = "wrapped") {
-    const normalized = normalizeCompatPromptRules(compatPromptRulesDraft);
-    const payload =
-      format === "array"
-        ? normalized
-        : {
-            modelPromptRules: normalized
-          };
-    const stamp = new Date().toISOString().replace(/[:]/g, "-");
-    const suffix = format === "array" ? "rules-array" : "rules";
-    const fileName = `compat-prompt-${suffix}-${stamp}.json`;
-    downloadTextAsFile(fileName, `${JSON.stringify(payload, null, 2)}\n`);
-    notifySuccess(
+    const fileName =
+      format === "array" ? "model-prompt-rules.array.json" : "model-prompt-rules.json";
+    downloadTextSnippet(
+      fileName,
+      buildCompatPromptRulesExportJson(format),
       t(
         "模型规则 JSON 已导出到文件。",
         "Model rules JSON has been exported to a file."
       )
     );
+  }
+
+  function downloadUpstreamModelsJsonFile() {
+    downloadTextSnippet(
+      "model-pool.json",
+      upstreamModelsExportPreviewJson,
+      t("模型池 JSON 已导出到文件。", "Model pool JSON has been exported to a file.")
+    );
+  }
+
+  function downloadKeyMappingsJsonFile() {
+    downloadTextSnippet(
+      "model-mappings.json",
+      keyMappingsExportPreviewJson,
+      t("模型映射 JSON 已导出到文件。", "Model mappings JSON has been exported to a file.")
+    );
+  }
+
+  function downloadNativeCodexBundleFile(
+    fileKey: keyof CodexExportBundle["files"],
+    fallbackFileName: string,
+    successMessage: string,
+    failureMessage: string
+  ) {
+    const file = nativeCodexExportBundle?.files[fileKey];
+    if (!file) {
+      notifyError(failureMessage);
+      return;
+    }
+    downloadTextSnippet(
+      resolveDownloadFileName(file.targetPath, fallbackFileName),
+      file.content,
+      successMessage
+    );
+  }
+
+  function downloadApiDocExample(
+    exampleKey: "chatCompletions" | "responses" | "anthropicMessages"
+  ) {
+    const descriptor = {
+      chatCompletions: {
+        fileName: "chat-completions.sh",
+        content: apiDocExamples.chatCompletions,
+        success: t("chat/completions 示例已下载。", "chat/completions example downloaded.")
+      },
+      responses: {
+        fileName: "responses.sh",
+        content: apiDocExamples.responses,
+        success: t("responses 示例已下载。", "responses example downloaded.")
+      },
+      anthropicMessages: {
+        fileName: "messages.sh",
+        content: apiDocExamples.anthropicMessages,
+        success: t("messages 示例已下载。", "messages example downloaded.")
+      }
+    }[exampleKey];
+    downloadTextSnippet(descriptor.fileName, descriptor.content, descriptor.success);
+  }
+
+  function downloadRuntimeApiExample(
+    exampleKey:
+      | "queryStatus"
+      | "switchModel"
+      | "clearOverride"
+      | "toggleEnabledById"
+      | "payloadSchema"
+  ) {
+    const descriptor = {
+      queryStatus: {
+        fileName: "runtime-query.sh",
+        content: runtimeApiExamples.queryStatus,
+        success: t("运行时查询命令已下载。", "Runtime query command downloaded.")
+      },
+      switchModel: {
+        fileName: "runtime-switch.sh",
+        content: runtimeApiExamples.switchModel,
+        success: t("运行时切换命令已下载。", "Runtime switch command downloaded.")
+      },
+      clearOverride: {
+        fileName: "runtime-clear-override.sh",
+        content: runtimeApiExamples.clearOverride,
+        success: t("清空覆盖命令已下载。", "Clear-override command downloaded.")
+      },
+      toggleEnabledById: {
+        fileName: "runtime-toggle-key.sh",
+        content: runtimeApiExamples.toggleEnabledById,
+        success: t("Key 启停命令已下载。", "Key toggle command downloaded.")
+      },
+      payloadSchema: {
+        fileName: "runtime-payload.json",
+        content: runtimeApiExamples.payloadSchema,
+        success: t("运行时 payload 已下载。", "Runtime payload downloaded.")
+      }
+    }[exampleKey];
+    downloadTextSnippet(descriptor.fileName, descriptor.content, descriptor.success);
   }
 
   function clearPromptLabPollingTimer() {
@@ -2613,7 +4156,9 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       notifyInfo(
         body.hintSource === "rule"
           ? t("已命中模型规则。", "Matched model-specific rule.")
-          : t("未命中规则，回落默认提示词。", "No rule matched. Fallback to default hint.")
+          : body.hintSource === "exempt"
+            ? t("已命中豁免名单，本次不会注入提示词。", "Matched exemption list. No prompt will be injected.")
+            : t("未命中规则，回落默认提示词。", "No rule matched. Fallback to default hint.")
       );
     } catch (err) {
       notifyError(err instanceof Error ? err.message : "规则预览失败");
@@ -2667,51 +4212,82 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   }
 
   function handleQuickExportModels() {
-    const exported = quickExportModels(channelForm.upstreamModels);
-    setQuickExportJson(exported);
     setQuickExportDialogVisible(true);
   }
 
   async function handleQuickCopyModels() {
     await copyTextToClipboard(
-      quickExportModels(channelForm.upstreamModels),
+      upstreamModelsExportPreviewJson,
       t("模型池已复制到剪贴板。", "Model pool copied to clipboard.")
     );
   }
 
   function handleQuickExportKeyMappings() {
-    const exported = quickExportKeyMappings(
-      keyForm.modelMappings,
-      (channelId) => channels.find((item) => item.id === channelId)?.name ?? null
-    );
-    setQuickExportKeyMappingJson(exported);
     setQuickExportKeyMappingDialogVisible(true);
   }
 
   async function handleQuickCopyKeyMappings() {
     await copyTextToClipboard(
-      quickExportKeyMappings(
-        keyForm.modelMappings,
-        (channelId) => channels.find((item) => item.id === channelId)?.name ?? null
-      ),
+      keyMappingsExportPreviewJson,
       t("模型映射已复制到剪贴板。", "Model mappings copied to clipboard.")
     );
   }
 
   function handleOpenQuickImportDialog() {
     setQuickImportJson("");
+    setQuickImportSource("");
     setQuickImportDialogVisible(true);
   }
 
   function handleOpenQuickImportKeyMappingDialog() {
     setQuickImportKeyMappingJson("");
+    setQuickImportKeyMappingSource("");
     setQuickImportKeyMappingDialogVisible(true);
+  }
+
+  function handleQuickImportJsonChange(value: string) {
+    setQuickImportJson(value);
+    setQuickImportSource(
+      value.trim() ? t("当前来源：手动粘贴", "Current source: Manual Paste") : ""
+    );
+  }
+
+  function handleQuickImportKeyMappingJsonChange(value: string) {
+    setQuickImportKeyMappingJson(value);
+    setQuickImportKeyMappingSource(
+      value.trim() ? t("当前来源：手动粘贴", "Current source: Manual Paste") : ""
+    );
+  }
+
+  async function loadUpstreamModelsFromClipboardToDraft() {
+    await loadBulkJsonFromClipboard("upstreamModels");
+  }
+
+  async function loadKeyMappingsFromClipboardToDraft() {
+    await loadBulkJsonFromClipboard("keyMappings");
+  }
+
+  function openUpstreamModelsFileImporter() {
+    openBulkJsonFileImporter("upstreamModels");
+  }
+
+  function openKeyMappingsFileImporter() {
+    openBulkJsonFileImporter("keyMappings");
   }
 
   function handleQuickImportConfirm() {
     const result = quickImportModels(quickImportJson);
     if (!result.ok) {
       notifyError(result.error);
+      return;
+    }
+    if (channelForm.upstreamModels.length + result.models.length > MAX_UPSTREAM_MODELS) {
+      notifyError(
+        t(
+          `追加后将超过 ${MAX_UPSTREAM_MODELS} 个模型上限，请减少导入数量或改为覆盖导入。`,
+          `Appending would exceed the ${MAX_UPSTREAM_MODELS}-model limit. Reduce the import size or use replace.`
+        )
+      );
       return;
     }
     setChannelForm((prev) => {
@@ -2735,6 +4311,8 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       });
     });
     setQuickImportDialogVisible(false);
+    setQuickImportJson("");
+    setQuickImportSource("");
     notifySuccess(result.note);
   }
 
@@ -2766,6 +4344,8 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       });
     });
     setQuickImportDialogVisible(false);
+    setQuickImportJson("");
+    setQuickImportSource("");
     notifySuccess(result.note);
   }
 
@@ -2812,11 +4392,23 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       };
     });
 
+    if (!replaceAll && keyForm.modelMappings.length + incoming.length > MAX_KEY_MODEL_MAPPINGS) {
+      notifyError(
+        t(
+          `追加后将超过 ${MAX_KEY_MODEL_MAPPINGS} 条映射上限，请减少导入数量或改为覆盖导入。`,
+          `Appending would exceed the ${MAX_KEY_MODEL_MAPPINGS}-mapping limit. Reduce the import size or use replace.`
+        )
+      );
+      return;
+    }
+
     setKeyForm((prev) => ({
       ...prev,
       modelMappings: replaceAll ? incoming : [...prev.modelMappings, ...incoming]
     }));
     setQuickImportKeyMappingDialogVisible(false);
+    setQuickImportKeyMappingJson("");
+    setQuickImportKeyMappingSource("");
     notifySuccess(result.note);
     if (unresolvedMappingChannelCount || unresolvedOverflowChannelCount) {
       notifyInfo(
@@ -2841,6 +4433,18 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       next === "docs"
       || next === "dashboard"
     ) {
+      if (
+        next !== routeModule &&
+        routeModule === "access" &&
+        !confirmDiscardKeyDraft(
+          t(
+            "离开「基础接入」前还有未保存的 Key 草稿。继续跳转会丢失这些内容，确认继续吗？",
+            "You have unsaved key changes in Access. Leaving now will discard them. Continue?"
+          )
+        )
+      ) {
+        return;
+      }
       router.push(`/console/${next}`);
     }
   }
@@ -3129,6 +4733,23 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     }
   }
 
+  function downloadCcSwitchCodexAuthJson() {
+    try {
+      const authJson = JSON.stringify(buildCcSwitchCodexAuthJson(), null, 2);
+      downloadTextSnippet(
+        "auth.json",
+        authJson,
+        t("Codex auth.json 已下载。", "Codex auth.json downloaded.")
+      );
+    } catch (err) {
+      notifyError(
+        err instanceof Error
+          ? err.message
+          : t("下载 Codex auth.json 失败", "Failed to download Codex auth.json")
+      );
+    }
+  }
+
   async function copyCcSwitchCodexConfigToml() {
     try {
       const toml = buildCcSwitchCodexConfigToml();
@@ -3141,6 +4762,23 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
         err instanceof Error
           ? err.message
           : t("复制 Codex config.toml 失败", "Failed to copy Codex config.toml")
+      );
+    }
+  }
+
+  function downloadCcSwitchCodexConfigToml() {
+    try {
+      const toml = buildCcSwitchCodexConfigToml();
+      downloadTextSnippet(
+        "config.toml",
+        toml,
+        t("Codex config.toml 已下载。", "Codex config.toml downloaded.")
+      );
+    } catch (err) {
+      notifyError(
+        err instanceof Error
+          ? err.message
+          : t("下载 Codex config.toml 失败", "Failed to download Codex config.toml")
       );
     }
   }
@@ -3215,6 +4853,23 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
         err instanceof Error
           ? err.message
           : t("复制 Claude Code 配置失败", "Failed to copy Claude Code config")
+      );
+    }
+  }
+
+  function downloadCcSwitchClaudeConfigJson() {
+    try {
+      const configJson = JSON.stringify(buildCcSwitchClaudeInlineConfig(), null, 2);
+      downloadTextSnippet(
+        "claude-config.json",
+        configJson,
+        t("Claude Code 配置已下载。", "Claude Code config downloaded.")
+      );
+    } catch (err) {
+      notifyError(
+        err instanceof Error
+          ? err.message
+          : t("下载 Claude Code 配置失败", "Failed to download Claude Code config")
       );
     }
   }
@@ -3303,6 +4958,8 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     "Fill local key to preview native Codex config."
   );
   const compatPromptKeywordCount = parseCompatPromptKeywordsInput(compatPromptKeywordsInput).length;
+  const compatPromptExemptionCount =
+    parseCompatPromptExemptionsInput(compatPromptExemptionsInput).length;
   const compatPromptHintLength = compatPromptHintInput.trim().length;
   const compatPromptRuleCount = compatPromptRulesDraft.length;
   const compatPromptRuleEnabledCount = compatPromptRulesDraft.filter((item) => item.enabled).length;
@@ -3313,14 +4970,105 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   const compatPromptRuleWarnCount = compatPromptRuleCheckIssues.filter(
     (item) => item.level === "warn"
   ).length;
+  const compatPromptRuleIssueMap = compatPromptRuleCheckIssues.reduce((map, issue) => {
+    issue.relatedIndexes.forEach((index) => {
+      const prev = map.get(index);
+      if (issue.level === "error" || !prev) {
+        map.set(index, issue.level);
+      }
+    });
+    return map;
+  }, new Map<number, "warn" | "error">());
+  const compatPromptRuleProviderOptions = Array.from(
+    new Set(
+      compatPromptRulesDraft
+        .map((item) => item.provider.trim())
+        .filter(Boolean)
+        .map((item) => item.toLowerCase())
+    )
+  ).sort((a, b) => a.localeCompare(b));
   const compatPromptRuleSearchKeyword = compatPromptRuleSearch.trim().toLowerCase();
   const compatPromptRuleVisibleItems = compatPromptRulesDraft
     .map((rule, index) => ({ rule, index }))
-    .filter(({ rule }) =>
-      compatPromptRuleSearchKeyword
-        ? stringifyCompatPromptRuleForSearch(rule).includes(compatPromptRuleSearchKeyword)
-        : true
-    );
+    .filter(({ rule, index }) => {
+      if (
+        compatPromptRuleSearchKeyword &&
+        !stringifyCompatPromptRuleForSearch(rule).includes(compatPromptRuleSearchKeyword)
+      ) {
+        return false;
+      }
+      if (compatPromptRuleStatusFilter === "enabled" && !rule.enabled) {
+        return false;
+      }
+      if (compatPromptRuleStatusFilter === "disabled" && rule.enabled) {
+        return false;
+      }
+      if (
+        compatPromptRuleProviderFilter !== "all" &&
+        rule.provider.trim().toLowerCase() !== compatPromptRuleProviderFilter
+      ) {
+        return false;
+      }
+      const issueLevel = compatPromptRuleIssueMap.get(index) ?? null;
+      if (compatPromptRuleIssueFilter === "error" && issueLevel !== "error") {
+        return false;
+      }
+      if (compatPromptRuleIssueFilter === "warn" && issueLevel !== "warn") {
+        return false;
+      }
+      if (compatPromptRuleIssueFilter === "attention" && !issueLevel) {
+        return false;
+      }
+      if (compatPromptRuleIssueFilter === "clean" && issueLevel) {
+        return false;
+      }
+      return true;
+    });
+  const compatPromptRuleActiveFilters: ActiveFilterChip[] = [];
+  if (compatPromptRuleSearch.trim()) {
+    compatPromptRuleActiveFilters.push({
+      key: "prompt-search",
+      label: t("检索", "Search"),
+      value: compatPromptRuleSearch.trim(),
+      tone: "primary",
+      onClear: () => setCompatPromptRuleSearch("")
+    });
+  }
+  if (compatPromptRuleStatusFilter !== "all") {
+    compatPromptRuleActiveFilters.push({
+      key: "prompt-status",
+      label: t("状态", "Status"),
+      value:
+        compatPromptRuleStatusFilter === "enabled"
+          ? t("启用", "Enabled")
+          : t("停用", "Disabled"),
+      onClear: () => setCompatPromptRuleStatusFilter("all")
+    });
+  }
+  if (compatPromptRuleProviderFilter !== "all") {
+    compatPromptRuleActiveFilters.push({
+      key: "prompt-provider",
+      label: t("供应商", "Provider"),
+      value: compatPromptRuleProviderFilter,
+      onClear: () => setCompatPromptRuleProviderFilter("all")
+    });
+  }
+  if (compatPromptRuleIssueFilter !== "all") {
+    compatPromptRuleActiveFilters.push({
+      key: "prompt-issue",
+      label: t("风险", "Risk"),
+      value:
+        compatPromptRuleIssueFilter === "error"
+          ? t("仅错误", "Errors Only")
+          : compatPromptRuleIssueFilter === "warn"
+            ? t("仅警告", "Warnings Only")
+            : compatPromptRuleIssueFilter === "attention"
+              ? t("全部风险项", "Attention Items")
+              : t("仅干净规则", "Clean Rules"),
+      tone: compatPromptRuleIssueFilter === "error" ? "warning" : "default",
+      onClear: () => setCompatPromptRuleIssueFilter("all")
+    });
+  }
   const compatPromptUpstreamModelSuggestions = Array.from(
     new Set(
       channels
@@ -3331,6 +5079,194 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   )
     .sort((a, b) => a.localeCompare(b))
     .slice(0, 16);
+  const upstreamModelsExportPreviewJson = useMemo(
+    () => quickExportModels(channelForm.upstreamModels),
+    [channelForm.upstreamModels]
+  );
+  const keyMappingsExportPreviewJson = useMemo(
+    () =>
+      quickExportKeyMappings(
+        keyForm.modelMappings,
+        (channelId) => channels.find((item) => item.id === channelId)?.name ?? null
+      ),
+    [channels, keyForm.modelMappings]
+  );
+  const compatPromptRulesExportPreviewJson = useMemo(
+    () => quickExportCompatPromptRules(normalizeCompatPromptRules(compatPromptRulesDraft)),
+    [compatPromptRulesDraft]
+  );
+  const compatPromptRulesQuickImportPreview = useMemo(() => {
+    return buildBulkImportPreview<CompatPromptRule>({
+      rawValue: compatPromptRulesQuickImportJson,
+      currentCount: compatPromptRuleCount,
+      parse: (value) => {
+        const result = quickImportCompatPromptRules(value);
+        return result.ok
+          ? { ok: true, items: normalizeCompatPromptRules(result.rules), note: result.note }
+          : { ok: false, error: result.error };
+      },
+      getEnabledCount: (item) => item.enabled,
+      inspectItems: (items) =>
+        inspectCompatPromptRules(items).map((issue) => ({
+          level: issue.level,
+          message: issue.message
+        })),
+      limit: MAX_COMPAT_PROMPT_RULES,
+      readyMessage: () =>
+        t(
+          "JSON 结构校验通过，可以直接追加或覆盖导入。",
+          "JSON validation passed. You can append or replace directly."
+        ),
+      warningMessage: (warnCount) =>
+        t(
+          `发现 ${warnCount} 条宽匹配告警，建议导入后抽样检查命中结果。`,
+          `${warnCount} broad-match warnings detected. Review matched results after import.`
+        ),
+      errorMessage: (errorCount) =>
+        t(
+          `发现 ${errorCount} 条规则冲突风险，建议导入后尽快修正并保存前做回归验证。`,
+          `${errorCount} rule conflict risks detected. Import is allowed, but you should fix them and run regression checks before saving.`
+        ),
+      appendLimitMessage: () =>
+        t(
+          "追加后将超过 128 条规则上限，请减少导入数量或改为覆盖导入。",
+          "Appending would exceed the 128-rule limit. Reduce the import size or use replace."
+        ),
+      replaceLimitMessage: () =>
+        t(
+          "覆盖后仍会超过 128 条规则上限，请减少导入数量。",
+          "Replacing would still exceed the 128-rule limit. Reduce the import size."
+        )
+    });
+  }, [compatPromptRuleCount, compatPromptRulesQuickImportJson, t]);
+  const upstreamModelsQuickImportPreview = useMemo(() => {
+    return buildBulkImportPreview<Omit<UpstreamModelConfig, "id">>({
+      rawValue: quickImportJson,
+      currentCount: channelForm.upstreamModels.length,
+      parse: (value) => {
+        const result = quickImportModels(value);
+        return result.ok
+          ? { ok: true, items: result.models, note: result.note }
+          : { ok: false, error: result.error };
+      },
+      getEnabledCount: (item) => item.enabled,
+      limit: MAX_UPSTREAM_MODELS,
+      readyMessage: (note) => note,
+      warningMessage: (warnCount) =>
+        t(
+          `发现 ${warnCount} 条模型池告警，请导入后手动核对。`,
+          `${warnCount} model-pool warnings detected. Review imported items after import.`
+        ),
+      errorMessage: (errorCount) =>
+        t(
+          `发现 ${errorCount} 条模型池错误，请修正后再导入。`,
+          `${errorCount} model-pool errors detected. Fix them before import.`
+        ),
+      appendLimitMessage: () =>
+        t(
+          "追加后将超过 64 个模型上限，请减少导入数量或改为覆盖导入。",
+          "Appending would exceed the 64-model limit. Reduce the import size or use replace."
+        ),
+      replaceLimitMessage: () =>
+        t(
+          "覆盖后仍会超过 64 个模型上限，请减少导入数量。",
+          "Replacing would still exceed the 64-model limit. Reduce the import size."
+        )
+    });
+  }, [channelForm.upstreamModels.length, quickImportJson, t]);
+  const keyMappingsQuickImportPreview = useMemo(() => {
+    return buildBulkImportPreview({
+      rawValue: quickImportKeyMappingJson,
+      currentCount: keyForm.modelMappings.length,
+      parse: (value) => {
+        const result = quickImportKeyMappings(value);
+        return result.ok
+          ? { ok: true, items: result.mappings, note: result.note }
+          : { ok: false, error: result.error };
+      },
+      getEnabledCount: (item) => item.enabled,
+      inspectItems: (items) =>
+        items.flatMap((item) => {
+          const issues: Array<{ level: "warn" | "error"; message: string }> = [];
+          const mappingBinding = resolveImportedChannelBinding(
+            item.upstreamChannelName,
+            item.upstreamChannelId
+          );
+          const overflowBinding = resolveImportedChannelBinding(
+            item.contextOverflowChannelName,
+            item.contextOverflowChannelId
+          );
+          if (mappingBinding.requested && !mappingBinding.resolved) {
+            issues.push({
+              level: "warn",
+              message: `Mapping channel binding for ${item.clientModel} will fall back to key inheritance.`
+            });
+          }
+          if (item.contextOverflowModel && overflowBinding.requested && !overflowBinding.resolved) {
+            issues.push({
+              level: "warn",
+              message: `Overflow channel binding for ${item.clientModel} will keep only the model name.`
+            });
+          }
+          return issues;
+        }),
+      limit: MAX_KEY_MODEL_MAPPINGS,
+      readyMessage: (note) => note,
+      warningMessage: (warnCount) =>
+        t(
+          `发现 ${warnCount} 条映射告警，请导入后手动核对。`,
+          `${warnCount} mapping warnings detected. Review imported items after import.`
+        ),
+      errorMessage: (errorCount) =>
+        t(
+          `发现 ${errorCount} 条映射错误，请修正后再导入。`,
+          `${errorCount} mapping errors detected. Fix them before import.`
+        ),
+      appendLimitMessage: () =>
+        t(
+          "追加后将超过 128 条映射上限，请减少导入数量或改为覆盖导入。",
+          "Appending would exceed the 128-mapping limit. Reduce the import size or use replace."
+        ),
+      replaceLimitMessage: () =>
+        t(
+          "覆盖后仍会超过 128 条映射上限，请减少导入数量。",
+          "Replacing would still exceed the 128-mapping limit. Reduce the import size."
+        )
+    });
+  }, [keyForm.modelMappings.length, quickImportKeyMappingJson, t, channels]);
+  const compatPromptRulesAppendDisabled =
+    compatPromptRulesQuickImportPreview.state !== "ready" ||
+    compatPromptRulesQuickImportPreview.appendTotal > MAX_COMPAT_PROMPT_RULES;
+  const compatPromptRulesReplaceDisabled =
+    compatPromptRulesQuickImportPreview.state !== "ready" ||
+    compatPromptRulesQuickImportPreview.replaceTotal > MAX_COMPAT_PROMPT_RULES;
+  const upstreamModelsAppendDisabled =
+    upstreamModelsQuickImportPreview.state !== "ready" ||
+    upstreamModelsQuickImportPreview.appendTotal > MAX_UPSTREAM_MODELS;
+  const upstreamModelsReplaceDisabled =
+    upstreamModelsQuickImportPreview.state !== "ready" ||
+    upstreamModelsQuickImportPreview.replaceTotal > MAX_UPSTREAM_MODELS;
+  const keyMappingsAppendDisabled =
+    keyMappingsQuickImportPreview.state !== "ready" ||
+    keyMappingsQuickImportPreview.appendTotal > MAX_KEY_MODEL_MAPPINGS;
+  const keyMappingsReplaceDisabled =
+    keyMappingsQuickImportPreview.state !== "ready" ||
+    keyMappingsQuickImportPreview.replaceTotal > MAX_KEY_MODEL_MAPPINGS;
+  const bulkDialogLabels = useMemo(
+    () => ({
+      close: t("关闭", "Close"),
+      clear: t("清空", "Clear"),
+      loadClipboard: t("从剪贴板读取", "Load from Clipboard"),
+      chooseFile: t("选择 JSON 文件", "Choose JSON File"),
+      importCount: t("导入", "Import"),
+      enabledCount: t("启用", "Enabled"),
+      afterAppend: t("追加后", "After Append"),
+      afterReplace: t("覆盖后", "After Replace"),
+      warnings: t("警告", "Warnings"),
+      errors: t("错误", "Errors")
+    }),
+    [t]
+  );
   const promptLabCandidateModels = parsePromptLabModelListInput(promptLabCandidateModelsInput);
   const promptLabRunning =
     promptLabRunSummary?.status === "queued" || promptLabRunSummary?.status === "running";
@@ -3446,7 +5382,9 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                 {routeModule === "logs" ? (
                   <div className="tc-toolbar-left">
                     <span className="tc-label">{t("请求日志", "Request Logs")}</span>
-                    <Tag variant="light-outline">{t("当前", "Current")} {apiLogs.length} {t("条", "items")}</Tag>
+                    <Tag variant="light-outline">
+                      {t("命中", "Matched")} {filteredApiLogs.length} / {apiLogs.length}
+                    </Tag>
                     {loadingLogs ? <Tag theme="warning" variant="light-outline">{t("刷新中", "Refreshing")}</Tag> : null}
                   </div>
                 ) : routeModule === "calls" ? (
@@ -3483,9 +5421,13 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                   <div className="tc-toolbar-left">
                     <span className="tc-label">{t("提示词配置", "Prompt Config")}</span>
                     <Tag variant="light-outline">keywords={compatPromptKeywordCount}</Tag>
+                    <Tag variant="light-outline">exemptions={compatPromptExemptionCount}</Tag>
                     <Tag variant="light-outline">hint_chars={compatPromptHintLength}</Tag>
                     <Tag variant="light-outline">rules={compatPromptRuleCount}</Tag>
                     <Tag variant="light-outline">enabled={compatPromptRuleEnabledCount}</Tag>
+                    <Tag variant="light-outline">
+                      {t("可见", "Visible")} {compatPromptRuleVisibleItems.length}
+                    </Tag>
                     {savingCompatPromptConfig ? (
                       <Tag theme="warning" variant="light-outline">{t("保存中", "Saving")}</Tag>
                     ) : null}
@@ -3516,6 +5458,9 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                     ) : (
                       <Tag variant="light-outline">{t("新建草稿", "New Draft")}</Tag>
                     )}
+                    <Tag variant="light-outline">
+                      {t("命中", "Matched")} {filteredChannels.length}/{channels.length}
+                    </Tag>
                   </div>
                 ) : (
                   <div className="tc-toolbar-left">
@@ -3543,6 +5488,30 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                     ) : (
                       <Tag variant="light-outline">{t("新建草稿", "New Draft")}</Tag>
                     )}
+                    <Tag variant="light-outline">
+                      {t("命中", "Matched")} {filteredKeys.length}/{keys.length}
+                    </Tag>
+                    {routeModule === "access" ? (
+                      savingKey ? (
+                        <Tag theme="warning" variant="light-outline">
+                          {t("保存中", "Saving")}
+                        </Tag>
+                      ) : isNewKey ? (
+                        <Tag theme={isKeyDirty ? "warning" : "default"} variant="light-outline">
+                          {isKeyDirty
+                            ? t("新建未保存", "New Draft Unsaved")
+                            : t("新建草稿", "New Draft")}
+                        </Tag>
+                      ) : isKeyDirty ? (
+                        <Tag theme="warning" variant="light-outline">
+                          {t("草稿未保存", "Unsaved Draft")}
+                        </Tag>
+                      ) : (
+                        <Tag theme="success" variant="light-outline">
+                          {t("草稿已同步", "Draft Synced")}
+                        </Tag>
+                      )
+                    ) : null}
                   </div>
                 )}
 
@@ -3575,7 +5544,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                       <Button
                         variant="outline"
                         theme="default"
-                        onClick={() => void bootstrap()}
+                        onClick={() => void refreshKeyWorkspace()}
                         disabled={loading}
                       >
                         {t("刷新", "Refresh")}
@@ -3628,13 +5597,130 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                 </div>
               </div>
 
+              {routeModule === "upstream" ? (
+                <FilterSection
+                  title={t("渠道检索与筛选", "Channel Finder")}
+                  subtitle={t(
+                    "像企业后台一样先缩小范围，再进入具体渠道编辑。",
+                    "Narrow down the channel list before jumping into a specific channel."
+                  )}
+                >
+                  <div className="tc-log-toolbar">
+                    <div className="tc-log-toolbar-group tc-log-field-wide">
+                      <label className="tc-field">
+                        <span>{t("关键词", "Keyword")}</span>
+                        <Input
+                          value={channelSelectorSearch}
+                          onChange={(value) => setChannelSelectorSearch(value)}
+                          placeholder={t("搜索渠道名 / Provider / Base URL / 默认模型", "Search name / provider / base URL / default model")}
+                          clearable
+                        />
+                      </label>
+                    </div>
+                    <div className="tc-log-toolbar-group">
+                      <label className="tc-field">
+                        <span>{t("状态", "Status")}</span>
+                        <Select
+                          value={channelSelectorStatusFilter}
+                          options={[
+                            { label: t("全部状态", "All Status"), value: "all" },
+                            { label: t("启用", "Enabled"), value: "enabled" },
+                            { label: t("停用", "Disabled"), value: "disabled" }
+                          ]}
+                          style={{ width: 170 }}
+                          onChange={(value) =>
+                            setChannelSelectorStatusFilter(
+                              normalizeSelectValue(value) as SelectorStatusFilter
+                            )
+                          }
+                        />
+                      </label>
+                    </div>
+                    <div className="tc-log-toolbar-group">
+                      <label className="tc-field">
+                        <span>{t("供应商", "Provider")}</span>
+                        <Select
+                          value={channelSelectorProviderFilter}
+                          options={[
+                            { label: t("全部供应商", "All Providers"), value: "all" },
+                            ...PROVIDERS.map((item) => ({
+                              label: PROVIDER_META[item].label,
+                              value: item
+                            }))
+                          ]}
+                          style={{ width: 180 }}
+                          onChange={(value) => setChannelSelectorProviderFilter(normalizeSelectValue(value))}
+                        />
+                      </label>
+                    </div>
+                  </div>
+                  <ActiveFilterSummary
+                    items={channelSelectorFilterChips}
+                    onClearAll={() => {
+                      setChannelSelectorSearch("");
+                      setChannelSelectorStatusFilter("all");
+                      setChannelSelectorProviderFilter("all");
+                    }}
+                  />
+                </FilterSection>
+              ) : routeModule === "access" || routeModule === "export" || routeModule === "runtime" ? (
+                <FilterSection
+                  title={t("Key 检索与筛选", "Key Finder")}
+                  subtitle={t(
+                    "先按名称、状态和渠道范围定位目标 Key，再进入接入、导出或运行时操作。",
+                    "Locate the right key by name and status before editing access, export, or runtime settings."
+                  )}
+                >
+                  <div className="tc-log-toolbar">
+                    <div className="tc-log-toolbar-group tc-log-field-wide">
+                      <label className="tc-field">
+                        <span>{t("关键词", "Keyword")}</span>
+                        <Input
+                          value={keySelectorSearch}
+                          onChange={(value) => setKeySelectorSearch(value)}
+                          placeholder={t("搜索 Key 名称 / 本地 Key / 渠道 / 默认模型", "Search key name / local key / channel / default model")}
+                          clearable
+                        />
+                      </label>
+                    </div>
+                    <div className="tc-log-toolbar-group">
+                      <label className="tc-field">
+                        <span>{t("状态", "Status")}</span>
+                        <Select
+                          value={keySelectorStatusFilter}
+                          options={[
+                            { label: t("全部状态", "All Status"), value: "all" },
+                            { label: t("启用", "Enabled"), value: "enabled" },
+                            { label: t("停用", "Disabled"), value: "disabled" }
+                          ]}
+                          style={{ width: 170 }}
+                          onChange={(value) =>
+                            setKeySelectorStatusFilter(
+                              normalizeSelectValue(value) as SelectorStatusFilter
+                            )
+                          }
+                        />
+                      </label>
+                    </div>
+                  </div>
+                  <ActiveFilterSummary
+                    items={keySelectorFilterChips}
+                    onClearAll={() => {
+                      setKeySelectorSearch("");
+                      setKeySelectorStatusFilter("all");
+                    }}
+                  />
+                </FilterSection>
+              ) : null}
+
               <div className="tc-meta-row">
                 <Tag variant="light-outline">wire_api={wireApi}</Tag>
                 {routeModule === "logs" ? (
                   <>
-                    <Tag variant="light-outline">logs={apiLogs.length}</Tag>
+                    <Tag variant="light-outline">logs={filteredApiLogs.length}</Tag>
+                    <Tag variant="light-outline">loaded={apiLogs.length}</Tag>
                     <Tag variant="light-outline">
-                      latest={formatCnDate(apiLogs[0]?.createdAt ?? "")}
+                      latest={formatCnDate(filteredApiLogs[0]?.createdAt ?? "")}
                     </Tag>
                   </>
                 ) : routeModule === "calls" ? (
@@ -3671,6 +5757,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                 ) : routeModule === "prompt" ? (
                   <>
                     <Tag variant="light-outline">keywords={compatPromptKeywordCount}</Tag>
+                    <Tag variant="light-outline">exemptions={compatPromptExemptionCount}</Tag>
                     <Tag variant="light-outline">hint_chars={compatPromptHintLength}</Tag>
                     <Tag variant="light-outline">rules={compatPromptRuleCount}</Tag>
                     <Tag variant="light-outline">enabled={compatPromptRuleEnabledCount}</Tag>
@@ -3681,7 +5768,9 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                     <Tag variant="light-outline">
                       provider={PROVIDER_META[channelForm.provider].label}
                     </Tag>
-                    <Tag variant="light-outline">models={channelForm.upstreamModels.length}</Tag>
+                    <Tag variant="light-outline">
+                      models={channelModelVisibleItems.length}/{channelForm.upstreamModels.length}
+                    </Tag>
                     <Tag variant="light-outline">
                       bind_keys={selectedChannel?.keyCount ?? 0}
                     </Tag>
@@ -3694,6 +5783,9 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                     <Tag variant="light-outline">channel={selectedKey?.upstreamChannelName ?? "-"}</Tag>
                     <Tag variant="light-outline">
                       provider={selectedKey ? PROVIDER_META[selectedKey.provider].label : "-"}
+                    </Tag>
+                    <Tag variant="light-outline">
+                      mappings={keyMappingVisibleItems.length}/{keyForm.modelMappings.length}
                     </Tag>
                     <Tag variant="light-outline">
                       updated={formatCnDate(selectedKey?.updatedAt ?? "")}
@@ -3741,6 +5833,17 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                   keyOverflowModelOptions={keyOverflowModelOptions}
                   mappingOverflowModelOptions={mappingOverflowModelOptions}
                   selectedChannelForKey={selectedChannelForKey}
+                  keyMappingSearch={keyMappingSearch}
+                  setKeyMappingSearch={setKeyMappingSearch}
+                  keyMappingStatusFilter={keyMappingStatusFilter}
+                  setKeyMappingStatusFilter={setKeyMappingStatusFilter}
+                  keyMappingBindingFilter={keyMappingBindingFilter}
+                  setKeyMappingBindingFilter={setKeyMappingBindingFilter}
+                  keyMappingOverflowFilter={keyMappingOverflowFilter}
+                  setKeyMappingOverflowFilter={setKeyMappingOverflowFilter}
+                  keyMappingVisibleItems={keyMappingVisibleItems}
+                  keyMappingActiveFilters={keyMappingActiveFilters}
+                  resetKeyMappingFilters={resetKeyMappingFilters}
                   isNewKey={isNewKey}
                   handleMenuRoute={handleMenuRoute}
                   generateLocalKey={generateLocalKey}
@@ -3767,18 +5870,30 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
               {routeModule === "prompt" ? (
                 <SettingsPromptPanel
                   t={t}
+                  normalizeSelectValue={normalizeSelectValue}
                   compatPromptKeywordsInput={compatPromptKeywordsInput}
                   setCompatPromptKeywordsInput={setCompatPromptKeywordsInput}
+                  compatPromptExemptionsInput={compatPromptExemptionsInput}
+                  setCompatPromptExemptionsInput={setCompatPromptExemptionsInput}
+                  compatPromptExemptionCount={compatPromptExemptionCount}
                   compatPromptHintInput={compatPromptHintInput}
                   setCompatPromptHintInput={setCompatPromptHintInput}
                   compatPromptRuleCount={compatPromptRuleCount}
                   compatPromptRuleEnabledCount={compatPromptRuleEnabledCount}
                   compatPromptRuleSearch={compatPromptRuleSearch}
                   setCompatPromptRuleSearch={setCompatPromptRuleSearch}
+                  compatPromptRuleStatusFilter={compatPromptRuleStatusFilter}
+                  setCompatPromptRuleStatusFilter={setCompatPromptRuleStatusFilter}
+                  compatPromptRuleProviderFilter={compatPromptRuleProviderFilter}
+                  setCompatPromptRuleProviderFilter={setCompatPromptRuleProviderFilter}
+                  compatPromptRuleProviderOptions={compatPromptRuleProviderOptions}
+                  compatPromptRuleIssueFilter={compatPromptRuleIssueFilter}
+                  setCompatPromptRuleIssueFilter={setCompatPromptRuleIssueFilter}
+                  compatPromptRuleActiveFilters={compatPromptRuleActiveFilters}
+                  resetPromptRuleFilters={resetPromptRuleFilters}
                   addCompatPromptRule={addCompatPromptRule}
-                  openCompatPromptRulesFileImporter={openCompatPromptRulesFileImporter}
-                  compatPromptRulesFileInputRef={compatPromptRulesFileInputRef}
-                  handleCompatPromptRulesFileChange={handleCompatPromptRulesFileChange}
+                  handleOpenCompatPromptRulesImportDialog={handleOpenCompatPromptRulesImportDialog}
+                  handleOpenCompatPromptRulesExportDialog={handleOpenCompatPromptRulesExportDialog}
                   compatPromptUpstreamModelSuggestions={compatPromptUpstreamModelSuggestions}
                   compatPromptRuleVisibleItems={compatPromptRuleVisibleItems}
                   duplicateCompatPromptRule={duplicateCompatPromptRule}
@@ -3802,10 +5917,12 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                 <SettingsExportPanel
                   t={t}
                   copyCcSwitchCodexAuthJson={copyCcSwitchCodexAuthJson}
+                  downloadCcSwitchCodexAuthJson={downloadCcSwitchCodexAuthJson}
                   loading={loading}
                   keyForm={keyForm}
                   codexAuthJsonPreview={codexAuthJsonPreview}
                   copyCcSwitchCodexConfigToml={copyCcSwitchCodexConfigToml}
+                  downloadCcSwitchCodexConfigToml={downloadCcSwitchCodexConfigToml}
                   codexConfigTomlPreview={codexConfigTomlPreview}
                   nativeCodexApplyPatchToolType={nativeCodexApplyPatchToolType}
                   setNativeCodexApplyPatchToolType={setNativeCodexApplyPatchToolType}
@@ -3817,8 +5934,10 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                   formatGlmThinkingThresholdLabel={formatGlmThinkingThresholdLabel}
                   selectedKeyId={selectedKeyId}
                   copyNativeCodexBundleFile={copyNativeCodexBundleFile}
+                  downloadNativeCodexBundleFile={downloadNativeCodexBundleFile}
                   nativeCodexEmptyState={nativeCodexEmptyState}
                   copyCcSwitchClaudeConfigJson={copyCcSwitchClaudeConfigJson}
+                  downloadCcSwitchClaudeConfigJson={downloadCcSwitchClaudeConfigJson}
                   claudeConfigPreview={claudeConfigPreview}
                   openCcSwitchCodexImport={openCcSwitchCodexImport}
                   openCcSwitchClaudeImport={openCcSwitchClaudeImport}
@@ -3857,6 +5976,17 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                   resolveVisionModelOptions={resolveVisionModelOptions}
                   testPrompt={testPrompt}
                   setTestPrompt={setTestPrompt}
+                  channelModelSearch={channelModelSearch}
+                  setChannelModelSearch={setChannelModelSearch}
+                  channelModelStatusFilter={channelModelStatusFilter}
+                  setChannelModelStatusFilter={setChannelModelStatusFilter}
+                  channelModelWireApiFilter={channelModelWireApiFilter}
+                  setChannelModelWireApiFilter={setChannelModelWireApiFilter}
+                  channelModelVisionFilter={channelModelVisionFilter}
+                  setChannelModelVisionFilter={setChannelModelVisionFilter}
+                  channelModelVisibleItems={channelModelVisibleItems}
+                  channelModelActiveFilters={channelModelActiveFilters}
+                  resetChannelModelFilters={resetChannelModelFilters}
                 />
               ) : null}
 
@@ -3870,7 +6000,22 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                   normalizeSelectValue={normalizeSelectValue}
                   clearApiLogs={clearApiLogs}
                   loadingLogs={loadingLogs}
-                  apiLogs={apiLogs}
+                  apiLogs={filteredApiLogs}
+                  loadedApiLogCount={apiLogs.length}
+                  apiLogKeywordFilter={apiLogKeywordFilter}
+                  setApiLogKeywordFilter={setApiLogKeywordFilter}
+                  apiLogRouteFilter={apiLogRouteFilter}
+                  apiLogRouteOptions={apiLogRouteOptions}
+                  setApiLogRouteFilter={setApiLogRouteFilter}
+                  apiLogMethodFilter={apiLogMethodFilter}
+                  apiLogMethodOptions={apiLogMethodOptions}
+                  setApiLogMethodFilter={setApiLogMethodFilter}
+                  apiLogStatusFilter={apiLogStatusFilter}
+                  setApiLogStatusFilter={setApiLogStatusFilter}
+                  apiLogErrorOnly={apiLogErrorOnly}
+                  setApiLogErrorOnly={setApiLogErrorOnly}
+                  apiLogActiveFilters={apiLogActiveFilters}
+                  resetApiLogFilters={resetApiLogFilters}
                   statusClassName={statusClassName}
                   statusTheme={statusTheme}
                 />
@@ -3925,6 +6070,12 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                   loadingAiCallLogs={loadingAiCallLogs}
                   aiCallStats={aiCallStats}
                   deferredAiCallLogs={deferredAiCallLogs}
+                  aiCallActiveFilters={aiCallActiveFilters}
+                  aiCallSavedPresets={aiCallSavedPresets}
+                  aiCallSelectedPresetId={aiCallSelectedPresetId}
+                  applyAiCallPresetById={applyAiCallPresetById}
+                  saveAiCallPreset={saveAiCallPreset}
+                  deleteAiCallPreset={deleteAiCallPreset}
                   expandedAiCallLogIdSet={expandedAiCallLogIdSet}
                   toggleAiCallLogExpanded={toggleAiCallLogExpanded}
                   setPreviewImage={setPreviewImage}
@@ -3949,13 +6100,35 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                   usageKeyFilter={usageKeyFilter}
                   usageKeyOptions={usageKeyOptions}
                   setUsageKeyFilter={setUsageKeyFilter}
+                  usageModelFilter={usageModelFilter}
+                  usageModelOptions={usageModelOptions}
+                  setUsageModelFilter={setUsageModelFilter}
+                  usageRouteFilter={usageRouteFilter}
+                  usageRouteOptions={usageRouteOptions}
+                  setUsageRouteFilter={setUsageRouteFilter}
+                  usageRequestWireFilter={usageRequestWireFilter}
+                  usageRequestWireOptions={usageRequestWireOptions}
+                  setUsageRequestWireFilter={setUsageRequestWireFilter}
+                  usageUpstreamWireFilter={usageUpstreamWireFilter}
+                  usageUpstreamWireOptions={usageUpstreamWireOptions}
+                  setUsageUpstreamWireFilter={setUsageUpstreamWireFilter}
+                  usageStreamFilter={usageStreamFilter}
+                  usageStreamOptions={aiCallStreamOptions}
+                  setUsageStreamFilter={setUsageStreamFilter}
                   usageTimelineLimit={usageTimelineLimit}
                   setUsageTimelineLimit={setUsageTimelineLimit}
                   loadUsageReport={loadUsageReport}
                   clearUsageReport={clearUsageReport}
+                  resetUsageFilters={resetUsageFilters}
                   loadingUsage={loadingUsage}
                   usageReport={usageReport}
                   locale={locale}
+                  usageActiveFilters={usageActiveFilters}
+                  usageSavedPresets={usageSavedPresets}
+                  usageSelectedPresetId={usageSelectedPresetId}
+                  applyUsagePresetById={applyUsagePresetById}
+                  saveUsagePreset={saveUsagePreset}
+                  deleteUsagePreset={deleteUsagePreset}
                   usagePrimaryMetricMeta={usagePrimaryMetricMeta}
                   resolvedUsageBucketMinutes={resolvedUsageBucketMinutes}
                   usageTimelineChartOption={usageTimelineChartOption}
@@ -3973,6 +6146,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                   gatewayOrigin={gatewayOrigin}
                   apiDocExamples={apiDocExamples}
                   copyTextToClipboard={copyTextToClipboard}
+                  downloadApiDocExample={downloadApiDocExample}
                 />
               ) : null}
 
@@ -3990,10 +6164,44 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                   runtimeSwitchEndpoint={runtimeSwitchEndpoint}
                   runtimeApiExamples={runtimeApiExamples}
                   copyTextToClipboard={copyTextToClipboard}
+                  downloadRuntimeApiExample={downloadRuntimeApiExample}
                 />
               ) : null}
               {routeModule === "access" ? (
                 <footer className="tc-footer-actions">
+                  <div className="tc-footer-meta">
+                    <p className={`tc-tip ${isKeyDirty ? "warn" : "ok"}`}>
+                      {isNewKey
+                        ? isKeyDirty
+                          ? t(
+                              "当前是新建 Key 草稿。保存前切换、刷新或离开页面时都会先提醒，避免新增内容直接消失。",
+                              "This is a new key draft. Switching, refreshing, or leaving will now warn you first so new content does not disappear."
+                            )
+                          : t(
+                              "当前是新建 Key 草稿。先补全名称、渠道和映射后再创建，页面会继续停留在刚创建成功的 Key 上。",
+                              "This is a new key draft. Fill in the name, upstream, and mappings first, then create it. The page will stay on the newly created key afterward."
+                            )
+                        : isKeyDirty
+                          ? t(
+                              "当前 Key 还有未保存修改。你可以先保存，也可以点“恢复已保存”撤回这次编辑。",
+                              "This key has unsaved changes. Save them now, or use Restore Saved to roll back this edit."
+                            )
+                          : t(
+                              "当前草稿已与已保存数据同步。新增映射若未填完整，保存时会直接提示，不会再被静默丢弃。",
+                              "The draft matches the saved data. Incomplete mappings are now blocked with a clear prompt instead of being silently dropped."
+                            )}
+                    </p>
+                  </div>
+                  {isKeyDirty ? (
+                    <Button
+                      variant="outline"
+                      theme="default"
+                      onClick={restoreKeyDraft}
+                      disabled={savingKey || loading}
+                    >
+                      {isNewKey ? t("重置草稿", "Reset Draft") : t("恢复已保存", "Restore Saved")}
+                    </Button>
+                  ) : null}
                   <Button
                     theme="primary"
                     loading={savingKey}
@@ -4054,115 +6262,166 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
               ) : null}
             </Dialog>
 
-            <Dialog
+            <input
+              ref={bulkJsonFileInputRef}
+              type="file"
+              accept=".json,application/json"
+              style={{ display: "none" }}
+              onChange={(event) => void handleBulkJsonFileChange(event)}
+            />
+
+            <BulkJsonImportDialog
+              visible={compatPromptRulesImportDialogVisible}
+              title={t("批量导入模型规则", "Bulk Import Model Rules")}
+              description={t(
+                "先粘贴 JSON，或直接从剪贴板 / 文件载入；确认摘要后再决定追加还是覆盖。导入只更新当前草稿，仍需点击页面底部“保存提示词配置”才会生效。",
+                "Paste JSON first, or load it from the clipboard / a file; then choose append or replace after reviewing the summary. Import only updates the current draft, so you still need to click Save Prompt Config at the bottom."
+              )}
+              placeholder='{"modelPromptRules":[...]}\n\nor\n[{"id":"rule-1","upstreamModelPattern":"gpt-4.1-mini","hint":"..."}]'
+              value={compatPromptRulesQuickImportJson}
+              sourceLabel={compatPromptRulesQuickImportSource}
+              idleHint={t(
+                "支持规则数组，或包含 modelPromptRules / compatPromptConfig.modelPromptRules 的对象。",
+                "Supports either a rules array, or an object containing modelPromptRules / compatPromptConfig.modelPromptRules."
+              )}
+              labels={bulkDialogLabels}
+              preview={compatPromptRulesQuickImportPreview}
+              appendLabel={t("追加到当前规则", "Append to Current Rules")}
+              replaceLabel={t("覆盖当前规则", "Replace Current Rules")}
+              appendDisabled={compatPromptRulesAppendDisabled}
+              replaceDisabled={compatPromptRulesReplaceDisabled}
+              onChange={handleCompatPromptRulesQuickImportJsonChange}
+              onClose={() => setCompatPromptRulesImportDialogVisible(false)}
+              onClear={() => clearBulkJsonImportDraft("compatPromptRules")}
+              onLoadClipboard={() => void loadCompatPromptRulesFromClipboardToDraft()}
+              onChooseFile={() => openCompatPromptRulesFileImporter()}
+              onAppend={() => applyCompatPromptRulesQuickImport("append")}
+              onReplace={() => applyCompatPromptRulesQuickImport("replace")}
+            />
+
+            <BulkJsonExportDialog
+              visible={compatPromptRulesExportDialogVisible}
+              title={t("批量导出模型规则", "Bulk Export Model Rules")}
+              description={t(
+                "导出使用标准对象格式 `{ modelPromptRules: [...] }`，可直接用于剪贴板分享、文件备份，或回填到导入弹窗中。",
+                "Export uses the standard `{ modelPromptRules: [...] }` object format, which is ready for clipboard sharing, file backup, or round-tripping into the import dialog."
+              )}
+              preview={compatPromptRulesExportPreviewJson}
+              stats={[
+                { label: t("当前", "Current"), value: compatPromptRuleCount },
+                { label: t("启用", "Enabled"), value: compatPromptRuleEnabledCount }
+              ]}
+              closeLabel={t("关闭", "Close")}
+              copyLabel={t("复制到剪贴板", "Copy to Clipboard")}
+              downloadLabel={t("下载 JSON 文件", "Download JSON File")}
+              onClose={() => setCompatPromptRulesExportDialogVisible(false)}
+              onCopy={() => void copyCompatPromptRulesToClipboard("wrapped")}
+              onDownload={() => downloadCompatPromptRulesJsonFile("wrapped")}
+            />
+
+            <BulkJsonExportDialog
               visible={quickExportDialogVisible}
-              width="min(92vw, 800px)"
-              header={t("导出模型池", "Export Model Pool")}
-              cancelBtn={t("关闭", "Close")}
-              confirmBtn={t("复制到剪贴板", "Copy to Clipboard")}
-              onConfirm={() => void handleQuickCopyModels()}
+              title={t("批量导出模型池", "Bulk Export Model Pool")}
+              description={t(
+                "以下 JSON 可保存到文件或粘贴到其他渠道的「批量导入」中。内部 ID 和 API Key 已移除，可安全分享。",
+                "Save this JSON to a file or paste it into another channel's Bulk Import dialog. Internal IDs and API keys are stripped for safe sharing."
+              )}
+              preview={upstreamModelsExportPreviewJson}
+              stats={[
+                { label: t("当前", "Current"), value: channelForm.upstreamModels.length },
+                {
+                  label: t("启用", "Enabled"),
+                  value: channelForm.upstreamModels.filter((item) => item.enabled).length
+                }
+              ]}
+              closeLabel={t("关闭", "Close")}
+              copyLabel={t("复制到剪贴板", "Copy to Clipboard")}
+              downloadLabel={t("下载 JSON 文件", "Download JSON File")}
               onClose={() => setQuickExportDialogVisible(false)}
-            >
-              <div className="tc-quick-io-content">
-                <p className="tc-upstream-advice">
-                  {t(
-                    "以下 JSON 可保存到文件或粘贴到其他渠道的「导入模型池」中。内部 ID 和 API Key 已移除，可安全分享。",
-                    "Save this JSON to a file or paste into another channel's Import Model Pool. Internal IDs and API keys are stripped for safe sharing."
-                  )}
-                </p>
-                <CodeBlock value={quickExportJson} language="json" />
-              </div>
-            </Dialog>
+              onCopy={() => void handleQuickCopyModels()}
+              onDownload={downloadUpstreamModelsJsonFile}
+            />
 
-            <Dialog
+            <BulkJsonImportDialog
               visible={quickImportDialogVisible}
-              width="min(92vw, 800px)"
-              header={t("导入模型池", "Import Model Pool")}
-              cancelBtn={t("取消", "Cancel")}
-              confirmBtn={t("追加到现有模型", "Append to Existing")}
-              onConfirm={handleQuickImportConfirm}
+              title={t("批量导入模型池", "Bulk Import Model Pool")}
+              description={t(
+                "先粘贴 JSON，或直接从剪贴板 / 文件载入；确认摘要后再决定追加还是覆盖。导入只更新当前草稿，仍需点击页面底部“保存渠道”才会生效。",
+                "Paste JSON first, or load it from the clipboard / a file; then choose append or replace after reviewing the summary. Import only updates the current draft, so you still need to click Save Upstream at the bottom."
+              )}
+              placeholder='{"version":1,"models":[...]}\n\nor\n[{"model":"glm-5","name":"GLM-5",...}]'
+              value={quickImportJson}
+              sourceLabel={quickImportSource}
+              idleHint={t(
+                "支持模型快照 `{ models: [...] }`，也支持直接粘贴模型数组。",
+                "Supports model snapshots in `{ models: [...] }`, or a bare model array."
+              )}
+              labels={bulkDialogLabels}
+              preview={upstreamModelsQuickImportPreview}
+              appendLabel={t("追加到当前模型池", "Append to Current Model Pool")}
+              replaceLabel={t("覆盖当前模型池", "Replace Current Model Pool")}
+              appendDisabled={upstreamModelsAppendDisabled}
+              replaceDisabled={upstreamModelsReplaceDisabled}
+              onChange={handleQuickImportJsonChange}
               onClose={() => setQuickImportDialogVisible(false)}
-            >
-              <div className="tc-quick-io-content">
-                <p className="tc-upstream-advice">
-                  {t(
-                    "粘贴导出的 JSON，将模型追加到当前渠道模型池末尾。也可直接粘贴模型数组 [{ ... }]。",
-                    "Paste exported JSON to append models to the current channel pool. You can also paste a bare model array [{ ... }]."
-                  )}
-                </p>
-                <Textarea
-                  placeholder='{"version":1,"models":[...]}\n\nor\n[{"model":"glm-5","name":"GLM-5",...}]'
-                  value={quickImportJson}
-                  onChange={(value) => setQuickImportJson(value)}
-                  autosize
-                />
-                <div className="tc-quick-io-actions">
-                  <Button
-                    theme="danger"
-                    variant="outline"
-                    onClick={handleQuickImportReplace}
-                    disabled={!quickImportJson.trim()}
-                  >
-                    {t("替换全部模型", "Replace All Models")}
-                  </Button>
-                </div>
-              </div>
-            </Dialog>
+              onClear={() => clearBulkJsonImportDraft("upstreamModels")}
+              onLoadClipboard={() => void loadUpstreamModelsFromClipboardToDraft()}
+              onChooseFile={openUpstreamModelsFileImporter}
+              onAppend={handleQuickImportConfirm}
+              onReplace={handleQuickImportReplace}
+            />
 
-            <Dialog
+            <BulkJsonExportDialog
               visible={quickExportKeyMappingDialogVisible}
-              width="min(92vw, 800px)"
-              header={t("导出模型映射", "Export Model Mappings")}
-              cancelBtn={t("关闭", "Close")}
-              confirmBtn={t("复制到剪贴板", "Copy to Clipboard")}
-              onConfirm={() => void handleQuickCopyKeyMappings()}
+              title={t("批量导出模型映射", "Bulk Export Model Mappings")}
+              description={t(
+                "以下 JSON 可粘贴到其他本地 Key 的「批量导入」中。内部映射 ID 已移除；映射级渠道绑定会附带渠道名，导入时优先按渠道名恢复。",
+                "Paste this JSON into another local key's Bulk Import dialog. Internal mapping IDs are removed, and mapping-level upstream bindings include channel names so import can restore them by name first."
+              )}
+              preview={keyMappingsExportPreviewJson}
+              stats={[
+                { label: t("当前", "Current"), value: keyForm.modelMappings.length },
+                {
+                  label: t("启用", "Enabled"),
+                  value: keyForm.modelMappings.filter((item) => item.enabled).length
+                }
+              ]}
+              closeLabel={t("关闭", "Close")}
+              copyLabel={t("复制到剪贴板", "Copy to Clipboard")}
+              downloadLabel={t("下载 JSON 文件", "Download JSON File")}
               onClose={() => setQuickExportKeyMappingDialogVisible(false)}
-            >
-              <div className="tc-quick-io-content">
-                <p className="tc-upstream-advice">
-                  {t(
-                    "以下 JSON 可粘贴到其他本地 Key 的「导入映射」中。内部映射 ID 已移除；映射级渠道绑定会附带渠道名，导入时优先按渠道名恢复。",
-                    "Paste this JSON into another local key's Import Mappings dialog. Internal mapping IDs are removed, and mapping-level upstream bindings include channel names so import can restore them by name first."
-                  )}
-                </p>
-                <CodeBlock value={quickExportKeyMappingJson} language="json" />
-              </div>
-            </Dialog>
+              onCopy={() => void handleQuickCopyKeyMappings()}
+              onDownload={downloadKeyMappingsJsonFile}
+            />
 
-            <Dialog
+            <BulkJsonImportDialog
               visible={quickImportKeyMappingDialogVisible}
-              width="min(92vw, 800px)"
-              header={t("导入模型映射", "Import Model Mappings")}
-              cancelBtn={t("取消", "Cancel")}
-              confirmBtn={t("追加到现有映射", "Append to Existing")}
-              onConfirm={() => handleQuickImportKeyMappings(false)}
+              title={t("批量导入模型映射", "Bulk Import Model Mappings")}
+              description={t(
+                "先粘贴 JSON，或直接从剪贴板 / 文件载入；确认摘要后再决定追加还是覆盖。导入只更新当前草稿，仍需点击页面底部“保存 Key”才会生效。",
+                "Paste JSON first, or load it from the clipboard / a file; then choose append or replace after reviewing the summary. Import only updates the current draft, so you still need to click Save Key at the bottom."
+              )}
+              placeholder='{"version":1,"mappings":[...]}\n\nor\n[{"clientModel":"gpt-5.4","targetModel":"glm-5",...}]'
+              value={quickImportKeyMappingJson}
+              sourceLabel={quickImportKeyMappingSource}
+              idleHint={t(
+                "支持映射快照 `{ mappings: [...] }`，也支持直接粘贴映射数组。",
+                "Supports mapping snapshots in `{ mappings: [...] }`, or a bare mapping array."
+              )}
+              labels={bulkDialogLabels}
+              preview={keyMappingsQuickImportPreview}
+              appendLabel={t("追加到当前映射", "Append to Current Mappings")}
+              replaceLabel={t("覆盖当前映射", "Replace Current Mappings")}
+              appendDisabled={keyMappingsAppendDisabled}
+              replaceDisabled={keyMappingsReplaceDisabled}
+              onChange={handleQuickImportKeyMappingJsonChange}
               onClose={() => setQuickImportKeyMappingDialogVisible(false)}
-            >
-              <div className="tc-quick-io-content">
-                <p className="tc-upstream-advice">
-                  {t(
-                    "粘贴导出的 JSON，将映射追加到当前 Key。也可直接粘贴映射数组 [{ ... }]。导入只更新表单，仍需点击页面底部「保存 Key」。",
-                    "Paste exported JSON to append mappings to the current key. You can also paste a bare mapping array [{ ... }]. Import updates only the form, so you still need to click Save Key at the bottom."
-                  )}
-                </p>
-                <Textarea
-                  placeholder='{"version":1,"mappings":[...]}\n\nor\n[{"clientModel":"gpt-5.4","targetModel":"glm-5",...}]'
-                  value={quickImportKeyMappingJson}
-                  onChange={(value) => setQuickImportKeyMappingJson(value)}
-                  autosize
-                />
-                <div className="tc-quick-io-actions">
-                  <Button
-                    theme="danger"
-                    variant="outline"
-                    onClick={() => handleQuickImportKeyMappings(true)}
-                    disabled={!quickImportKeyMappingJson.trim()}
-                  >
-                    {t("替换全部映射", "Replace All Mappings")}
-                  </Button>
-                </div>
-              </div>
-            </Dialog>
+              onClear={() => clearBulkJsonImportDraft("keyMappings")}
+              onLoadClipboard={() => void loadKeyMappingsFromClipboardToDraft()}
+              onChooseFile={openKeyMappingsFileImporter}
+              onAppend={() => handleQuickImportKeyMappings(false)}
+              onReplace={() => handleQuickImportKeyMappings(true)}
+            />
           </Layout.Content>
         </Layout>
       </Layout>

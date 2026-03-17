@@ -30,6 +30,7 @@ import {
   shouldShowGlmThinkingThreshold
 } from "@/components/console/settings-console-helpers";
 import type { CodexApplyPatchToolType } from "@/lib/codex-export";
+import { ActiveFilterSummary } from "@/components/console/filters";
 
 type AnyStateSetter = (updater: any | ((prev: any) => any)) => void;
 type AnyItemUpdater = (id: any, updater: (prev: any) => any) => void;
@@ -61,18 +62,30 @@ type SettingsUpstreamPanelProps = {
 export function SettingsPromptPanel(props: SettingsPromptPanelProps) {
   const {
     t,
+    normalizeSelectValue,
     compatPromptKeywordsInput,
     setCompatPromptKeywordsInput,
+    compatPromptExemptionsInput,
+    setCompatPromptExemptionsInput,
+    compatPromptExemptionCount,
     compatPromptHintInput,
     setCompatPromptHintInput,
     compatPromptRuleCount,
     compatPromptRuleEnabledCount,
     compatPromptRuleSearch,
     setCompatPromptRuleSearch,
+    compatPromptRuleStatusFilter,
+    setCompatPromptRuleStatusFilter,
+    compatPromptRuleProviderFilter,
+    setCompatPromptRuleProviderFilter,
+    compatPromptRuleProviderOptions,
+    compatPromptRuleIssueFilter,
+    setCompatPromptRuleIssueFilter,
+    compatPromptRuleActiveFilters,
+    resetPromptRuleFilters,
     addCompatPromptRule,
-    openCompatPromptRulesFileImporter,
-    compatPromptRulesFileInputRef,
-    handleCompatPromptRulesFileChange,
+    handleOpenCompatPromptRulesImportDialog,
+    handleOpenCompatPromptRulesExportDialog,
     compatPromptUpstreamModelSuggestions,
     compatPromptRuleVisibleItems,
     duplicateCompatPromptRule,
@@ -96,8 +109,8 @@ export function SettingsPromptPanel(props: SettingsPromptPanelProps) {
                   <h3>{t("网关注入提示词配置", "Gateway Injected Prompt Config")}</h3>
                   <p className="tc-upstream-advice">
                     {t(
-                      "这里控制 AGENTS.md 检测场景下注入策略：未命中规则时使用默认提示词；命中上游真实模型规则时，用该模型专属提示词替换默认提示词。保存后会影响后续请求。",
-                      "This controls AGENTS.md injection behavior: use the default hint when no rule matches; when a real-upstream-model rule matches, its model-specific hint replaces the default hint."
+                      "这里控制 AGENTS.md 检测场景下注入策略：先检查豁免名单，命中则完全跳过注入；未命中规则时使用默认提示词；命中上游真实模型规则时，用该模型专属提示词替换默认提示词。保存后会影响后续请求。",
+                      "This controls AGENTS.md injection behavior: exemptions are checked first and skip injection entirely; otherwise the default hint is used when no rule matches, and a model-specific hint replaces the default when a real-upstream-model rule matches."
                     )}
                   </p>
 
@@ -109,6 +122,19 @@ export function SettingsPromptPanel(props: SettingsPromptPanelProps) {
                         onChange={(value) => setCompatPromptKeywordsInput(value)}
                         autosize={{ minRows: 4, maxRows: 8 }}
                         placeholder={"AGENTS.md\nAGENTS.MD\nagents.md"}
+                      />
+                    </label>
+
+                    <label className="tc-field">
+                      <span>{t("提示词豁免名单（每行一个）", "Prompt Exemptions (one per line)")}</span>
+                      <Textarea
+                        value={compatPromptExemptionsInput}
+                        onChange={(value) => setCompatPromptExemptionsInput(value)}
+                        autosize={{ minRows: 4, maxRows: 8 }}
+                        placeholder={t(
+                          "gpt-*\nopenai:gpt-5*",
+                          "gpt-*\nopenai:gpt-5*"
+                        )}
                       />
                     </label>
 
@@ -130,6 +156,9 @@ export function SettingsPromptPanel(props: SettingsPromptPanelProps) {
                         {t("当前", "Current")} {compatPromptRuleCount} {t("条", "items")}
                       </Tag>
                       <Tag variant="light-outline">
+                        {t("豁免", "Exemptions")} {compatPromptExemptionCount}
+                      </Tag>
+                      <Tag variant="light-outline">
                         {t("启用", "Enabled")} {compatPromptRuleEnabledCount}
                       </Tag>
                     </div>
@@ -140,6 +169,40 @@ export function SettingsPromptPanel(props: SettingsPromptPanelProps) {
                         clearable
                         placeholder={t("搜索规则 ID / 模型 / 提示词", "Search rule ID / model / hint")}
                         style={{ width: 280 }}
+                      />
+                      <Select
+                        value={compatPromptRuleStatusFilter}
+                        options={[
+                          { label: t("全部状态", "All Status"), value: "all" },
+                          { label: t("启用", "Enabled"), value: "enabled" },
+                          { label: t("停用", "Disabled"), value: "disabled" }
+                        ]}
+                        style={{ width: 150 }}
+                        onChange={(value) => setCompatPromptRuleStatusFilter(normalizeSelectValue(value))}
+                      />
+                      <Select
+                        value={compatPromptRuleProviderFilter}
+                        options={[
+                          { label: t("全部供应商", "All Providers"), value: "all" },
+                          ...compatPromptRuleProviderOptions.map((item: string) => ({
+                            label: item,
+                            value: item
+                          }))
+                        ]}
+                        style={{ width: 180 }}
+                        onChange={(value) => setCompatPromptRuleProviderFilter(normalizeSelectValue(value))}
+                      />
+                      <Select
+                        value={compatPromptRuleIssueFilter}
+                        options={[
+                          { label: t("全部风险", "All Risk States"), value: "all" },
+                          { label: t("仅错误", "Errors Only"), value: "error" },
+                          { label: t("仅警告", "Warnings Only"), value: "warn" },
+                          { label: t("全部风险项", "Attention Items"), value: "attention" },
+                          { label: t("仅干净规则", "Clean Rules"), value: "clean" }
+                        ]}
+                        style={{ width: 180 }}
+                        onChange={(value) => setCompatPromptRuleIssueFilter(normalizeSelectValue(value))}
                       />
                       <Button
                         theme="primary"
@@ -152,26 +215,26 @@ export function SettingsPromptPanel(props: SettingsPromptPanelProps) {
                       <Button
                         variant="outline"
                         theme="default"
-                        onClick={() => openCompatPromptRulesFileImporter("append")}
-                        disabled={compatPromptRuleCount >= 128}
+                        onClick={handleOpenCompatPromptRulesImportDialog}
                       >
-                        {t("批量导入并追加", "Batch Import (Append)")}
+                        {t("批量导入", "Bulk Import")}
                       </Button>
                       <Button
                         variant="outline"
                         theme="default"
-                        onClick={() => openCompatPromptRulesFileImporter("replace")}
+                        onClick={handleOpenCompatPromptRulesExportDialog}
                       >
-                        {t("批量导入并覆盖", "Batch Import (Replace)")}
+                        {t("批量导出", "Bulk Export")}
+                      </Button>
+                      <Button variant="outline" theme="default" onClick={resetPromptRuleFilters}>
+                        {t("重置筛选", "Reset Filters")}
                       </Button>
                     </div>
                   </div>
-                  <input
-                    ref={compatPromptRulesFileInputRef}
-                    type="file"
-                    accept=".json,application/json"
-                    style={{ display: "none" }}
-                    onChange={(event) => void handleCompatPromptRulesFileChange(event)}
+
+                  <ActiveFilterSummary
+                    items={compatPromptRuleActiveFilters}
+                    onClearAll={resetPromptRuleFilters}
                   />
 
                   {compatPromptUpstreamModelSuggestions.length > 0 ? (
@@ -413,11 +476,10 @@ export function SettingsPromptPanel(props: SettingsPromptPanelProps) {
 
                   <p className="tc-tip">
                     {t(
-                      "规则字段：provider / upstreamModelPattern 支持 `*`、`?` 通配；优先按上游真实模型命中。命中规则后将替换默认提示词。支持批量导入 `.json`（数组，或含 modelPromptRules/compatPromptConfig.modelPromptRules）。关键词用于定位 AGENTS.md 段落前的插入位置。",
-                      "Rule fields provider / upstreamModelPattern support `*` and `?` wildcards; matching prioritizes real upstream model. A matched rule replaces the default hint. Batch `.json` import is supported (array, or modelPromptRules/compatPromptConfig.modelPromptRules). Keywords still control where hints are injected before AGENTS.md sections."
+                      "豁免名单支持 `模型模式` 或 `provider:模型模式`，命中后将完全跳过 AGENTS.md 提示词注入；规则字段 provider / upstreamModelPattern 支持 `*`、`?` 通配，命中规则后会替换默认提示词。推荐使用上方“批量导入 / 批量导出”完成剪贴板与文件操作；高级场景仍可用下方 JSON 编辑器。关键词用于定位 AGENTS.md 段落前的插入位置。",
+                      "Exemptions support either `model-pattern` or `provider:model-pattern`; a match skips AGENTS.md prompt injection entirely. Rule fields provider / upstreamModelPattern support `*` and `?`, and a matched rule replaces the default hint. Use Bulk Import / Bulk Export above for clipboard and file workflows, and keep the JSON editor below for advanced edits. Keywords still control where hints are injected before AGENTS.md sections."
                     )}
                   </p>
                 </section>
   );
 }
-

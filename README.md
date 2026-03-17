@@ -1,25 +1,34 @@
-# Codex Gateway Hub / Codex 模型网关
+# Codex Gateway Hub
 
-本项目最主要功能是将老的第三方openai兼容接口 接入新版codex在中使用 实现通过接口动态切换模型，并对非视觉大模型用视觉模型进行图片转文本，让非视觉大模型支持视觉任务。
-The main purpose of this project is to connect legacy third-party OpenAI-compatible APIs to the new Codex workflow, support runtime model switching via API, and use vision models for image-to-text fallback so non-vision models can handle visual tasks.
+[![License](https://img.shields.io/github/license/q1820926174-cpu/codex-gateway-hub)](LICENSE)
+[![Last Commit](https://img.shields.io/github/last-commit/q1820926174-cpu/codex-gateway-hub)](https://github.com/q1820926174-cpu/codex-gateway-hub/commits/main)
+[![GitHub Stars](https://img.shields.io/github/stars/q1820926174-cpu/codex-gateway-hub?style=social)](https://github.com/q1820926174-cpu/codex-gateway-hub/stargazers)
 
-## GitHub Search SEO / GitHub 搜索优化关键词
+OpenAI-compatible gateway for Codex, Responses, Chat Completions, and Anthropic Messages.
 
-`openai-compatible-gateway`, `responses-api`, `chat-completions`, `codex`, `multi-provider`, `api-gateway`, `model-routing`, `vision-fallback`, `token-usage`, `one-api-style`, `nextjs`, `prisma`, `ai-proxy`, `llm-gateway`, `openai-compat`
+Bridge legacy or provider-specific upstream APIs into a single local gateway with multi-provider routing, per-key model mapping, runtime switching, vision fallback, and built-in usage analytics.
 
-建议仓库 About 描述（可直接复制） / Suggested GitHub About text:
-- `OpenAI-compatible Codex/Responses gateway with multi-provider routing, model mapping, vision fallback, runtime switching, and token analytics.`
-- `OpenAI 兼容的 Codex/Responses 网关，支持多上游路由、模型映射、视觉兜底、运行时切换与 Token 统计。`
+一个把旧的 OpenAI 兼容上游接入新版 Codex / Responses 工作流的网关。
+它把多上游路由、每 Key 模型映射、运行时切模、视觉兜底和 Token 统计统一到一个本地入口里。
 
-建议在 GitHub 仓库 Topics 中添加（便于检索） / Suggested GitHub Topics:
-- `openai-compatible`
-- `responses-api`
-- `chat-completions`
-- `llm-gateway`
-- `multi-provider`
-- `nextjs`
-- `prisma`
-- `codex`
+## Quick Links / 快速导航
+
+- [Why This Project](#why-this-project--为什么做这个项目)
+- [Core Features](#core-features--核心能力)
+- [Demo](#demo--演示图)
+- [Quick Start](#quick-start--快速启动)
+- [Docker Deploy](#docker-deploy--docker-部署)
+- [Gateway Compatibility Examples](#gateway-compatibility--网关兼容示例)
+- [Contributing Guide](CONTRIBUTING.md)
+- [Security Policy](SECURITY.md)
+- [Changelog](CHANGELOG.md)
+
+## Why This Project / 为什么做这个项目
+
+- Keep Codex and modern `responses` clients usable even when your upstream only speaks older or different wire APIs.
+- Route one local OpenAI-style key across multiple upstream providers without changing client-side tooling every time.
+- Add image and video understanding fallback for models that do not natively support visual input.
+- Operate the whole gateway from a browser console instead of juggling ad-hoc scripts and scattered config files.
 
 ## Core Features / 核心能力
 
@@ -59,7 +68,20 @@ npm run prisma:migrate
 npm run dev
 ```
 
+4. 验证服务已启动 / Verify the gateway is up
+
+```bash
+curl -sS http://127.0.0.1:3000/api/health
+```
+
 默认地址 / Default URL: `http://127.0.0.1:3000`
+
+首次初始化会自动创建默认数据 / First boot seeds default data:
+
+- Upstream channel: `default-openai-channel`
+- Local key entry: `default-openai`
+- A random local `sk-...` key is printed in the terminal during `npm run prisma:migrate`
+- If the upstream API key is empty, open `/console/access` or `/console/upstream` to finish configuration
 
 ## Docker Deploy / Docker 部署
 
@@ -484,6 +506,13 @@ npm run bench:codex-prompts -- --out-dir .tmp/codex-bench/latest
 - `wireApi` 固定为 `responses` / `wireApi` is fixed to `responses`.
 - 本地 Key 必须符合 OpenAI 风格（`sk-...` 或 `sk-proj-...`） / Local key must match OpenAI-style format (`sk-...` or `sk-proj-...`).
 - 客户端认证使用本地 Key，不是上游 API Key；所有 `/v1/*` 与 `/api/v1/*` 兼容路由均支持 `Authorization: Bearer` 与 `x-api-key` / Client auth uses the local key instead of the upstream API key; all `/v1/*` and `/api/v1/*` compatibility routes accept both `Authorization: Bearer` and `x-api-key`.
+
+## Community / 社区
+
+- Contributor workflow: see [CONTRIBUTING.md](CONTRIBUTING.md)
+- Security reporting: see [SECURITY.md](SECURITY.md)
+- Collaboration expectations: see [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
+- Recent project changes: see [CHANGELOG.md](CHANGELOG.md)
 
 ## License / 许可证
 

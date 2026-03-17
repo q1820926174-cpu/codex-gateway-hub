@@ -30,6 +30,7 @@ import {
   shouldShowGlmThinkingThreshold
 } from "@/components/console/settings-console-helpers";
 import type { CodexApplyPatchToolType } from "@/lib/codex-export";
+import { ActiveFilterSummary } from "@/components/console/filters";
 
 type AnyStateSetter = (updater: any | ((prev: any) => any)) => void;
 type AnyItemUpdater = (id: any, updater: (prev: any) => any) => void;
@@ -84,6 +85,17 @@ export function SettingsAccessPanel(props: SettingsAccessPanelProps) {
     keyOverflowModelOptions,
     mappingOverflowModelOptions,
     selectedChannelForKey,
+    keyMappingSearch,
+    setKeyMappingSearch,
+    keyMappingStatusFilter,
+    setKeyMappingStatusFilter,
+    keyMappingBindingFilter,
+    setKeyMappingBindingFilter,
+    keyMappingOverflowFilter,
+    setKeyMappingOverflowFilter,
+    keyMappingVisibleItems,
+    keyMappingActiveFilters,
+    resetKeyMappingFilters,
     isNewKey,
     handleMenuRoute,
     generateLocalKey
@@ -260,6 +272,9 @@ export function SettingsAccessPanel(props: SettingsAccessPanelProps) {
 
                   <div className="tc-actions-row">
                     <Tag variant="light-outline">{t("单 Key 内部模型映射（客户端 -> 内部）", "Single-key model mapping (client -> internal)")}</Tag>
+                    <Tag variant="light-outline">
+                      {t("可见", "Visible")} {keyMappingVisibleItems.length}/{keyForm.modelMappings.length}
+                    </Tag>
                     <Button
                       variant="outline"
                       theme="default"
@@ -274,28 +289,97 @@ export function SettingsAccessPanel(props: SettingsAccessPanelProps) {
                       onClick={handleQuickExportKeyMappings}
                       disabled={!keyForm.modelMappings.length}
                     >
-                      {t("导出映射", "Export Mappings")}
-                    </Button>
-                    <Button
-                      variant="outline"
-                      theme="default"
-                      onClick={() => void handleQuickCopyKeyMappings()}
-                      disabled={!keyForm.modelMappings.length}
-                    >
-                      {t("复制映射", "Copy Mappings")}
+                      {t("批量导出", "Bulk Export")}
                     </Button>
                     <Button
                       variant="outline"
                       theme="default"
                       onClick={handleOpenQuickImportKeyMappingDialog}
                     >
-                      {t("导入映射", "Import Mappings")}
+                      {t("批量导入", "Bulk Import")}
                     </Button>
                   </div>
 
+                  <div className="tc-log-toolbar">
+                    <div className="tc-log-toolbar-group tc-log-field-wide">
+                      <label className="tc-field">
+                        <span>{t("关键词", "Keyword")}</span>
+                        <Input
+                          value={keyMappingSearch}
+                          onChange={(value) => setKeyMappingSearch(value)}
+                          placeholder={t("搜索客户端模型、内部模型、渠道、溢出模型", "Search client model, target model, channel, or overflow model")}
+                          clearable
+                        />
+                      </label>
+                    </div>
+                    <div className="tc-log-toolbar-group">
+                      <label className="tc-field">
+                        <span>{t("状态", "Status")}</span>
+                        <Select
+                          value={keyMappingStatusFilter}
+                          options={[
+                            { label: t("全部状态", "All Status"), value: "all" },
+                            { label: t("启用", "Enabled"), value: "enabled" },
+                            { label: t("停用", "Disabled"), value: "disabled" }
+                          ]}
+                          style={{ width: 150 }}
+                          onChange={(value) => setKeyMappingStatusFilter(normalizeSelectValue(value))}
+                        />
+                      </label>
+                    </div>
+                    <div className="tc-log-toolbar-group">
+                      <label className="tc-field">
+                        <span>{t("绑定方式", "Binding")}</span>
+                        <Select
+                          value={keyMappingBindingFilter}
+                          options={[
+                            { label: t("全部绑定", "All Binding"), value: "all" },
+                            { label: t("继承 Key 渠道", "Inherit Key Channel"), value: "inherit" },
+                            { label: t("独立绑定渠道", "Bound Channel"), value: "bound" }
+                          ]}
+                          style={{ width: 180 }}
+                          onChange={(value) => setKeyMappingBindingFilter(normalizeSelectValue(value))}
+                        />
+                      </label>
+                    </div>
+                    <div className="tc-log-toolbar-group">
+                      <label className="tc-field">
+                        <span>{t("溢出切模", "Overflow")}</span>
+                        <Select
+                          value={keyMappingOverflowFilter}
+                          options={[
+                            { label: t("全部", "All"), value: "all" },
+                            { label: t("已开启", "Enabled"), value: "yes" },
+                            { label: t("未开启", "Disabled"), value: "no" }
+                          ]}
+                          style={{ width: 150 }}
+                          onChange={(value) => setKeyMappingOverflowFilter(normalizeSelectValue(value))}
+                        />
+                      </label>
+                    </div>
+                    <div className="tc-log-toolbar-group tc-log-toolbar-actions">
+                      <Button variant="outline" onClick={resetKeyMappingFilters}>
+                        {t("重置筛选", "Reset Filters")}
+                      </Button>
+                    </div>
+                  </div>
+
+                  <ActiveFilterSummary
+                    items={keyMappingActiveFilters}
+                    onClearAll={resetKeyMappingFilters}
+                  />
+
                   {keyForm.modelMappings.length > 0 ? (
+                    keyMappingVisibleItems.length === 0 ? (
+                      <p className="tc-upstream-advice">
+                        {t(
+                          "当前没有命中筛选条件的映射。",
+                          "No mappings matched the current filters."
+                        )}
+                      </p>
+                    ) : (
                     <div className="tc-model-list">
-                      {keyForm.modelMappings.map((item, index) => {
+                      {keyMappingVisibleItems.map((item, index) => {
                         const mappingChannel = resolveMappingChannel(item);
                         const targetProfile = findChannelModelProfile(mappingChannel, item.targetModel);
                         const showDoubaoThinkingControl = shouldShowDoubaoThinkingType(
@@ -548,6 +632,7 @@ export function SettingsAccessPanel(props: SettingsAccessPanelProps) {
                         );
                       })}
                     </div>
+                    )
                   ) : (
                     <p className="tc-upstream-advice">
                       {t(
@@ -594,4 +679,3 @@ export function SettingsAccessPanel(props: SettingsAccessPanelProps) {
                 </section>
   );
 }
-

@@ -26,6 +26,7 @@ import {
   pickUsageMetricValue,
   summarizeLogPreview
 } from "@/components/console/settings-console-helpers";
+import { ActiveFilterSummary, FilterPresetBar } from "@/components/console/filters";
 
 
 export function SettingsCallsPanel(props: any) {
@@ -77,6 +78,12 @@ export function SettingsCallsPanel(props: any) {
     loadingAiCallLogs,
     aiCallStats,
     deferredAiCallLogs,
+    aiCallActiveFilters,
+    aiCallSavedPresets,
+    aiCallSelectedPresetId,
+    applyAiCallPresetById,
+    saveAiCallPreset,
+    deleteAiCallPreset,
     expandedAiCallLogIdSet,
     toggleAiCallLogExpanded,
     setPreviewImage
@@ -91,6 +98,20 @@ export function SettingsCallsPanel(props: any) {
           "Shows system prompt, user question, assistant response, and the real upstream model. Supports combined filters by key, time range, keyword, route/APIs, requested/client/upstream model, stream mode, and call type, plus dedicated vision-fallback stats."
         )}
       </p>
+
+      <FilterPresetBar
+        presets={aiCallSavedPresets.map((item: any) => ({ id: item.id, name: item.name }))}
+        activePresetId={aiCallSelectedPresetId === "all" ? undefined : aiCallSelectedPresetId}
+        onSelectPreset={(id) => applyAiCallPresetById(id || "all")}
+        onSavePreset={() => saveAiCallPreset()}
+        onDeletePreset={(id) => {
+          if (id) {
+            applyAiCallPresetById(id);
+            deleteAiCallPreset();
+          }
+        }}
+        onReset={resetAiCallFilters}
+      />
 
       <div className="tc-log-toolbar">
         <div className="tc-log-toolbar-group">
@@ -354,6 +375,8 @@ export function SettingsCallsPanel(props: any) {
         </div>
       </div>
 
+      <ActiveFilterSummary items={aiCallActiveFilters} onClearAll={resetAiCallFilters} />
+
       <div className="tc-meta-row">
         <Tag variant="light-outline">匹配调用={aiCallStats.matched}</Tag>
         <Tag variant="light-outline">主调用={aiCallStats.main}</Tag>
@@ -552,4 +575,3 @@ export function SettingsCallsPanel(props: any) {
     </section>
   );
 }
-
