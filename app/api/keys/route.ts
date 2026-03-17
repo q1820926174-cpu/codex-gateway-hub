@@ -217,6 +217,8 @@ export async function POST(req: Request) {
           contextSwitchThreshold: payload.contextSwitchThreshold,
           contextOverflowModel: payload.contextOverflowModel?.trim() || null,
           activeModelOverride: payload.activeModelOverride?.trim() || null,
+          dailyRequestLimit: payload.dailyRequestLimit ?? null,
+          dailyTokenLimit: payload.dailyTokenLimit ?? null,
           timeoutMs: upstreamChannel?.timeoutMs ?? payload.timeoutMs,
           enabled: payload.enabled
         },

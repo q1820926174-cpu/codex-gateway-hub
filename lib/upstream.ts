@@ -39,6 +39,8 @@ type KeyResolveSuccess = {
     contextSwitchThreshold: number;
     contextOverflowModel: string | null;
     activeModelOverride: string | null;
+    dailyRequestLimit: number | null;
+    dailyTokenLimit: number | null;
     timeoutMs: number;
     enabled: boolean;
   };
@@ -311,6 +313,14 @@ export async function resolveGatewayKey(
     supportsVision: effectiveSupportsVision,
     visionChannelId: effectiveVisionChannelId,
     visionModel: effectiveVisionModel,
+    dailyRequestLimit:
+      typeof key.dailyRequestLimit === "number" && key.dailyRequestLimit > 0
+        ? Math.floor(key.dailyRequestLimit)
+        : null,
+    dailyTokenLimit:
+      typeof key.dailyTokenLimit === "number" && key.dailyTokenLimit > 0
+        ? Math.floor(key.dailyTokenLimit)
+        : null,
     timeoutMs: key.upstreamChannel?.timeoutMs ?? key.timeoutMs
   };
   writeGatewayKeyCache(localKey, resolvedKey);

@@ -122,6 +122,8 @@ function statementsByProvider(provider) {
             "contextSwitchThreshold" INTEGER NOT NULL DEFAULT 12000,
             "contextOverflowModel" TEXT,
             "activeModelOverride" TEXT,
+            "dailyRequestLimit" INTEGER,
+            "dailyTokenLimit" INTEGER,
             "timeoutMs" INTEGER NOT NULL DEFAULT 60000,
             "enabled" BOOLEAN NOT NULL DEFAULT true,
             "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -164,7 +166,9 @@ function statementsByProvider(provider) {
         `ALTER TABLE "ProviderKey" ADD COLUMN "dynamicModelSwitch" BOOLEAN NOT NULL DEFAULT false`,
         `ALTER TABLE "ProviderKey" ADD COLUMN "contextSwitchThreshold" INTEGER NOT NULL DEFAULT 12000`,
         `ALTER TABLE "ProviderKey" ADD COLUMN "contextOverflowModel" TEXT`,
-        `ALTER TABLE "ProviderKey" ADD COLUMN "activeModelOverride" TEXT`
+        `ALTER TABLE "ProviderKey" ADD COLUMN "activeModelOverride" TEXT`,
+        `ALTER TABLE "ProviderKey" ADD COLUMN "dailyRequestLimit" INTEGER`,
+        `ALTER TABLE "ProviderKey" ADD COLUMN "dailyTokenLimit" INTEGER`
       ],
       index: [
         `CREATE UNIQUE INDEX IF NOT EXISTS "ProviderKey_localKey_key" ON "ProviderKey"("localKey")`,
@@ -219,6 +223,8 @@ function statementsByProvider(provider) {
             \`contextSwitchThreshold\` INT NOT NULL DEFAULT 12000,
             \`contextOverflowModel\` VARCHAR(255),
             \`activeModelOverride\` VARCHAR(255),
+            \`dailyRequestLimit\` INT NULL,
+            \`dailyTokenLimit\` INT NULL,
             \`timeoutMs\` INT NOT NULL DEFAULT 60000,
             \`enabled\` BOOLEAN NOT NULL DEFAULT true,
             \`createdAt\` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
@@ -269,6 +275,8 @@ function statementsByProvider(provider) {
         `ALTER TABLE \`ProviderKey\` ADD COLUMN \`contextSwitchThreshold\` INT NOT NULL DEFAULT 12000`,
         `ALTER TABLE \`ProviderKey\` ADD COLUMN \`contextOverflowModel\` VARCHAR(255) NULL`,
         `ALTER TABLE \`ProviderKey\` ADD COLUMN \`activeModelOverride\` VARCHAR(255) NULL`,
+        `ALTER TABLE \`ProviderKey\` ADD COLUMN \`dailyRequestLimit\` INT NULL`,
+        `ALTER TABLE \`ProviderKey\` ADD COLUMN \`dailyTokenLimit\` INT NULL`,
         `ALTER TABLE \`ProviderKey\` ADD INDEX \`ProviderKey_upstreamChannelId_idx\` (\`upstreamChannelId\`)`,
         `ALTER TABLE \`ProviderKey\` ADD CONSTRAINT \`ProviderKey_upstreamChannelId_fkey\` FOREIGN KEY (\`upstreamChannelId\`) REFERENCES \`UpstreamChannel\`(\`id\`) ON DELETE SET NULL ON UPDATE CASCADE`
       ],
@@ -328,6 +336,8 @@ function statementsByProvider(provider) {
           "contextSwitchThreshold" INTEGER NOT NULL DEFAULT 12000,
           "contextOverflowModel" TEXT,
           "activeModelOverride" TEXT,
+          "dailyRequestLimit" INTEGER,
+          "dailyTokenLimit" INTEGER,
           "timeoutMs" INTEGER NOT NULL DEFAULT 60000,
           "enabled" BOOLEAN NOT NULL DEFAULT true,
           "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -370,7 +380,9 @@ function statementsByProvider(provider) {
       `ALTER TABLE "ProviderKey" ADD COLUMN IF NOT EXISTS "dynamicModelSwitch" BOOLEAN NOT NULL DEFAULT false`,
       `ALTER TABLE "ProviderKey" ADD COLUMN IF NOT EXISTS "contextSwitchThreshold" INTEGER NOT NULL DEFAULT 12000`,
       `ALTER TABLE "ProviderKey" ADD COLUMN IF NOT EXISTS "contextOverflowModel" TEXT`,
-      `ALTER TABLE "ProviderKey" ADD COLUMN IF NOT EXISTS "activeModelOverride" TEXT`
+      `ALTER TABLE "ProviderKey" ADD COLUMN IF NOT EXISTS "activeModelOverride" TEXT`,
+      `ALTER TABLE "ProviderKey" ADD COLUMN IF NOT EXISTS "dailyRequestLimit" INTEGER`,
+      `ALTER TABLE "ProviderKey" ADD COLUMN IF NOT EXISTS "dailyTokenLimit" INTEGER`
     ],
     index: [
       `CREATE UNIQUE INDEX IF NOT EXISTS "ProviderKey_localKey_key" ON "ProviderKey"("localKey")`,
@@ -493,6 +505,8 @@ async function seedDefaultData(prisma, provider) {
         contextSwitchThreshold: 12000,
         contextOverflowModel: null,
         activeModelOverride: null,
+        dailyRequestLimit: null,
+        dailyTokenLimit: null,
         timeoutMs: defaultTimeout,
         enabled: true
       }

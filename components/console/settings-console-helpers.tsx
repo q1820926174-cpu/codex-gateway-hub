@@ -184,6 +184,8 @@ export function createEmptyKeyFormState(localKey = ""): KeyFormState {
     dynamicModelSwitch: false,
     contextSwitchThreshold: 128000,
     contextOverflowModel: "",
+    dailyRequestLimit: "",
+    dailyTokenLimit: "",
     enabled: true
   };
 }
@@ -250,6 +252,14 @@ export function toKeyForm(key: GatewayKey): KeyFormState {
     dynamicModelSwitch: key.dynamicModelSwitch,
     contextSwitchThreshold: key.contextSwitchThreshold,
     contextOverflowModel: key.contextOverflowModel ?? "",
+    dailyRequestLimit:
+      typeof key.dailyRequestLimit === "number" && key.dailyRequestLimit > 0
+        ? String(key.dailyRequestLimit)
+        : "",
+    dailyTokenLimit:
+      typeof key.dailyTokenLimit === "number" && key.dailyTokenLimit > 0
+        ? String(key.dailyTokenLimit)
+        : "",
     enabled: key.enabled
   };
 }

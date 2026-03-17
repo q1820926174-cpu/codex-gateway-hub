@@ -177,6 +177,45 @@ export function SettingsAccessPanel(props: SettingsAccessPanelProps) {
                       />
                     </label>
 
+                    <label className="tc-field">
+                      <span>{t("每日请求上限", "Daily Request Limit")}</span>
+                      <Input
+                        type="number"
+                        value={keyForm.dailyRequestLimit}
+                        onChange={(value) =>
+                          setKeyForm((prev: any) => ({
+                            ...prev,
+                            dailyRequestLimit: value
+                          }))
+                        }
+                        placeholder={t("留空表示不限", "Leave empty for unlimited")}
+                        clearable
+                      />
+                    </label>
+
+                    <label className="tc-field">
+                      <span>{t("每日 Token 上限", "Daily Token Limit")}</span>
+                      <Input
+                        type="number"
+                        value={keyForm.dailyTokenLimit}
+                        onChange={(value) =>
+                          setKeyForm((prev: any) => ({
+                            ...prev,
+                            dailyTokenLimit: value
+                          }))
+                        }
+                        placeholder={t("留空表示不限", "Leave empty for unlimited")}
+                        clearable
+                      />
+                    </label>
+
+                    <p className="tc-upstream-advice tc-field-wide">
+                      {t(
+                        "每日配额基于网关用量记录按天统计，达到上限后会返回 429；每天 00:00 按服务端本地时区自动重置。留空表示不限制。",
+                        "Daily quota is calculated from gateway usage records. Requests return 429 after the limit is reached and reset automatically at 00:00 in the server local timezone. Leave blank for unlimited."
+                      )}
+                    </p>
+
                     {keyForm.dynamicModelSwitch ? (
                       <>
                         <label className="tc-field">

@@ -59,6 +59,7 @@ import {
 import { pickModelByContext } from "@/lib/model-switch";
 import type { ResolvedGatewayKey } from "@/lib/upstream";
 import {
+  checkKeyDailyLimits,
   extractTokenUsageFromPayload,
   recordTokenUsageEvent
 } from "@/lib/usage-report";
@@ -1089,6 +1090,19 @@ function normalizeUsageValues(
     completionTokens,
     totalTokens
   };
+}
+
+
+async function enforceKeyDailyQuota(
+  key: ResolvedGatewayKey,
+  promptTokensEstimate: number
+) {
+  return checkKeyDailyLimits({
+    keyId: key.id,
+    dailyRequestLimit: key.dailyRequestLimit,
+    dailyTokenLimit: key.dailyTokenLimit,
+    promptTokensEstimate
+  });
 }
 
 async function persistUsageEvent(
@@ -4968,6 +4982,10 @@ export async function handleLegacyChatCompletions(
     normalizeLegacyMessages(body.messages as LegacyChatRequest["messages"])
   );
   const promptTokensEstimate = estimateLegacyChatTokens(body, mappedRequestedModel);
+  const dailyQuota = await enforceKeyDailyQuota(runtimeKey, promptTokensEstimate);
+  if (!dailyQuota.allowed) {
+    return NextResponse.json(dailyQuota.body, { status: dailyQuota.status });
+  }
 
   const rewritten = await describeMediaWithVisionModel(body, runtimeKey, {
     route,
@@ -5290,6 +5308,10 @@ export async function handleAnthropicMessages(
     normalizeLegacyMessages(legacyBody.messages as LegacyChatRequest["messages"])
   );
   const promptTokensEstimate = estimateLegacyChatTokens(legacyBody, mappedRequestedModel);
+  const dailyQuota = await enforceKeyDailyQuota(runtimeKey, promptTokensEstimate);
+  if (!dailyQuota.allowed) {
+    return anthropicErrorResponse(dailyQuota.status, dailyQuota.body.error);
+  }
 
   const rewritten = await describeMediaWithVisionModel(legacyBody, runtimeKey, {
     route,
@@ -5656,6 +5678,10 @@ export async function handleLegacyCompletions(
   const modelCandidates = resolvedCandidates.candidates;
   const modelResolved = modelCandidates[0];
   const runtimeKey = modelResolved.runtimeKey;
+  const dailyQuota = await enforceKeyDailyQuota(runtimeKey, promptTokensEstimate);
+  if (!dailyQuota.allowed) {
+    return NextResponse.json(dailyQuota.body, { status: dailyQuota.status });
+  }
 
   if (isStreamingRequest(body)) {
     if (runtimeKey.upstreamWireApi === "chat_completions") {
@@ -5971,6 +5997,10 @@ export async function handleResponses(req: Request, route = "/v1/responses") {
     incomingPromptMessages
   );
   const promptSnapshot = extractPromptSnapshotFromLegacyMessages(mergedPromptMessages);
+  const dailyQuota = await enforceKeyDailyQuota(runtimeKey, promptTokensEstimate);
+  if (!dailyQuota.allowed) {
+    return NextResponse.json(dailyQuota.body, { status: dailyQuota.status });
+  }
 
   if (body.stream === true) {
     if (runtimeKey.upstreamWireApi === "responses") {

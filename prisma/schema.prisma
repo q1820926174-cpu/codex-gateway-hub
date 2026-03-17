@@ -27,6 +27,8 @@ model ProviderKey {
   contextSwitchThreshold Int              @default(128000)
   contextOverflowModel   String?
   activeModelOverride    String?
+  dailyRequestLimit      Int?
+  dailyTokenLimit        Int?
   timeoutMs              Int              @default(60000)
   enabled                Boolean          @default(true)
   createdAt              DateTime         @default(now())

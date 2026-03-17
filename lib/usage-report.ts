@@ -31,6 +31,42 @@ type UsageReportQuery = {
   toTime?: Date | null;
 };
 
+
+export type KeyDailyUsageSnapshot = {
+  keyId: number;
+  requestCount: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  rangeFrom: string;
+  rangeTo: string;
+  resetAt: string;
+};
+
+export type KeyDailyLimitCheckResult =
+  | {
+      allowed: true;
+      snapshot: KeyDailyUsageSnapshot;
+    }
+  | {
+      allowed: false;
+      status: number;
+      body: {
+        error: string;
+        type: "daily_request_limit" | "daily_token_limit";
+        scope: "daily";
+        limit: number;
+        used: number;
+        remaining: number;
+        projectedUsed: number;
+        promptTokensEstimate: number;
+        rangeFrom: string;
+        rangeTo: string;
+        resetAt: string;
+      };
+      snapshot: KeyDailyUsageSnapshot;
+    };
+
 type TokenUsageDelegate = {
   create: (args: any) => Promise<any>;
   deleteMany: (args?: any) => Promise<any>;
@@ -74,6 +110,19 @@ const MAX_CUSTOM_RANGE_MINUTES = 180 * 24 * 60;
 function toMinuteBucket(date: Date) {
   const next = new Date(date);
   next.setSeconds(0, 0);
+  return next;
+}
+
+
+function startOfLocalDay(date: Date) {
+  const next = new Date(date);
+  next.setHours(0, 0, 0, 0);
+  return next;
+}
+
+function startOfNextLocalDay(date: Date) {
+  const next = startOfLocalDay(date);
+  next.setDate(next.getDate() + 1);
   return next;
 }
 
@@ -170,6 +219,128 @@ export async function clearTokenUsageEvents() {
     return;
   }
   await delegate.deleteMany({});
+}
+
+
+export async function readKeyDailyUsageSnapshot(
+  keyId: number,
+  now = new Date()
+): Promise<KeyDailyUsageSnapshot> {
+  const keyIdNumber = Number(keyId);
+  const safeKeyId = Number.isInteger(keyIdNumber) && keyIdNumber > 0 ? keyIdNumber : 0;
+  const rangeFromDate = startOfLocalDay(now);
+  const rangeToDate = startOfNextLocalDay(now);
+  const rangeFromBucket = toMinuteBucket(rangeFromDate);
+  const rangeToBucket = toMinuteBucket(rangeToDate);
+  const delegate = tokenUsageDelegate();
+
+  if (!delegate || safeKeyId <= 0) {
+    return {
+      keyId: safeKeyId,
+      requestCount: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      rangeFrom: rangeFromDate.toISOString(),
+      rangeTo: rangeToDate.toISOString(),
+      resetAt: rangeToDate.toISOString()
+    };
+  }
+
+  const grouped = await delegate.groupBy({
+    by: ["keyId"],
+    where: {
+      keyId: safeKeyId,
+      minuteBucket: {
+        gte: rangeFromBucket,
+        lt: rangeToBucket
+      }
+    },
+    _count: { _all: true },
+    _sum: {
+      promptTokens: true,
+      completionTokens: true,
+      totalTokens: true
+    }
+  });
+  const row = grouped[0];
+
+  return {
+    keyId: safeKeyId,
+    requestCount: row?._count?._all ?? 0,
+    promptTokens: row?._sum?.promptTokens ?? 0,
+    completionTokens: row?._sum?.completionTokens ?? 0,
+    totalTokens: row?._sum?.totalTokens ?? 0,
+    rangeFrom: rangeFromDate.toISOString(),
+    rangeTo: rangeToDate.toISOString(),
+    resetAt: rangeToDate.toISOString()
+  };
+}
+
+export async function checkKeyDailyLimits(input: {
+  keyId: number;
+  dailyRequestLimit?: number | null;
+  dailyTokenLimit?: number | null;
+  promptTokensEstimate?: number;
+  now?: Date;
+}): Promise<KeyDailyLimitCheckResult> {
+  const snapshot = await readKeyDailyUsageSnapshot(input.keyId, input.now ?? new Date());
+  const dailyRequestLimit = toSafeInt(input.dailyRequestLimit);
+  const dailyTokenLimit = toSafeInt(input.dailyTokenLimit);
+  const promptTokensEstimate = Math.max(0, toSafeInt(input.promptTokensEstimate));
+
+  if (dailyRequestLimit > 0) {
+    const projectedUsed = snapshot.requestCount + 1;
+    if (projectedUsed > dailyRequestLimit) {
+      return {
+        allowed: false,
+        status: 429,
+        body: {
+          error: "Daily request limit exceeded for this key.",
+          type: "daily_request_limit",
+          scope: "daily",
+          limit: dailyRequestLimit,
+          used: snapshot.requestCount,
+          remaining: Math.max(dailyRequestLimit - snapshot.requestCount, 0),
+          projectedUsed,
+          promptTokensEstimate,
+          rangeFrom: snapshot.rangeFrom,
+          rangeTo: snapshot.rangeTo,
+          resetAt: snapshot.resetAt
+        },
+        snapshot
+      };
+    }
+  }
+
+  if (dailyTokenLimit > 0) {
+    const projectedUsed = snapshot.totalTokens + promptTokensEstimate;
+    if (snapshot.totalTokens >= dailyTokenLimit || projectedUsed > dailyTokenLimit) {
+      return {
+        allowed: false,
+        status: 429,
+        body: {
+          error: "Daily token limit exceeded for this key.",
+          type: "daily_token_limit",
+          scope: "daily",
+          limit: dailyTokenLimit,
+          used: snapshot.totalTokens,
+          remaining: Math.max(dailyTokenLimit - snapshot.totalTokens, 0),
+          projectedUsed,
+          promptTokensEstimate,
+          rangeFrom: snapshot.rangeFrom,
+          rangeTo: snapshot.rangeTo,
+          resetAt: snapshot.resetAt
+        },
+        snapshot
+      };
+    }
+  }
+
+  return {
+    allowed: true,
+    snapshot
+  };
 }
 
 export async function readTokenUsageReport(query: UsageReportQuery) {

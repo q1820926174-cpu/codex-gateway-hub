@@ -153,6 +153,21 @@ export type KeyModelMapping = {
   contextOverflowModel: string | null;
 };
 
+function normalizeNullableQuotaLimit(value: unknown) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+  const normalized = Math.floor(parsed);
+  if (normalized <= 0) {
+    return null;
+  }
+  return Math.min(normalized, 2_000_000_000);
+}
+
 type UpstreamModelFallback = {
   model: string;
   upstreamWireApi: UpstreamWireApi;
@@ -403,7 +418,9 @@ export const createGatewayKeySchema = z.object({
   dynamicModelSwitch: z.boolean().default(false),
   contextSwitchThreshold: z.number().int().min(256).max(2_000_000).default(128000),
   contextOverflowModel: z.string().min(1).max(512).optional(),
- activeModelOverride: z.string().min(1).max(256).optional(),
+  activeModelOverride: z.string().min(1).max(256).optional(),
+  dailyRequestLimit: z.number().int().min(1).max(2_000_000_000).nullable().optional(),
+  dailyTokenLimit: z.number().int().min(1).max(2_000_000_000).nullable().optional(),
   modelMappings: z.array(keyModelMappingSchema).max(MAX_KEY_MODEL_MAPPINGS).optional(),
   timeoutMs: z.number().int().min(1000).max(300000).default(60000),
   enabled: z.boolean().default(true)
@@ -449,6 +466,8 @@ export const updateGatewayKeySchema = z.object({
   clearContextOverflowModel: z.boolean().optional(),
   activeModelOverride: z.string().min(1).max(256).optional(),
   clearActiveModelOverride: z.boolean().optional(),
+  dailyRequestLimit: z.number().int().min(1).max(2_000_000_000).nullable().optional(),
+  dailyTokenLimit: z.number().int().min(1).max(2_000_000_000).nullable().optional(),
   modelMappings: z.array(keyModelMappingSchema).max(MAX_KEY_MODEL_MAPPINGS).optional(),
   timeoutMs: z.number().int().min(1000).max(300000).optional(),
   enabled: z.boolean().optional()
@@ -500,6 +519,8 @@ export function gatewayKeyDto<
     contextSwitchThreshold: number;
     contextOverflowModel: string | null;
     activeModelOverride: string | null;
+    dailyRequestLimit: number | null;
+    dailyTokenLimit: number | null;
     timeoutMs: number;
     enabled: boolean;
     createdAt: Date;
@@ -554,6 +575,8 @@ export function gatewayKeyDto<
     contextSwitchThreshold: key.contextSwitchThreshold,
     contextOverflowModel: key.contextOverflowModel,
     activeModelOverride: key.activeModelOverride,
+    dailyRequestLimit: normalizeNullableQuotaLimit(key.dailyRequestLimit),
+    dailyTokenLimit: normalizeNullableQuotaLimit(key.dailyTokenLimit),
     timeoutMs: key.upstreamChannel?.timeoutMs ?? key.timeoutMs,
     enabled: key.enabled,
     createdAt: key.createdAt,

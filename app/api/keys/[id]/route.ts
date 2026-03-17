@@ -179,6 +179,14 @@ export async function PUT(
   } else if (payload.activeModelOverride !== undefined) {
     nextActiveModelOverride = payload.activeModelOverride.trim() || null;
   }
+  const nextDailyRequestLimit =
+    payload.dailyRequestLimit === undefined
+      ? existing.dailyRequestLimit
+      : payload.dailyRequestLimit;
+  const nextDailyTokenLimit =
+    payload.dailyTokenLimit === undefined
+      ? existing.dailyTokenLimit
+      : payload.dailyTokenLimit;
   const nextModelMappings =
     payload.modelMappings !== undefined
       ? normalizeKeyModelMappings(payload.modelMappings)
@@ -318,6 +326,8 @@ export async function PUT(
           contextSwitchThreshold: nextContextSwitchThreshold,
           contextOverflowModel: nextContextOverflowModel,
           activeModelOverride: nextActiveModelOverride,
+          dailyRequestLimit: nextDailyRequestLimit,
+          dailyTokenLimit: nextDailyTokenLimit,
           timeoutMs: selectedChannel?.timeoutMs ?? payload.timeoutMs ?? existing.timeoutMs,
           enabled: payload.enabled ?? existing.enabled
         },

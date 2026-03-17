@@ -158,6 +158,8 @@ export type GatewayKey = {
   contextSwitchThreshold: number;
   contextOverflowModel: string | null;
   activeModelOverride: string | null;
+  dailyRequestLimit: number | null;
+  dailyTokenLimit: number | null;
   timeoutMs: number;
   enabled: boolean;
   createdAt: string;
@@ -302,6 +304,8 @@ export type KeyFormState = {
   dynamicModelSwitch: boolean;
   contextSwitchThreshold: number;
   contextOverflowModel: string;
+  dailyRequestLimit: string;
+  dailyTokenLimit: string;
   enabled: boolean;
 };
 

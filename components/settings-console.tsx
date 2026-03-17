@@ -1981,6 +1981,22 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       if (keyForm.dynamicModelSwitch && !overflowModel) {
         throw new Error("启用动态切模时，必须设置溢出模型。");
       }
+      const dailyRequestLimitInput = keyForm.dailyRequestLimit.trim();
+      const dailyRequestLimit = Number(dailyRequestLimitInput || "0");
+      if (
+        dailyRequestLimitInput &&
+        (!Number.isInteger(dailyRequestLimit) || dailyRequestLimit <= 0)
+      ) {
+        throw new Error("每日请求上限必须是大于 0 的整数，或留空表示不限。");
+      }
+      const dailyTokenLimitInput = keyForm.dailyTokenLimit.trim();
+      const dailyTokenLimit = Number(dailyTokenLimitInput || "0");
+      if (
+        dailyTokenLimitInput &&
+        (!Number.isInteger(dailyTokenLimit) || dailyTokenLimit <= 0)
+      ) {
+        throw new Error("每日 Token 上限必须是大于 0 的整数，或留空表示不限。");
+      }
       for (const m of keyForm.modelMappings) {
         if (m.dynamicModelSwitch && !(m.contextOverflowModel?.trim())) {
           throw new Error(`映射「${m.clientModel}」启用了动态切模但未设置溢出模型。`);
@@ -2014,6 +2030,8 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
         dynamicModelSwitch: keyForm.dynamicModelSwitch,
         contextSwitchThreshold: Number(keyForm.contextSwitchThreshold),
         contextOverflowModel: overflowModel || undefined,
+        dailyRequestLimit: dailyRequestLimitInput ? dailyRequestLimit : undefined,
+        dailyTokenLimit: dailyTokenLimitInput ? dailyTokenLimit : undefined,
         clearContextOverflowModel: overflowModel.length === 0,
         enabled: keyForm.enabled
       };
