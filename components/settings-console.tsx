@@ -2895,6 +2895,35 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     };
   }
 
+  function buildCcSwitchUsageScript() {
+    return `({
+  request: {
+    url: "{{baseUrl}}/v1/usage",
+    method: "GET",
+    headers: {
+      "Authorization": "Bearer {{apiKey}}",
+      "User-Agent": "cc-switch/1.0"
+    }
+  },
+  extractor: function(response) {
+    if (!response || response.success !== true) {
+      return {
+        isValid: false,
+        invalidMessage:
+          (response && (response.error || response.message)) || "Usage query failed"
+      };
+    }
+    if (Array.isArray(response.data) && response.data.length > 0) {
+      return response.data;
+    }
+    return {
+      isValid: false,
+      invalidMessage: "No usage data available."
+    };
+  }
+})`;
+  }
+
   function buildCcSwitchCodexDeepLink() {
     const {
       localKey,
@@ -2921,7 +2950,11 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
         : "Imported from Codex Gateway Hub",
       configFormat: "json",
       config: toBase64Utf8(JSON.stringify(inlineConfig)),
-      enabled: "true"
+      enabled: "true",
+      usageEnabled: "true",
+      usageScript: toBase64Utf8(buildCcSwitchUsageScript()),
+      usageBaseUrl: origin,
+      usageAutoInterval: "60"
     });
 
     return `ccswitch://v1/import?${params.toString()}`;
@@ -3033,7 +3066,11 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
         : "Imported from Codex Gateway Hub",
       configFormat: "json",
       config: toBase64Utf8(JSON.stringify(inlineConfig)),
-      enabled: "true"
+      enabled: "true",
+      usageEnabled: "true",
+      usageScript: toBase64Utf8(buildCcSwitchUsageScript()),
+      usageBaseUrl: origin,
+      usageAutoInterval: "60"
     });
 
     return `ccswitch://v1/import?${params.toString()}`;
