@@ -4,7 +4,9 @@
 import {
   Button,
   Checkbox,
+  DialogPlugin,
   Input,
+  MessagePlugin,
   Select,
   Switch,
   Tabs,
@@ -347,7 +349,10 @@ export function SettingsUpstreamPanel(props: SettingsUpstreamPanelProps) {
                             <Button
                               variant="outline"
                               size="small"
-                              onClick={() => setChannelDefaultModel(item.model)}
+                              onClick={() => {
+                                setChannelDefaultModel(item.model);
+                                void MessagePlugin.success(t("已设为默认模型", "Set as default model"));
+                              }}
                               disabled={channelForm.defaultModel === item.model}
                             >
                               {channelForm.defaultModel === item.model ? t("当前默认", "Current Default") : t("设为默认", "Set Default")}
@@ -366,7 +371,15 @@ export function SettingsUpstreamPanel(props: SettingsUpstreamPanelProps) {
                               variant="text"
                               size="small"
                               disabled={channelForm.upstreamModels.length <= 1}
-                              onClick={() => removeUpstreamModel(item.id)}
+                              onClick={() => {
+                                const dialog = DialogPlugin.confirm({
+                                  header: t("确认删除", "Confirm Delete"),
+                                  body: t("确认删除该上游模型？", "Delete this upstream model?"),
+                                  confirmBtn: t("删除", "Delete"),
+                                  onConfirm: () => { removeUpstreamModel(item.id); dialog.hide(); },
+                                  onClose: () => dialog.hide(),
+                                });
+                              }}
                             >
                               {t("删除", "Delete")}
                             </Button>

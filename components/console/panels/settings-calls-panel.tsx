@@ -2,6 +2,7 @@ import {
   Button,
   Checkbox,
   DateRangePicker,
+  DialogPlugin,
   Input,
   Select,
   Switch,
@@ -367,7 +368,15 @@ export function SettingsCallsPanel(props: any) {
           <Button
             variant="outline"
             theme="danger"
-            onClick={() => void clearAiCallLogs()}
+            onClick={() => {
+              const dialog = DialogPlugin.confirm({
+                header: t("确认清空", "Confirm Clear"),
+                body: t("此操作不可撤销，确认清空所有 AI 调用日志？", "This cannot be undone. Clear all AI call logs?"),
+                confirmBtn: t("清空", "Clear"),
+                onConfirm: () => { void clearAiCallLogs(); dialog.hide(); },
+                onClose: () => dialog.hide(),
+              });
+            }}
             disabled={loadingAiCallLogs}
           >
             {t("清空日志", "Clear Logs")}

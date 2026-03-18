@@ -1,5 +1,6 @@
 // ID generation utility functions
 // ID 生成工具函数
+import { MessagePlugin } from "tdesign-react";
 export function generateLocalKey() {
   // Generate a random local key in OpenAI format (sk-...)
   // 生成 OpenAI 格式的随机本地密钥 (sk-...)
@@ -42,16 +43,13 @@ export function formatNumber(num: number): string {
 // 复制到剪贴板
 export async function copyTextToClipboard(text: string, successMessage?: string) {
   try {
-    // Use clipboard API to write text
-    // 使用剪贴板 API 写入文本
     await navigator.clipboard.writeText(text);
     if (successMessage) {
-      // Could call toast or message component here
-      // 这里可以调用 toast 或 message 组件
-      console.log(successMessage);
+      void MessagePlugin.success(successMessage);
     }
   } catch (err) {
     console.error("Failed to copy text:", err);
+    void MessagePlugin.error("复制失败，请手动复制。");
   }
 }
 

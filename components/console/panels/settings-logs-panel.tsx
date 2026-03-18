@@ -2,6 +2,7 @@ import {
   Button,
   Checkbox,
   DateRangePicker,
+  DialogPlugin,
   Input,
   Select,
   Switch,
@@ -165,7 +166,15 @@ export function SettingsLogsPanel(props: any) {
           <Button
             variant="outline"
             theme="danger"
-            onClick={() => void clearApiLogs()}
+            onClick={() => {
+              const dialog = DialogPlugin.confirm({
+                header: t("确认清空", "Confirm Clear"),
+                body: t("此操作不可撤销，确认清空所有接口访问日志？", "This cannot be undone. Clear all API access logs?"),
+                confirmBtn: t("清空", "Clear"),
+                onConfirm: () => { void clearApiLogs(); dialog.hide(); },
+                onClose: () => dialog.hide(),
+              });
+            }}
             disabled={loadingLogs}
           >
             {t("清空日志", "Clear Logs")}

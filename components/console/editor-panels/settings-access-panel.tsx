@@ -4,7 +4,9 @@
 import {
   Button,
   Checkbox,
+  DialogPlugin,
   Input,
+  MessagePlugin,
   Select,
   Switch,
   Tabs,
@@ -148,12 +150,13 @@ export function SettingsAccessPanel(props: SettingsAccessPanelProps) {
                         <Button
                           variant="outline"
                           theme="default"
-                          onClick={() =>
+                          onClick={() => {
                             setKeyForm((prev: any) => ({
                               ...prev,
                               localKey: generateLocalKey()
-                            }))
-                          }
+                            }));
+                            void MessagePlugin.success(t("已生成新 Key", "New key generated"));
+                          }}
                         >
                           {t("生成", "Generate")}
                         </Button>
@@ -420,7 +423,15 @@ export function SettingsAccessPanel(props: SettingsAccessPanelProps) {
                                 <Button
                                   variant="outline"
                                   theme="danger"
-                                  onClick={() => removeKeyModelMapping(item.id)}
+                                  onClick={() => {
+                                    const dialog = DialogPlugin.confirm({
+                                      header: t("确认删除", "Confirm Delete"),
+                                      body: t("确认删除该模型映射？", "Delete this model mapping?"),
+                                      confirmBtn: t("删除", "Delete"),
+                                      onConfirm: () => { removeKeyModelMapping(item.id); dialog.hide(); },
+                                      onClose: () => dialog.hide(),
+                                    });
+                                  }}
                                 >
                                   {t("删除", "Delete")}
                                 </Button>
