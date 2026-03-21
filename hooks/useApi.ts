@@ -1,6 +1,48 @@
 "use client";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { keysApi, upstreamsApi, logsApi, usageApi, configApi, promptLabApi } from "@/lib/api";
+import type {
+  AiCallLogEntry,
+  AiCallLogFilterOptions,
+  AiCallLogStats,
+  ApiLogEntry,
+  ChannelsResponse,
+  GatewayKey,
+  KeysResponse,
+  UpstreamChannel,
+  UsageReport
+} from "@/components/console/types";
+import type {
+  ConfigSummaryResponse,
+  PromptLabReportResponse,
+  PromptLabRunSummaryResponse
+} from "@/components/console/settings-console-helpers";
+import type { RulePreviewResult } from "@/lib/prompt-lab-types";
+
+type CallLogsResponse = {
+  items: AiCallLogEntry[];
+  models: string[];
+  filterOptions: AiCallLogFilterOptions;
+  stats: AiCallLogStats;
+};
+
+type LogsResponse = {
+  items: ApiLogEntry[];
+};
+
+function sanitizeQueryParams(params?: Record<string, string>): Record<string, string> | undefined {
+  if (!params) {
+    return undefined;
+  }
+  const entries = Object.entries(params)
+    .map(([key, value]) => [key, String(value ?? "").trim()] as const)
+    .filter(([, value]) => value.length > 0)
+    .sort(([left], [right]) => left.localeCompare(right));
+  if (entries.length === 0) {
+    return undefined;
+  }
+  return Object.fromEntries(entries);
+}
 
 // Query keys for React Query cache management
 // React Query 缓存管理的查询键
@@ -40,12 +82,19 @@ export const queryKeys = {
 // Hook to fetch all gateway keys
 // 获取所有网关密钥的 hook
 export function useKeys() {
-  return useQuery({ queryKey: queryKeys.keys, queryFn: () => keysApi.list() });
+  return useQuery<KeysResponse>({
+    queryKey: queryKeys.keys,
+    queryFn: () => keysApi.list() as Promise<KeysResponse>
+  });
 }
 // Hook to fetch a single key by ID
 // 根据 ID 获取单个密钥的 hook
 export function useKey(id: number | null) {
-  return useQuery({ queryKey: queryKeys.key(id!), queryFn: () => keysApi.get(id!), enabled: id !== null });
+  return useQuery<GatewayKey>({
+    queryKey: queryKeys.key(id!),
+    queryFn: () => keysApi.get(id!) as Promise<GatewayKey>,
+    enabled: id !== null
+  });
 }
 // Hook to create a new key with mutation
 // 创建新密钥的 mutation hook
@@ -68,12 +117,19 @@ export function useDeleteKey() {
 // Hook to fetch all upstreams
 // 获取所有上游的 hook
 export function useUpstreams() {
-  return useQuery({ queryKey: queryKeys.upstreams, queryFn: () => upstreamsApi.list() });
+  return useQuery<ChannelsResponse>({
+    queryKey: queryKeys.upstreams,
+    queryFn: () => upstreamsApi.list() as Promise<ChannelsResponse>
+  });
 }
 // Hook to fetch a single upstream by ID
 // 根据 ID 获取单个上游的 hook
 export function useUpstream(id: number | null) {
-  return useQuery({ queryKey: queryKeys.upstream(id!), queryFn: () => upstreamsApi.get(id!), enabled: id !== null });
+  return useQuery<UpstreamChannel>({
+    queryKey: queryKeys.upstream(id!),
+    queryFn: () => upstreamsApi.get(id!) as Promise<UpstreamChannel>,
+    enabled: id !== null
+  });
 }
 // Hook to create a new upstream with mutation
 // 创建新上游的 mutation hook
@@ -96,22 +152,37 @@ export function useDeleteUpstream() {
 // Hook to fetch logs with optional parameters
 // 获取日志的 hook（带可选参数）
 export function useLogs(params?: Record<string, string>) {
-  return useQuery({ queryKey: [...queryKeys.logs, params], queryFn: () => logsApi.getLogs(params) });
+  const normalizedParams = sanitizeQueryParams(params);
+  return useQuery<LogsResponse>({
+    queryKey: [...queryKeys.logs, normalizedParams],
+    queryFn: () => logsApi.getLogs(normalizedParams) as Promise<LogsResponse>
+  });
 }
 // Hook to fetch call logs with optional parameters
 // 获取调用日志的 hook（带可选参数）
 export function useCallLogs(params?: Record<string, string>) {
-  return useQuery({ queryKey: [...queryKeys.callLogs, params], queryFn: () => logsApi.getCallLogs(params) });
+  const normalizedParams = sanitizeQueryParams(params);
+  return useQuery<CallLogsResponse>({
+    queryKey: [...queryKeys.callLogs, normalizedParams],
+    queryFn: () => logsApi.getCallLogs(normalizedParams) as Promise<CallLogsResponse>
+  });
 }
 // Hook to fetch usage report with optional parameters
 // 获取用量报告的 hook（带可选参数）
 export function useUsage(params?: Record<string, string>) {
-  return useQuery({ queryKey: [...queryKeys.usage, params], queryFn: () => usageApi.getReport(params) });
+  const normalizedParams = sanitizeQueryParams(params);
+  return useQuery<UsageReport>({
+    queryKey: [...queryKeys.usage, normalizedParams],
+    queryFn: () => usageApi.getReport(normalizedParams) as Promise<UsageReport>
+  });
 }
 // Hook to fetch gateway config
 // 获取网关配置的 hook
 export function useConfig() {
-  return useQuery({ queryKey: queryKeys.config, queryFn: configApi.getConfig });
+  return useQuery<ConfigSummaryResponse>({
+    queryKey: queryKeys.config,
+    queryFn: () => configApi.getConfig() as Promise<ConfigSummaryResponse>
+  });
 }
 
 // Hook to create a prompt lab run
@@ -123,9 +194,9 @@ export function useCreatePromptLabRun() {
 // Hook to fetch prompt lab run progress
 // 获取 Prompt Lab 任务进度的 hook
 export function usePromptLabRun(id: string | null) {
-  return useQuery({
+  return useQuery<PromptLabRunSummaryResponse>({
     queryKey: queryKeys.promptLabRun(id ?? ""),
-    queryFn: () => promptLabApi.getRun(id!),
+    queryFn: () => promptLabApi.getRun(id!) as Promise<PromptLabRunSummaryResponse>,
     enabled: !!id
   });
 }
@@ -133,9 +204,9 @@ export function usePromptLabRun(id: string | null) {
 // Hook to fetch prompt lab report
 // 获取 Prompt Lab 标准化报告的 hook
 export function usePromptLabReport(id: string | null) {
-  return useQuery({
+  return useQuery<PromptLabReportResponse>({
     queryKey: queryKeys.promptLabReport(id ?? ""),
-    queryFn: () => promptLabApi.getReport(id!),
+    queryFn: () => promptLabApi.getReport(id!) as Promise<PromptLabReportResponse>,
     enabled: !!id
   });
 }
@@ -143,5 +214,7 @@ export function usePromptLabReport(id: string | null) {
 // Hook to preview prompt rule matching
 // 预览提示词规则命中的 hook
 export function usePromptLabRulePreview() {
-  return useMutation({ mutationFn: promptLabApi.previewRule });
+  return useMutation<RulePreviewResult, Error, unknown>({
+    mutationFn: (data) => promptLabApi.previewRule(data) as Promise<RulePreviewResult>
+  });
 }

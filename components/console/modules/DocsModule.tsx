@@ -1,9 +1,11 @@
 "use client";
 
-import { Button, Tag } from "tdesign-react";
+import { Button, Tag, type TableProps } from "tdesign-react";
 import { CodeBlock } from "@/components/code-block";
 import { useLocale } from "@/components/locale-provider";
+import { StaticTable } from "@/components/ui/StaticTable";
 import {
+  type ApiDocEndpoint,
   API_DOC_GATEWAY_ENDPOINTS,
   API_DOC_MANAGEMENT_ENDPOINTS
 } from "@/components/console/types";
@@ -17,6 +19,13 @@ type DocsModuleProps = {
     responses: string;
     anthropicMessages: string;
   };
+};
+
+type ApiDocTableRow = {
+  id: string;
+  method: ApiDocEndpoint["method"];
+  path: string;
+  description: string;
 };
 
 export function DocsModule({ gatewayV1Endpoint, gatewayOrigin, apiDocExamples }: DocsModuleProps) {
@@ -38,6 +47,33 @@ export function DocsModule({ gatewayV1Endpoint, gatewayOrigin, apiDocExamples }:
     { title: "POST /v1/responses", content: apiDocExamples.responses, language: "bash" },
     { title: "POST /v1/messages", content: apiDocExamples.anthropicMessages, language: "bash" }
   ];
+  const endpointColumns: NonNullable<TableProps<ApiDocTableRow>["columns"]> = [
+    {
+      colKey: "method",
+      title: t("方法", "Method"),
+      width: 120,
+      cell: ({ row }) => <Tag variant="light-outline">{row.method}</Tag>
+    },
+    {
+      colKey: "path",
+      title: t("路径", "Path"),
+      cell: ({ row }) => <code>{row.path}</code>
+    },
+    {
+      colKey: "description",
+      title: t("说明", "Description"),
+      cell: ({ row }) => row.description
+    }
+  ];
+  const docSectionRows = docSections.map((section) => ({
+    ...section,
+    rows: section.endpoints.map((item) => ({
+      id: `${item.method}-${item.path}`,
+      method: item.method,
+      path: item.path,
+      description: t(item.zh, item.en)
+    }))
+  }));
 
   return (
     <section className="tc-section">
@@ -56,28 +92,11 @@ export function DocsModule({ gatewayV1Endpoint, gatewayOrigin, apiDocExamples }:
       </div>
 
       <div className="tc-usage-grid">
-        {docSections.map((section) => (
+        {docSectionRows.map((section) => (
           <div key={section.title} className="tc-usage-block">
             <h4>{section.title}</h4>
             <div className="tc-usage-table-wrap">
-              <table className="tc-usage-table">
-                <thead>
-                  <tr>
-                    <th>{t("方法", "Method")}</th>
-                    <th>{t("路径", "Path")}</th>
-                    <th>{t("说明", "Description")}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {section.endpoints.map((ep) => (
-                    <tr key={`${ep.method}-${ep.path}`}>
-                      <td><Tag variant="light-outline">{ep.method}</Tag></td>
-                      <td><code>{ep.path}</code></td>
-                      <td>{t(ep.zh, ep.en)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              <StaticTable className="tc-static-table" columns={endpointColumns} data={section.rows} />
             </div>
           </div>
         ))}

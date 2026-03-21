@@ -1,4 +1,4 @@
-import type { MouseEventHandler } from "react";
+import { Button, Tag } from "tdesign-react";
 
 export type ActiveFilterItem = {
   key: string;
@@ -18,16 +18,16 @@ export function ActiveFilterSummary({ items, onClearAll }: ActiveFilterSummaryPr
     return null;
   }
 
-  const toneClass = (tone: ActiveFilterItem["tone"]) => {
+  const resolveToneTheme = (tone: ActiveFilterItem["tone"]) => {
     switch (tone) {
       case "primary":
-        return "tc-filter-chip-primary";
+        return "primary";
       case "warning":
-        return "tc-filter-chip-warning";
+        return "warning";
       case "success":
-        return "tc-filter-chip-success";
+        return "success";
       default:
-        return "";
+        return "default";
     }
   };
 
@@ -39,22 +39,28 @@ export function ActiveFilterSummary({ items, onClearAll }: ActiveFilterSummaryPr
     <div className="tc-filter-summary">
       <div className="tc-filter-chip-list">
         {items.map((item) => (
-          <div key={item.key} className={`tc-filter-chip ${toneClass(item.tone)}`}>
-            <span>
-              {item.label}: {item.value}
-            </span>
-            {item.onClear ? (
-              <button type="button" className="tc-filter-chip-clear" onClick={() => handleClear(item)}>
-                ×
-              </button>
-            ) : null}
-          </div>
+          <Tag
+            key={item.key}
+            className="tc-filter-chip"
+            closable={Boolean(item.onClear)}
+            onClose={() => handleClear(item)}
+            theme={resolveToneTheme(item.tone)}
+            variant="light-outline"
+          >
+            {item.label}: {item.value}
+          </Tag>
         ))}
       </div>
       {onClearAll ? (
-        <button className="tc-filter-chip tc-filter-chip-clear-all" type="button" onClick={onClearAll}>
+        <Button
+          className="tc-filter-chip-clear-all"
+          onClick={onClearAll}
+          size="small"
+          theme="default"
+          variant="text"
+        >
           清除全部
-        </button>
+        </Button>
       ) : null}
     </div>
   );

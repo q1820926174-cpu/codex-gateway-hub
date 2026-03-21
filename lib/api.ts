@@ -1,14 +1,70 @@
+import { type ZodTypeAny } from "zod";
+import { parseApiContract, resolveApiResponseSchema } from "@/lib/api-contract";
+
 const API_BASE = "";
 
-// Fetch JSON data from API with error handling
-// 从 API  fetch JSON 数据并处理错误
-async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
+type FetchJsonOptions<T> = RequestInit & {
+  schema?: ZodTypeAny;
+};
+
+function mergeJsonHeaders(headers?: HeadersInit) {
+  const next = new Headers(headers);
+  if (!next.has("content-type")) {
+    next.set("Content-Type", "application/json");
+  }
+  return next;
+}
+
+async function readResponseBody(response: Response) {
+  const raw = await response.text();
+  if (!raw) {
+    return null;
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+}
+
+function buildErrorMessage(url: string, response: Response, body: unknown) {
+  const prefix = `API Error ${response.status} ${response.statusText} for ${url}`;
+  if (body && typeof body === "object") {
+    const candidate = body as { error?: unknown; message?: unknown; detail?: unknown };
+    const message =
+      (typeof candidate.error === "string" && candidate.error) ||
+      (typeof candidate.message === "string" && candidate.message) ||
+      (typeof candidate.detail === "string" && candidate.detail) ||
+      "";
+    if (message) {
+      return `${prefix}: ${message}`;
+    }
+  }
+  if (typeof body === "string" && body.trim()) {
+    return `${prefix}: ${body.trim().slice(0, 240)}`;
+  }
+  return prefix;
+}
+
+// Fetch JSON data from API with error handling and optional schema validation
+// 从 API  fetch JSON 数据，并在需要时做 schema 校验
+async function fetchJson<T>(url: string, options?: FetchJsonOptions<T>): Promise<T> {
+  const { schema, headers, ...requestInit } = options ?? {};
   const response = await fetch(`${API_BASE}${url}`, {
-    headers: { "Content-Type": "application/json", ...options?.headers },
-    ...options
+    ...requestInit,
+    headers: mergeJsonHeaders(headers)
   });
-  if (!response.ok) throw new Error(`API Error: ${response.status} ${response.statusText}`);
-  return response.json();
+  const body = await readResponseBody(response);
+  if (!response.ok) {
+    throw new Error(buildErrorMessage(url, response, body));
+  }
+
+  const resolvedSchema = schema ?? resolveApiResponseSchema(url, requestInit.method);
+  if (resolvedSchema) {
+    return parseApiContract(resolvedSchema, body, `${requestInit.method ?? "GET"} ${url}`) as T;
+  }
+
+  return body as T;
 }
 
 // API endpoints for managing gateway keys
@@ -117,5 +173,9 @@ export const promptLabApi = {
   // Preview rule matching result
   // 预览规则命中结果
   previewRule: (data: unknown) =>
-    fetchJson("/api/prompt-lab/rule-preview", { method: "POST", body: JSON.stringify(data) })
+    fetchJson("/api/prompt-lab/rule-preview", { method: "POST", body: JSON.stringify(data) }),
+  // Optimize third-party prompt for Codex compatibility
+  // 将第三方提示词优化为更适配 Codex 的版本
+  optimize: (data: unknown) =>
+    fetchJson("/api/prompt-lab/optimize", { method: "POST", body: JSON.stringify(data) })
 };

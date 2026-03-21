@@ -1,12 +1,20 @@
 "use client";
 
-import { SettingsConsole } from "@/components/settings-console";
+import dynamic from "next/dynamic";
 import type { EditorModule } from "@/components/console/types";
 import { PromptModule } from "@/components/console/modules/PromptModule";
 
 type ModuleRouterProps = {
   module?: EditorModule;
 };
+
+const LegacySettingsConsole = dynamic(
+  () => import("@/components/settings-console").then((module) => module.SettingsConsole),
+  {
+    ssr: false,
+    loading: () => null
+  }
+);
 
 /**
  * ModuleRouter - 所有模块使用原始完整功能组件
@@ -17,5 +25,5 @@ export function ModuleRouter({ module }: ModuleRouterProps) {
   if (module === "prompt") {
     return <PromptModule />;
   }
-  return <SettingsConsole module={module} />;
+  return <LegacySettingsConsole module={module} />;
 }

@@ -1,34 +1,38 @@
 import {
   Button,
   Checkbox,
-  DateRangePicker,
   Input,
-  Select,
-  Switch,
   Tag
 } from "tdesign-react";
 import { CodeBlock } from "@/components/code-block";
-import { JsonViewer } from "@/components/json-viewer";
-import { UsageLoadingSkeleton } from "@/components/ui/UsageLoadingSkeleton";
-import { UsagePieChart } from "@/components/ui/UsagePieChart";
-import { UsageStatCard } from "@/components/ui/UsageStatCard";
-import {
-  AI_CALL_RANGE_OPTIONS,
-  API_DOC_GATEWAY_ENDPOINTS,
-  API_DOC_MANAGEMENT_ENDPOINTS,
-  USAGE_METRIC_META,
-  USAGE_RANGE_OPTIONS
-} from "@/components/console/types";
-import {
-  MarkdownLogBlock,
-  formatCnDate,
-  formatNumber,
-  pickUsageMetricValue,
-  summarizeLogPreview
-} from "@/components/console/settings-console-helpers";
+import type { GatewayKey } from "@/components/console/types";
 
+type RuntimeApiExampleKey =
+  | "queryStatus"
+  | "switchModel"
+  | "clearOverride"
+  | "toggleEnabledById"
+  | "payloadSchema";
 
-export function SettingsRuntimePanel(props: any) {
+type RuntimeApiExamples = Record<RuntimeApiExampleKey, string>;
+
+type SettingsRuntimePanelProps = {
+  t: (zh: string, en: string) => string;
+  selectedKey: GatewayKey | null;
+  runtimeModel: string;
+  setRuntimeModel: (value: string) => void;
+  syncDefaultModel: boolean;
+  setSyncDefaultModel: (value: boolean) => void;
+  switchingModel: boolean;
+  switchModel: (clear: boolean) => Promise<void> | void;
+  loading: boolean;
+  runtimeSwitchEndpoint: string;
+  runtimeApiExamples: RuntimeApiExamples;
+  copyTextToClipboard: (value: string, successMessage?: string) => Promise<void> | void;
+  downloadRuntimeApiExample: (key: RuntimeApiExampleKey) => void;
+};
+
+export function SettingsRuntimePanel(props: SettingsRuntimePanelProps) {
   const {
     t,
     selectedKey,

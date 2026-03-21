@@ -12,8 +12,9 @@ import {
   type ColumnFiltersState,
   type PaginationState
 } from "@tanstack/react-table";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Button, Input } from "tdesign-react";
+import { StaticTable } from "@/components/ui/StaticTable";
 
 type DataTableProps<TData, TValue> = {
   columns: ColumnDef<TData, TValue>[];
@@ -51,6 +52,25 @@ export function DataTable<TData, TValue>({
       pagination
     }
   });
+  const headerGroups = table.getHeaderGroups();
+  const visibleHeaders =
+    headerGroups.length > 0
+      ? headerGroups[headerGroups.length - 1].headers.filter((header) => !header.isPlaceholder)
+      : [];
+  const tableData = table.getRowModel().rows.map((row) => ({
+    id: row.id,
+    cells: Object.fromEntries(
+      row.getVisibleCells().map((cell) => [
+        cell.column.id,
+        flexRender(cell.column.columnDef.cell, cell.getContext())
+      ])
+    ) as Record<string, ReactNode>
+  }));
+  const tableColumns = visibleHeaders.map((header) => ({
+    colKey: header.id,
+    title: flexRender(header.column.columnDef.header, header.getContext()),
+    cell: ({ row }: { row: { cells: Record<string, ReactNode> } }) => row.cells[header.id] ?? null
+  }));
 
   return (
     <div className="tc-usage-table-wrap">
@@ -67,43 +87,12 @@ export function DataTable<TData, TValue>({
         </div>
       ) : null}
 
-      <table className="tc-usage-table">
-        <thead>
-          {table.getHeaderGroups().map((headerGroup) => (
-            <tr key={headerGroup.id}>
-              {headerGroup.headers.map((header) => (
-                <th key={header.id}>
-                  {header.isPlaceholder
-                    ? null
-                    : flexRender(
-                        header.column.columnDef.header,
-                        header.getContext()
-                      )}
-                </th>
-              ))}
-            </tr>
-          ))}
-        </thead>
-        <tbody>
-          {table.getRowModel().rows?.length ? (
-            table.getRowModel().rows.map((row) => (
-              <tr key={row.id}>
-                {row.getVisibleCells().map((cell) => (
-                  <td key={cell.id}>
-                    {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                  </td>
-                ))}
-              </tr>
-            ))
-          ) : (
-            <tr>
-              <td colSpan={columns.length} className="text-center py-4">
-                无数据
-              </td>
-            </tr>
-          )}
-        </tbody>
-      </table>
+      <StaticTable
+        className="tc-usage-table"
+        columns={tableColumns}
+        data={tableData}
+        empty="无数据"
+      />
 
       <div className="flex items-center justify-between py-4">
         <div className="text-sm text-gray-500">

@@ -22,14 +22,17 @@ export function ConsoleLayout({
 }: ConsoleLayoutProps) {
   return (
     <div className="tc-console">
+      <a className="tc-skip-link" href="#console-main">
+        跳到主内容 / Skip to main content
+      </a>
       <Layout className="tc-layout">
         <ConsoleSidebar activeModule={activeModule} onModuleChange={onModuleChange} />
-        <Layout className="tc-main">
+        <main id="console-main" className="tc-main" tabIndex={-1}>
           <ConsoleHeader activeModule={activeModule} subtitle={headerSubtitle}>
             {headerChildren}
           </ConsoleHeader>
           <Layout.Content className="tc-content">{children}</Layout.Content>
-        </Layout>
+        </main>
       </Layout>
     </div>
   );

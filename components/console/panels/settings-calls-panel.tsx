@@ -17,6 +17,7 @@ import {
   AI_CALL_RANGE_OPTIONS,
   API_DOC_GATEWAY_ENDPOINTS,
   API_DOC_MANAGEMENT_ENDPOINTS,
+  type AiCallLogEntry,
   USAGE_METRIC_META,
   USAGE_RANGE_OPTIONS
 } from "@/components/console/types";
@@ -27,7 +28,20 @@ import {
   pickUsageMetricValue,
   summarizeLogPreview
 } from "@/components/console/settings-console-helpers";
-import { ActiveFilterSummary, FilterPresetBar } from "@/components/console/filters";
+import { ActiveFilterSummary } from "@/components/console/filters/ActiveFilterSummary";
+import { FilterPresetBar } from "@/components/console/filters/FilterPresetBar";
+
+type SavedPreset = { id: string; name: string };
+type VisionModelStat = { model: string; count: number };
+type VisionKeyStat = { keyId: number; keyName: string; count: number };
+type AiCallImage = NonNullable<AiCallLogEntry["images"]>[number];
+type AiCallStatsLike = {
+  matched: number;
+  main: number;
+  visionFallback: number;
+  visionByModel: VisionModelStat[];
+  visionByKey: VisionKeyStat[];
+};
 
 
 export function SettingsCallsPanel(props: any) {
@@ -89,6 +103,16 @@ export function SettingsCallsPanel(props: any) {
     toggleAiCallLogExpanded,
     setPreviewImage
   } = props;
+  const savedPresets = (aiCallSavedPresets as SavedPreset[] | undefined) ?? [];
+  const aiCallStatsLike: AiCallStatsLike =
+    (aiCallStats as AiCallStatsLike | undefined) ?? {
+      matched: 0,
+      main: 0,
+      visionFallback: 0,
+      visionByModel: [],
+      visionByKey: []
+    };
+  const visibleAiCallLogs = (deferredAiCallLogs as AiCallLogEntry[] | undefined) ?? [];
 
   return (
     <section className="tc-section">
@@ -101,7 +125,7 @@ export function SettingsCallsPanel(props: any) {
       </p>
 
       <FilterPresetBar
-        presets={aiCallSavedPresets.map((item: any) => ({ id: item.id, name: item.name }))}
+        presets={savedPresets.map((item) => ({ id: item.id, name: item.name }))}
         activePresetId={aiCallSelectedPresetId === "all" ? undefined : aiCallSelectedPresetId}
         onSelectPreset={(id) => applyAiCallPresetById(id || "all")}
         onSavePreset={() => saveAiCallPreset()}
@@ -387,17 +411,17 @@ export function SettingsCallsPanel(props: any) {
       <ActiveFilterSummary items={aiCallActiveFilters} onClearAll={resetAiCallFilters} />
 
       <div className="tc-meta-row">
-        <Tag variant="light-outline">匹配调用={aiCallStats.matched}</Tag>
-        <Tag variant="light-outline">主调用={aiCallStats.main}</Tag>
+        <Tag variant="light-outline">匹配调用={aiCallStatsLike.matched}</Tag>
+        <Tag variant="light-outline">主调用={aiCallStatsLike.main}</Tag>
         <Tag theme="warning" variant="light-outline">
-          辅助视觉={aiCallStats.visionFallback}
+          辅助视觉={aiCallStatsLike.visionFallback}
         </Tag>
-        {aiCallStats.visionByModel.slice(0, 5).map((item: any) => (
+        {aiCallStatsLike.visionByModel.slice(0, 5).map((item) => (
           <Tag key={`vision-model-${item.model}`} theme="primary" variant="light-outline">
             视觉模型 {item.model} · {item.count}
           </Tag>
         ))}
-        {aiCallStats.visionByKey.slice(0, 3).map((item: any) => (
+        {aiCallStatsLike.visionByKey.slice(0, 3).map((item) => (
           <Tag key={`vision-key-${item.keyId}`} variant="light-outline">
             视觉 Key {item.keyName} · {item.count}
           </Tag>
@@ -416,7 +440,7 @@ export function SettingsCallsPanel(props: any) {
         ) : null}
       </div>
 
-      {deferredAiCallLogs.length === 0 ? (
+      {visibleAiCallLogs.length === 0 ? (
         <p className="tc-upstream-advice">
           {t(
             "暂无 AI 调用日志。先发起一次模型请求后再查看。",
@@ -425,7 +449,7 @@ export function SettingsCallsPanel(props: any) {
         </p>
       ) : (
         <div className="tc-log-list">
-          {deferredAiCallLogs.map((item: any) => {
+          {visibleAiCallLogs.map((item) => {
             const assistantReasoning = item.assistantReasoning?.trim() || "";
             const assistantResponse = item.assistantResponse?.trim() || "";
             const displayAssistantResponse =
@@ -433,6 +457,7 @@ export function SettingsCallsPanel(props: any) {
                 ? ""
                 : item.assistantResponse || "";
             const expanded = expandedAiCallLogIdSet.has(item.id);
+            const detailsId = `ai-call-log-${item.id}-details`;
             const previewText = summarizeLogPreview(
               displayAssistantResponse,
               assistantReasoning,
@@ -467,6 +492,8 @@ export function SettingsCallsPanel(props: any) {
                         size="small"
                         variant="text"
                         onClick={() => toggleAiCallLogExpanded(item.id)}
+                        aria-expanded={expanded}
+                        aria-controls={detailsId}
                       >
                         {expanded ? t("收起详情", "Collapse") : t("展开详情", "Expand")}
                       </Button>
@@ -479,103 +506,107 @@ export function SettingsCallsPanel(props: any) {
                     <span className="tc-log-id">log#{item.id}</span>
                   </div>
                 </div>
-                {expanded ? (
-                  <>
-                    {item.conversationTranscript?.trim() ? (
-                      <div className="tc-log-panels">
-                        <div className="tc-log-panel tc-log-panel-full">
-                          <strong>完整上下文</strong>
-                          <MarkdownLogBlock value={item.conversationTranscript} />
-                        </div>
-                      </div>
-                    ) : null}
-                    <div className="tc-log-panels">
-                      <div className="tc-log-panel">
-                        <strong>系统提示词</strong>
-                        <MarkdownLogBlock value={item.systemPrompt || ""} />
-                      </div>
-                      <div className="tc-log-panel">
-                        <strong>用户提问</strong>
-                        <MarkdownLogBlock value={item.userPrompt || ""} />
-                      </div>
-                    </div>
-                    {assistantReasoning ? (
-                      <div className="tc-log-panels">
-                        <div className="tc-log-panel tc-log-panel-full">
-                          <strong>{t("深度思考", "Deep Thinking")}</strong>
-                          <MarkdownLogBlock value={assistantReasoning} />
-                        </div>
-                      </div>
-                    ) : null}
-                    {Array.isArray(item.images) && item.images.length > 0 ? (
-                      <div className="tc-log-panels">
-                        <div className="tc-log-panel tc-log-panel-full">
-                          <strong>图片快照</strong>
-                          <div className="tc-log-image-grid">
-                            {item.images.map((image: any, idx: number) => (
-                              <article
-                                className="tc-log-image-card"
-                                key={`${item.id}-image-${idx}-${image.savedUrl ?? image.source}`}
-                              >
-                                {image.savedUrl ? (
-                                  <button
-                                    type="button"
-                                    className="tc-log-image-zoom-btn"
-                                    onClick={() =>
-                                      setPreviewImage({
-                                        url: image.savedUrl!,
-                                        title: `log#${item.id} · 图片 ${idx + 1}`
-                                      })
-                                    }
-                                  >
-                                    <img
-                                      src={image.savedUrl}
-                                      alt={`log-${item.id}-image-${idx + 1}`}
-                                      className="tc-log-image-thumb"
-                                      loading="lazy"
-                                    />
-                                  </button>
-                                ) : (
-                                  <div className="tc-log-image-missing">图片保存失败</div>
-                                )}
-                                <div className="tc-log-image-meta">
-                                  <span>来源：{image.sourceType}</span>
-                                  <span>地址：{image.source}</span>
-                                  <span>类型：{image.mimeType || "-"}</span>
-                                  <span>
-                                    大小：
-                                    {typeof image.sizeBytes === "number"
-                                      ? `${formatNumber(image.sizeBytes)} bytes`
-                                      : "-"}
-                                  </span>
-                                  {image.error ? (
-                                    <span className="tc-log-image-error">{image.error}</span>
-                                  ) : null}
-                                </div>
-                              </article>
-                            ))}
+                <div id={detailsId}>
+                  {expanded ? (
+                    <>
+                      {item.conversationTranscript?.trim() ? (
+                        <div className="tc-log-panels">
+                          <div className="tc-log-panel tc-log-panel-full">
+                            <strong>完整上下文</strong>
+                            <MarkdownLogBlock value={item.conversationTranscript} />
                           </div>
                         </div>
-                      </div>
-                    ) : null}
-                    {displayAssistantResponse ? (
+                      ) : null}
                       <div className="tc-log-panels">
-                        <div className="tc-log-panel tc-log-panel-full">
-                          <strong>模型回答</strong>
-                          <MarkdownLogBlock value={displayAssistantResponse} />
+                        <div className="tc-log-panel">
+                          <strong>系统提示词</strong>
+                          <MarkdownLogBlock value={item.systemPrompt || ""} />
+                        </div>
+                        <div className="tc-log-panel">
+                          <strong>用户提问</strong>
+                          <MarkdownLogBlock value={item.userPrompt || ""} />
                         </div>
                       </div>
-                    ) : null}
-                  </>
-                ) : (
-                  <div className="tc-log-preview">
-                    {previewText ||
-                      t(
-                        "详情已折叠，点击“展开详情”查看完整日志。",
-                        "Details collapsed. Click Expand to render the full log."
-                      )}
-                  </div>
-                )}
+                      {assistantReasoning ? (
+                        <div className="tc-log-panels">
+                          <div className="tc-log-panel tc-log-panel-full">
+                            <strong>{t("深度思考", "Deep Thinking")}</strong>
+                            <MarkdownLogBlock value={assistantReasoning} />
+                          </div>
+                        </div>
+                      ) : null}
+                      {Array.isArray(item.images) && item.images.length > 0 ? (
+                        <div className="tc-log-panels">
+                          <div className="tc-log-panel tc-log-panel-full">
+                            <strong>图片快照</strong>
+                            <div className="tc-log-image-grid">
+                              {(item.images as AiCallImage[]).map((image, idx) => (
+                                <article
+                                  className="tc-log-image-card"
+                                  key={`${item.id}-image-${idx}-${image.savedUrl ?? image.source}`}
+                                >
+                                  {image.savedUrl ? (
+                                    <Button
+                                      className="tc-log-image-zoom-btn"
+                                      aria-label={`${t("预览日志图片", "Preview log image")} ${idx + 1}`}
+                                      onClick={() =>
+                                        setPreviewImage({
+                                          url: image.savedUrl!,
+                                          title: `log#${item.id} · 图片 ${idx + 1}`
+                                        })
+                                      }
+                                      theme="default"
+                                      variant="text"
+                                    >
+                                      <img
+                                        src={image.savedUrl}
+                                        alt={`log-${item.id}-image-${idx + 1}`}
+                                        className="tc-log-image-thumb"
+                                        loading="lazy"
+                                      />
+                                    </Button>
+                                  ) : (
+                                    <div className="tc-log-image-missing">图片保存失败</div>
+                                  )}
+                                  <div className="tc-log-image-meta">
+                                    <span>来源：{image.sourceType}</span>
+                                    <span>地址：{image.source}</span>
+                                    <span>类型：{image.mimeType || "-"}</span>
+                                    <span>
+                                      大小：
+                                      {typeof image.sizeBytes === "number"
+                                        ? `${formatNumber(image.sizeBytes)} bytes`
+                                        : "-"}
+                                    </span>
+                                    {image.error ? (
+                                      <span className="tc-log-image-error">{image.error}</span>
+                                    ) : null}
+                                  </div>
+                                </article>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      ) : null}
+                      {displayAssistantResponse ? (
+                        <div className="tc-log-panels">
+                          <div className="tc-log-panel tc-log-panel-full">
+                            <strong>模型回答</strong>
+                            <MarkdownLogBlock value={displayAssistantResponse} />
+                          </div>
+                        </div>
+                      ) : null}
+                    </>
+                  ) : (
+                    <div className="tc-log-preview">
+                      {previewText ||
+                        t(
+                          "详情已折叠，点击“展开详情”查看完整日志。",
+                          "Details collapsed. Click Expand to render the full log."
+                        )}
+                    </div>
+                  )}
+                </div>
               </article>
             );
           })}

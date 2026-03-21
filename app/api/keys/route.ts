@@ -82,26 +82,6 @@ export async function POST(req: Request) {
 
     const payload = parsed.data;
     const keyModelMappings = normalizeKeyModelMappings(payload.modelMappings);
-    let upstreamChannel: UpstreamChannel | null = null;
-    if (payload.upstreamChannelId !== undefined) {
-      upstreamChannel = await prisma.upstreamChannel.findUnique({
-        where: { id: payload.upstreamChannelId }
-      });
-      if (!upstreamChannel || !upstreamChannel.enabled) {
-        return NextResponse.json(
-          {
-            error: "Selected upstream channel not found or disabled."
-          },
-          { status: 400 }
-        );
-      }
-    }
-
-    const defaultModel = (upstreamChannel?.defaultModel ?? payload.defaultModel).trim();
-    const effectiveProvider = (upstreamChannel?.provider ?? payload.provider) as ProviderName;
-    const effectiveWireApi = normalizeUpstreamWireApiValue(
-      upstreamChannel?.upstreamWireApi ?? payload.upstreamWireApi
-    ) as (typeof UPSTREAM_WIRE_APIS)[number];
     const mappingChannelIds = Array.from(
       new Set(
         keyModelMappings
@@ -112,15 +92,39 @@ export async function POST(req: Request) {
           )
       )
     );
-    const mappingChannels = mappingChannelIds.length
-      ? await prisma.upstreamChannel.findMany({
+    const upstreamChannelPromise: Promise<UpstreamChannel | null> =
+      payload.upstreamChannelId !== undefined
+        ? prisma.upstreamChannel.findUnique({
+            where: { id: payload.upstreamChannelId }
+          })
+        : Promise.resolve(null);
+    const mappingChannelsPromise: Promise<UpstreamChannel[]> = mappingChannelIds.length
+      ? prisma.upstreamChannel.findMany({
           where: {
             id: {
               in: mappingChannelIds
             }
           }
         })
-      : [];
+      : Promise.resolve([]);
+    const [upstreamChannel, mappingChannels] = await Promise.all([
+      upstreamChannelPromise,
+      mappingChannelsPromise
+    ]);
+    if (payload.upstreamChannelId !== undefined && (!upstreamChannel || !upstreamChannel.enabled)) {
+      return NextResponse.json(
+        {
+          error: "Selected upstream channel not found or disabled."
+        },
+        { status: 400 }
+      );
+    }
+
+    const defaultModel = (upstreamChannel?.defaultModel ?? payload.defaultModel).trim();
+    const effectiveProvider = (upstreamChannel?.provider ?? payload.provider) as ProviderName;
+    const effectiveWireApi = normalizeUpstreamWireApiValue(
+      upstreamChannel?.upstreamWireApi ?? payload.upstreamWireApi
+    ) as (typeof UPSTREAM_WIRE_APIS)[number];
     const mappingChannelMap = new Map(mappingChannels.map((item) => [item.id, item]));
     for (const channelId of mappingChannelIds) {
       const channel = mappingChannelMap.get(channelId);

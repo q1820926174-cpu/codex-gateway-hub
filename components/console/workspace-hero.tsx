@@ -1,4 +1,6 @@
+import Link from "next/link";
 import type { ReactNode } from "react";
+import { ActionCardButton } from "@/components/ui/ActionCardButton";
 
 export type WorkspaceHeroTone = "default" | "accent" | "success" | "warning";
 
@@ -14,7 +16,8 @@ export type WorkspaceHeroAction = {
   id: string;
   label: string;
   note: string;
-  onClick: () => void;
+  href?: string;
+  onClick?: () => void;
   disabled?: boolean;
 };
 
@@ -65,16 +68,29 @@ export function WorkspaceHero({ title, subtitle, stats, actions, rightSlot }: Wo
 
       <div className="tc-workspace-hero-actions">
         {actions.map((action) => (
-          <button
-            type="button"
-            key={action.id}
-            className="tc-workspace-hero-action"
-            onClick={action.onClick}
-            disabled={action.disabled}
-          >
-            <strong>{action.label}</strong>
-            <span>{action.note}</span>
-          </button>
+          action.href && !action.disabled ? (
+            <Link
+              href={action.href}
+              key={action.id}
+              className="tc-workspace-hero-action"
+              onClick={() => {
+                action.onClick?.();
+              }}
+            >
+              <strong>{action.label}</strong>
+              <span>{action.note}</span>
+            </Link>
+          ) : (
+            <ActionCardButton
+              key={action.id}
+              className="tc-workspace-hero-action"
+              onClick={action.onClick}
+              disabled={action.disabled}
+            >
+              <strong>{action.label}</strong>
+              <span>{action.note}</span>
+            </ActionCardButton>
+          )
         ))}
       </div>
     </section>

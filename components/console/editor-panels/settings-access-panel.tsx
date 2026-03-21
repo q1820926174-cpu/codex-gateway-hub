@@ -32,7 +32,7 @@ import {
   shouldShowGlmThinkingThreshold
 } from "@/components/console/settings-console-helpers";
 import type { CodexApplyPatchToolType } from "@/lib/codex-export";
-import { ActiveFilterSummary } from "@/components/console/filters";
+import { ActiveFilterSummary } from "@/components/console/filters/ActiveFilterSummary";
 
 type AnyStateSetter = (updater: any | ((prev: any) => any)) => void;
 type AnyItemUpdater = (id: any, updater: (prev: any) => any) => void;

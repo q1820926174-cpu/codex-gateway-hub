@@ -17,10 +17,12 @@ import { Card, Tag } from "tdesign-react";
 import {
   MODULE_LABEL,
   MODULE_SUMMARY,
-  type EditorModule
+  type ChannelsResponse,
+  type EditorModule,
+  type KeysResponse
 } from "@/components/console/types";
 import { useKeys, useUpstreams } from "@/hooks/useApi";
-import { motion } from "framer-motion";
+import { motion, useReducedMotion } from "framer-motion";
 
 function toLocaleKey(locale: LocaleCode): "zh" | "en" {
   return locale === "en-US" ? "en" : "zh";
@@ -33,6 +35,7 @@ type SettingsConsoleProps = {
 export function SettingsConsole({ module }: SettingsConsoleProps) {
   const { t, locale } = useLocale();
   const router = useRouter();
+  const shouldReduceMotion = useReducedMotion() ?? false;
   const [activeModule, setActiveModule] = useState<EditorModule>(module || "access");
   const { data: keysData } = useKeys();
   const { data: upstreamsData } = useUpstreams();
@@ -49,19 +52,19 @@ export function SettingsConsole({ module }: SettingsConsoleProps) {
     }
   }, [module, activeModule]);
 
-  const keys = (keysData as any)?.items || [];
-  const upstreams = (upstreamsData as any)?.items || [];
+  const keys = (keysData as KeysResponse | undefined)?.items ?? [];
+  const upstreams = (upstreamsData as ChannelsResponse | undefined)?.items ?? [];
 
   const moduleItems = [
-    { id: "access" as EditorModule, title: MODULE_LABEL.access[lk], description: MODULE_SUMMARY.access[lk], icon: <UserCircle size={18} />, active: activeModule === "access", onSelect: (id: string) => handleModuleChange(id as EditorModule), value: keys.length ? `${keys.length} ` + t("个", "items") : undefined },
-    { id: "prompt" as EditorModule, title: MODULE_LABEL.prompt[lk], description: MODULE_SUMMARY.prompt[lk], icon: <Code2 size={18} />, active: activeModule === "prompt", onSelect: (id: string) => handleModuleChange(id as EditorModule) },
-    { id: "export" as EditorModule, title: MODULE_LABEL.export[lk], description: MODULE_SUMMARY.export[lk], icon: <Code2 size={18} />, active: activeModule === "export", onSelect: (id: string) => handleModuleChange(id as EditorModule), value: keys.length ? `${keys.length} ` + t("组可导出", "exportable") : undefined },
-    { id: "upstream" as EditorModule, title: MODULE_LABEL.upstream[lk], description: MODULE_SUMMARY.upstream[lk], icon: <Code2 size={18} />, active: activeModule === "upstream", onSelect: (id: string) => handleModuleChange(id as EditorModule), value: upstreams.length ? `${upstreams.length} ` + t("个", "items") : undefined },
-    { id: "runtime" as EditorModule, title: MODULE_LABEL.runtime[lk], description: MODULE_SUMMARY.runtime[lk], icon: <Settings size={18} />, active: activeModule === "runtime", onSelect: (id: string) => handleModuleChange(id as EditorModule) },
-    { id: "logs" as EditorModule, title: MODULE_LABEL.logs[lk], description: MODULE_SUMMARY.logs[lk], icon: <Clock size={18} />, active: activeModule === "logs", onSelect: (id: string) => handleModuleChange(id as EditorModule) },
-    { id: "calls" as EditorModule, title: MODULE_LABEL.calls[lk], description: MODULE_SUMMARY.calls[lk], icon: <LayoutDashboard size={18} />, active: activeModule === "calls", onSelect: (id: string) => handleModuleChange(id as EditorModule) },
-    { id: "usage" as EditorModule, title: MODULE_LABEL.usage[lk], description: MODULE_SUMMARY.usage[lk], icon: <LayoutDashboard size={18} />, active: activeModule === "usage", onSelect: (id: string) => handleModuleChange(id as EditorModule) },
-    { id: "docs" as EditorModule, title: MODULE_LABEL.docs[lk], description: MODULE_SUMMARY.docs[lk], icon: <Code2 size={18} />, active: activeModule === "docs", onSelect: (id: string) => handleModuleChange(id as EditorModule) }
+    { id: "access" as EditorModule, title: MODULE_LABEL.access[lk], description: MODULE_SUMMARY.access[lk], icon: <UserCircle size={18} />, active: activeModule === "access", href: "/console/access", onSelect: () => setActiveModule("access"), value: keys.length ? `${keys.length} ` + t("个", "items") : undefined },
+    { id: "prompt" as EditorModule, title: MODULE_LABEL.prompt[lk], description: MODULE_SUMMARY.prompt[lk], icon: <Code2 size={18} />, active: activeModule === "prompt", href: "/console/prompt", onSelect: () => setActiveModule("prompt") },
+    { id: "export" as EditorModule, title: MODULE_LABEL.export[lk], description: MODULE_SUMMARY.export[lk], icon: <Code2 size={18} />, active: activeModule === "export", href: "/console/export", onSelect: () => setActiveModule("export"), value: keys.length ? `${keys.length} ` + t("组可导出", "exportable") : undefined },
+    { id: "upstream" as EditorModule, title: MODULE_LABEL.upstream[lk], description: MODULE_SUMMARY.upstream[lk], icon: <Code2 size={18} />, active: activeModule === "upstream", href: "/console/upstream", onSelect: () => setActiveModule("upstream"), value: upstreams.length ? `${upstreams.length} ` + t("个", "items") : undefined },
+    { id: "runtime" as EditorModule, title: MODULE_LABEL.runtime[lk], description: MODULE_SUMMARY.runtime[lk], icon: <Settings size={18} />, active: activeModule === "runtime", href: "/console/runtime", onSelect: () => setActiveModule("runtime") },
+    { id: "logs" as EditorModule, title: MODULE_LABEL.logs[lk], description: MODULE_SUMMARY.logs[lk], icon: <Clock size={18} />, active: activeModule === "logs", href: "/console/logs", onSelect: () => setActiveModule("logs") },
+    { id: "calls" as EditorModule, title: MODULE_LABEL.calls[lk], description: MODULE_SUMMARY.calls[lk], icon: <LayoutDashboard size={18} />, active: activeModule === "calls", href: "/console/calls", onSelect: () => setActiveModule("calls") },
+    { id: "usage" as EditorModule, title: MODULE_LABEL.usage[lk], description: MODULE_SUMMARY.usage[lk], icon: <LayoutDashboard size={18} />, active: activeModule === "usage", href: "/console/usage", onSelect: () => setActiveModule("usage") },
+    { id: "docs" as EditorModule, title: MODULE_LABEL.docs[lk], description: MODULE_SUMMARY.docs[lk], icon: <Code2 size={18} />, active: activeModule === "docs", href: "/console/docs", onSelect: () => setActiveModule("docs") }
   ];
 
   const heroStats = [
@@ -72,9 +75,9 @@ export function SettingsConsole({ module }: SettingsConsoleProps) {
   ];
 
   const heroActions = [
-    { id: "new-key", label: t("创建 Key", "Create Key"), note: t("快速创建本地 Key", "Quickly create a local key"), onClick: () => router.push("/console/access"), disabled: false },
-    { id: "new-upstream", label: t("添加渠道", "Add Upstream"), note: t("配置新的上游供应商", "Configure a new upstream provider"), onClick: () => router.push("/console/upstream"), disabled: false },
-    { id: "view-docs", label: t("查看文档", "View Docs"), note: t("API 文档与示例", "API docs and examples"), onClick: () => router.push("/console/docs"), disabled: false }
+    { id: "new-key", label: t("创建 Key", "Create Key"), note: t("快速创建本地 Key", "Quickly create a local key"), href: "/console/access", onClick: () => setActiveModule("access"), disabled: false },
+    { id: "new-upstream", label: t("添加渠道", "Add Upstream"), note: t("配置新的上游供应商", "Configure a new upstream provider"), href: "/console/upstream", onClick: () => setActiveModule("upstream"), disabled: false },
+    { id: "view-docs", label: t("查看文档", "View Docs"), note: t("API 文档与示例", "API docs and examples"), href: "/console/docs", onClick: () => setActiveModule("docs"), disabled: false }
   ];
 
   return (
@@ -84,7 +87,11 @@ export function SettingsConsole({ module }: SettingsConsoleProps) {
       headerSubtitle={t("欢迎回来", "Welcome back")}
     >
       <div className="tc-overview-zone">
-        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5 }}>
+        <motion.div
+          initial={shouldReduceMotion ? false : { opacity: 0, y: 20 }}
+          animate={shouldReduceMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
+          transition={shouldReduceMotion ? { duration: 0 } : { duration: 0.5 }}
+        >
           <WorkspaceHero
             title={t("Codex Gateway", "Codex Gateway")}
             subtitle={t(
@@ -103,11 +110,20 @@ export function SettingsConsole({ module }: SettingsConsoleProps) {
           />
         </motion.div>
 
-        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5, delay: 0.1 }}>
+        <motion.div
+          initial={shouldReduceMotion ? false : { opacity: 0, y: 20 }}
+          animate={shouldReduceMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
+          transition={shouldReduceMotion ? { duration: 0 } : { duration: 0.5, delay: 0.1 }}
+        >
           <ModuleSwitcherCards title={t("控制台模块", "Console Modules")} items={moduleItems} />
         </motion.div>
 
-        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5, delay: 0.2 }} className="mt-4">
+        <motion.div
+          initial={shouldReduceMotion ? false : { opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={shouldReduceMotion ? { duration: 0 } : { duration: 0.5, delay: 0.2 }}
+          className="mt-4"
+        >
           <Card className="tc-panel">
             <h3 style={{ margin: 0, fontSize: "16px", color: "#0f172a" }}>
               {t("重构进行中...", "Refactoring in progress...")}

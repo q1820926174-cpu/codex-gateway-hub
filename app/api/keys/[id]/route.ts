@@ -113,185 +113,192 @@ export async function PUT(
       payload.upstreamChannelId === undefined
         ? existing.upstreamChannelId ?? null
         : payload.upstreamChannelId;
-    let selectedChannel: UpstreamChannel | null = null;
-    if (nextUpstreamChannelId !== null) {
-      selectedChannel = await prisma.upstreamChannel.findUnique({
-        where: { id: nextUpstreamChannelId }
-      });
-      if (!selectedChannel || !selectedChannel.enabled) {
+    const nextModelMappings =
+      payload.modelMappings !== undefined
+        ? normalizeKeyModelMappings(payload.modelMappings)
+        : normalizeKeyModelMappings(existing.modelMappingsJson);
+    const mappingChannelIds = Array.from(
+      new Set(
+        nextModelMappings
+          .map((item) => item.upstreamChannelId)
+          .filter(
+            (channelId): channelId is number =>
+              typeof channelId === "number" && Number.isInteger(channelId) && channelId > 0
+          )
+      )
+    );
+    const selectedChannelPromise: Promise<UpstreamChannel | null> =
+      nextUpstreamChannelId !== null
+        ? prisma.upstreamChannel.findUnique({
+            where: { id: nextUpstreamChannelId }
+          })
+        : Promise.resolve(null);
+    const mappingChannelsPromise: Promise<UpstreamChannel[]> = mappingChannelIds.length
+      ? prisma.upstreamChannel.findMany({
+          where: {
+            id: {
+              in: mappingChannelIds
+            }
+          }
+        })
+      : Promise.resolve([]);
+    const [selectedChannel, mappingChannels] = await Promise.all([
+      selectedChannelPromise,
+      mappingChannelsPromise
+    ]);
+    if (nextUpstreamChannelId !== null && (!selectedChannel || !selectedChannel.enabled)) {
+      return NextResponse.json(
+        {
+          error: "Selected upstream channel not found or disabled."
+        },
+        { status: 400 }
+      );
+    }
+
+    const nextProvider =
+      (selectedChannel?.provider ?? payload.provider ?? existing.provider) as ProviderName;
+    let nextUpstreamBaseUrl = existing.upstreamBaseUrl;
+    try {
+      nextUpstreamBaseUrl = resolveUpstreamBaseUrl(
+        nextProvider,
+        selectedChannel?.upstreamBaseUrl ??
+          (payload.upstreamBaseUrl ?? existing.upstreamBaseUrl)
+      );
+    } catch (error) {
+      return NextResponse.json(
+        { error: error instanceof Error ? error.message : "Invalid upstream base url." },
+        { status: 400 }
+      );
+    }
+
+    let nextUpstreamApiKey = existing.upstreamApiKey;
+    if (selectedChannel) {
+      nextUpstreamApiKey = selectedChannel.upstreamApiKey;
+    } else if (payload.clearUpstreamApiKey) {
+      nextUpstreamApiKey = null;
+    } else if (payload.upstreamApiKey !== undefined) {
+      nextUpstreamApiKey = payload.upstreamApiKey.trim() || null;
+    }
+
+    let nextSupportsVision =
+      selectedChannel?.supportsVision ?? payload.supportsVision ?? existing.supportsVision;
+    let nextVisionModel = selectedChannel?.visionModel ?? existing.visionModel;
+    if (!selectedChannel) {
+      if (payload.clearVisionModel) {
+        nextVisionModel = null;
+      } else if (payload.visionModel !== undefined) {
+        nextVisionModel = payload.visionModel.trim() || null;
+      }
+    }
+
+    const nextDynamicModelSwitch =
+      payload.dynamicModelSwitch ?? existing.dynamicModelSwitch;
+    const nextContextSwitchThreshold =
+      payload.contextSwitchThreshold ?? existing.contextSwitchThreshold;
+    let nextContextOverflowModel = existing.contextOverflowModel;
+    if (payload.clearContextOverflowModel) {
+      nextContextOverflowModel = null;
+    } else if (payload.contextOverflowModel !== undefined) {
+      nextContextOverflowModel = payload.contextOverflowModel.trim() || null;
+    }
+
+    let nextActiveModelOverride = existing.activeModelOverride;
+    if (payload.clearActiveModelOverride) {
+      nextActiveModelOverride = null;
+    } else if (payload.activeModelOverride !== undefined) {
+      nextActiveModelOverride = payload.activeModelOverride.trim() || null;
+    }
+    const nextDailyRequestLimit =
+      payload.dailyRequestLimit === undefined
+        ? existing.dailyRequestLimit
+        : payload.dailyRequestLimit;
+    const nextDailyTokenLimit =
+      payload.dailyTokenLimit === undefined
+        ? existing.dailyTokenLimit
+        : payload.dailyTokenLimit;
+    const mappingChannelMap = new Map(mappingChannels.map((item) => [item.id, item]));
+    for (const channelId of mappingChannelIds) {
+      const channel = mappingChannelMap.get(channelId);
+      if (!channel || !channel.enabled) {
         return NextResponse.json(
           {
-            error: "Selected upstream channel not found or disabled."
+            error: `Mapping upstream channel #${channelId} not found or disabled.`
           },
           { status: 400 }
         );
       }
     }
+    const normalizedModelMappings = nextModelMappings.map((item) => {
+      const mappingChannel =
+        typeof item.upstreamChannelId === "number"
+          ? mappingChannelMap.get(item.upstreamChannelId) ?? null
+          : null;
+      const mappingProvider = (mappingChannel?.provider ?? nextProvider) as ProviderName;
+      return {
+        ...item,
+        targetModel: normalizeUpstreamModelCode(mappingProvider, item.targetModel),
+        upstreamChannelId: item.upstreamChannelId ?? null
+      };
+    });
 
-  const nextProvider = (selectedChannel?.provider ?? payload.provider ?? existing.provider) as ProviderName;
-  let nextUpstreamBaseUrl = existing.upstreamBaseUrl;
-  try {
-    nextUpstreamBaseUrl = resolveUpstreamBaseUrl(
-      nextProvider,
-      selectedChannel?.upstreamBaseUrl ??
-        (payload.upstreamBaseUrl ?? existing.upstreamBaseUrl)
+    const fallbackWireApi = normalizeUpstreamWireApiValue(
+      selectedChannel?.upstreamWireApi ?? payload.upstreamWireApi ?? existing.upstreamWireApi
     );
-  } catch (error) {
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Invalid upstream base url." },
-      { status: 400 }
+    const fallbackDefaultModel =
+      selectedChannel?.defaultModel ?? payload.defaultModel?.trim() ?? existing.defaultModel;
+    const fallbackVisionModel = nextVisionModel?.trim() || null;
+    const existingPool = normalizeUpstreamModels(
+      selectedChannel?.upstreamModelsJson ?? existing.upstreamModelsJson,
+      {
+        model: selectedChannel?.defaultModel ?? existing.defaultModel,
+        upstreamWireApi: normalizeUpstreamWireApiValue(
+          selectedChannel?.upstreamWireApi ?? existing.upstreamWireApi
+        ),
+        supportsVision: selectedChannel?.supportsVision ?? existing.supportsVision,
+        visionModel: selectedChannel?.visionModel ?? existing.visionModel
+      }
     );
-  }
-
-  let nextUpstreamApiKey = existing.upstreamApiKey;
-  if (selectedChannel) {
-    nextUpstreamApiKey = selectedChannel.upstreamApiKey;
-  } else if (payload.clearUpstreamApiKey) {
-    nextUpstreamApiKey = null;
-  } else if (payload.upstreamApiKey !== undefined) {
-    nextUpstreamApiKey = payload.upstreamApiKey.trim() || null;
-  }
-
-  let nextSupportsVision = selectedChannel?.supportsVision ?? payload.supportsVision ?? existing.supportsVision;
-  let nextVisionModel = selectedChannel?.visionModel ?? existing.visionModel;
-  if (!selectedChannel) {
-    if (payload.clearVisionModel) {
-      nextVisionModel = null;
-    } else if (payload.visionModel !== undefined) {
-      nextVisionModel = payload.visionModel.trim() || null;
-    }
-  }
-
-  const nextDynamicModelSwitch =
-    payload.dynamicModelSwitch ?? existing.dynamicModelSwitch;
-  const nextContextSwitchThreshold =
-    payload.contextSwitchThreshold ?? existing.contextSwitchThreshold;
-  let nextContextOverflowModel = existing.contextOverflowModel;
-  if (payload.clearContextOverflowModel) {
-    nextContextOverflowModel = null;
-  } else if (payload.contextOverflowModel !== undefined) {
-    nextContextOverflowModel = payload.contextOverflowModel.trim() || null;
-  }
-
-  let nextActiveModelOverride = existing.activeModelOverride;
-  if (payload.clearActiveModelOverride) {
-    nextActiveModelOverride = null;
-  } else if (payload.activeModelOverride !== undefined) {
-    nextActiveModelOverride = payload.activeModelOverride.trim() || null;
-  }
-  const nextDailyRequestLimit =
-    payload.dailyRequestLimit === undefined
-      ? existing.dailyRequestLimit
-      : payload.dailyRequestLimit;
-  const nextDailyTokenLimit =
-    payload.dailyTokenLimit === undefined
-      ? existing.dailyTokenLimit
-      : payload.dailyTokenLimit;
-  const nextModelMappings =
-    payload.modelMappings !== undefined
-      ? normalizeKeyModelMappings(payload.modelMappings)
-      : normalizeKeyModelMappings(existing.modelMappingsJson);
-  const mappingChannelIds = Array.from(
-    new Set(
-      nextModelMappings
-        .map((item) => item.upstreamChannelId)
-        .filter(
-          (channelId): channelId is number =>
-            typeof channelId === "number" && Number.isInteger(channelId) && channelId > 0
-        )
-    )
-  );
-  const mappingChannels = mappingChannelIds.length
-    ? await prisma.upstreamChannel.findMany({
-        where: {
-          id: {
-            in: mappingChannelIds
-          }
-        }
-      })
-    : [];
-  const mappingChannelMap = new Map(mappingChannels.map((item) => [item.id, item]));
-  for (const channelId of mappingChannelIds) {
-    const channel = mappingChannelMap.get(channelId);
-    if (!channel || !channel.enabled) {
+    const candidatePool =
+      !selectedChannel && payload.upstreamModels !== undefined
+        ? normalizeUpstreamModels(payload.upstreamModels, {
+            model: fallbackDefaultModel,
+            upstreamWireApi: fallbackWireApi,
+            supportsVision: nextSupportsVision,
+            visionModel: fallbackVisionModel
+          })
+        : existingPool;
+    const nextUpstreamModels = ensureModelExistsInPool(candidatePool, fallbackDefaultModel, {
+      upstreamWireApi: fallbackWireApi,
+      supportsVision: nextSupportsVision,
+      visionModel: fallbackVisionModel
+    });
+    const nextDefaultProfile =
+      pickModelFromPool(nextUpstreamModels, fallbackDefaultModel) ??
+      nextUpstreamModels[0] ??
+      null;
+    if (!nextDefaultProfile) {
       return NextResponse.json(
         {
-          error: `Mapping upstream channel #${channelId} not found or disabled.`
+          error: "At least one upstream model is required."
         },
         { status: 400 }
       );
     }
-  }
-  const normalizedModelMappings = nextModelMappings.map((item) => {
-    const mappingChannel =
-      typeof item.upstreamChannelId === "number"
-        ? mappingChannelMap.get(item.upstreamChannelId) ?? null
-        : null;
-    const mappingProvider = (mappingChannel?.provider ?? nextProvider) as ProviderName;
-    return {
-      ...item,
-      targetModel: normalizeUpstreamModelCode(mappingProvider, item.targetModel),
-      upstreamChannelId: item.upstreamChannelId ?? null
-    };
-  });
+    nextSupportsVision = nextDefaultProfile.supportsVision;
+    nextVisionModel = nextDefaultProfile.supportsVision
+      ? null
+      : nextDefaultProfile.visionModel ?? null;
+    const nextDefaultModel = nextDefaultProfile.model;
+    const nextUpstreamWireApi = nextDefaultProfile.upstreamWireApi;
 
-  const fallbackWireApi = normalizeUpstreamWireApiValue(
-    selectedChannel?.upstreamWireApi ?? payload.upstreamWireApi ?? existing.upstreamWireApi
-  );
-  const fallbackDefaultModel = selectedChannel?.defaultModel ?? payload.defaultModel?.trim() ?? existing.defaultModel;
-  const fallbackVisionModel = nextVisionModel?.trim() || null;
-  const existingPool = normalizeUpstreamModels(
-    selectedChannel?.upstreamModelsJson ?? existing.upstreamModelsJson,
-    {
-      model: selectedChannel?.defaultModel ?? existing.defaultModel,
-      upstreamWireApi: normalizeUpstreamWireApiValue(
-        selectedChannel?.upstreamWireApi ?? existing.upstreamWireApi
-      ),
-      supportsVision: selectedChannel?.supportsVision ?? existing.supportsVision,
-      visionModel: selectedChannel?.visionModel ?? existing.visionModel
+    if (nextDynamicModelSwitch && !nextContextOverflowModel) {
+      return NextResponse.json(
+        {
+          error: "contextOverflowModel is required when dynamicModelSwitch is true."
+        },
+        { status: 400 }
+      );
     }
-  );
-  const candidatePool =
-    !selectedChannel && payload.upstreamModels !== undefined
-      ? normalizeUpstreamModels(payload.upstreamModels, {
-          model: fallbackDefaultModel,
-          upstreamWireApi: fallbackWireApi,
-          supportsVision: nextSupportsVision,
-          visionModel: fallbackVisionModel
-        })
-      : existingPool;
-  const nextUpstreamModels = ensureModelExistsInPool(candidatePool, fallbackDefaultModel, {
-    upstreamWireApi: fallbackWireApi,
-    supportsVision: nextSupportsVision,
-    visionModel: fallbackVisionModel
-  });
-  const nextDefaultProfile =
-    pickModelFromPool(nextUpstreamModels, fallbackDefaultModel) ??
-    nextUpstreamModels[0] ??
-    null;
-  if (!nextDefaultProfile) {
-    return NextResponse.json(
-      {
-        error: "At least one upstream model is required."
-      },
-      { status: 400 }
-    );
-  }
-  nextSupportsVision = nextDefaultProfile.supportsVision;
-  nextVisionModel = nextDefaultProfile.supportsVision
-    ? null
-    : nextDefaultProfile.visionModel ?? null;
-  const nextDefaultModel = nextDefaultProfile.model;
-  const nextUpstreamWireApi = nextDefaultProfile.upstreamWireApi;
-
-  if (nextDynamicModelSwitch && !nextContextOverflowModel) {
-    return NextResponse.json(
-      {
-        error: "contextOverflowModel is required when dynamicModelSwitch is true."
-      },
-      { status: 400 }
-    );
-  }
 
     try {
       const updated = await prisma.providerKey.update({

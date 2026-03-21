@@ -1,6 +1,6 @@
 "use client";
 
-import { motion } from "framer-motion";
+import { motion, useReducedMotion } from "framer-motion";
 import { Card } from "tdesign-react";
 
 type AnimatedCardProps = {
@@ -16,12 +16,14 @@ export function AnimatedCard({
   className = "",
   hoverScale = 1.02
 }: AnimatedCardProps) {
+  const shouldReduceMotion = useReducedMotion() ?? false;
+
   return (
     <motion.div
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.4, delay, ease: "easeOut" }}
-      whileHover={{ scale: hoverScale, y: -2 }}
+      initial={shouldReduceMotion ? false : { opacity: 0, y: 20 }}
+      animate={shouldReduceMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
+      transition={shouldReduceMotion ? { duration: 0 } : { duration: 0.4, delay, ease: "easeOut" }}
+      whileHover={shouldReduceMotion ? undefined : { scale: hoverScale, y: -2 }}
       className={className}
     >
       <Card className="tc-panel">{children}</Card>

@@ -1,4 +1,6 @@
+import Link from "next/link";
 import type { ReactNode } from "react";
+import { ActionCardButton } from "@/components/ui/ActionCardButton";
 
 export type ModuleSwitcherItem = {
   id: string;
@@ -9,7 +11,9 @@ export type ModuleSwitcherItem = {
   icon?: ReactNode;
   active?: boolean;
   disabled?: boolean;
-  onSelect: (id: string) => void;
+  href?: string;
+  onSelect?: (id: string) => void;
+  onClick?: () => void;
 };
 
 type ModuleSwitcherCardsProps = {
@@ -26,24 +30,49 @@ export function ModuleSwitcherCards({ title, items }: ModuleSwitcherCardsProps) 
 
       <div className="tc-module-cards-grid">
         {items.map((item) => (
-          <button
-            type="button"
-            key={item.id}
-            className={`tc-module-card ${item.active ? "is-active" : ""}`}
-            disabled={item.disabled}
-            onClick={() => item.onSelect(item.id)}
-            aria-pressed={Boolean(item.active)}
-          >
-            <div className="tc-module-card-top">
-              <div className="tc-module-card-title">
-                {item.icon ? <span className="tc-module-card-icon">{item.icon}</span> : null}
-                <strong>{item.title}</strong>
+          item.href && !item.disabled ? (
+            <Link
+              key={item.id}
+              href={item.href}
+              className={`tc-module-card ${item.active ? "is-active" : ""}`}
+              aria-current={item.active ? "page" : undefined}
+              onClick={() => {
+                item.onSelect?.(item.id);
+                item.onClick?.();
+              }}
+            >
+              <div className="tc-module-card-top">
+                <div className="tc-module-card-title">
+                  {item.icon ? <span className="tc-module-card-icon">{item.icon}</span> : null}
+                  <strong>{item.title}</strong>
+                </div>
+                {item.badge ? <span className="tc-module-card-badge">{item.badge}</span> : null}
               </div>
-              {item.badge ? <span className="tc-module-card-badge">{item.badge}</span> : null}
-            </div>
-            <p>{item.description}</p>
-            {item.value ? <span className="tc-module-card-value">{item.value}</span> : null}
-          </button>
+              <p>{item.description}</p>
+              {item.value ? <span className="tc-module-card-value">{item.value}</span> : null}
+            </Link>
+          ) : (
+            <ActionCardButton
+              key={item.id}
+              className={`tc-module-card ${item.active ? "is-active" : ""}`}
+              disabled={item.disabled}
+              onClick={() => {
+                item.onSelect?.(item.id);
+                item.onClick?.();
+              }}
+              aria-current={item.active ? "page" : undefined}
+            >
+              <div className="tc-module-card-top">
+                <div className="tc-module-card-title">
+                  {item.icon ? <span className="tc-module-card-icon">{item.icon}</span> : null}
+                  <strong>{item.title}</strong>
+                </div>
+                {item.badge ? <span className="tc-module-card-badge">{item.badge}</span> : null}
+              </div>
+              <p>{item.description}</p>
+              {item.value ? <span className="tc-module-card-value">{item.value}</span> : null}
+            </ActionCardButton>
+          )
         ))}
       </div>
     </section>

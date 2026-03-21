@@ -1,36 +1,55 @@
 import {
   Button,
-  Checkbox,
-  DateRangePicker,
+  Collapse,
   DialogPlugin,
   Input,
   Select,
   Switch,
-  Tag
+  Tag,
+  type TagProps
 } from "tdesign-react";
-import { CodeBlock } from "@/components/code-block";
 import { JsonViewer } from "@/components/json-viewer";
-import { UsageLoadingSkeleton } from "@/components/ui/UsageLoadingSkeleton";
-import { UsagePieChart } from "@/components/ui/UsagePieChart";
-import { UsageStatCard } from "@/components/ui/UsageStatCard";
+import type { ApiLogEntry } from "@/components/console/types";
 import {
-  AI_CALL_RANGE_OPTIONS,
-  API_DOC_GATEWAY_ENDPOINTS,
-  API_DOC_MANAGEMENT_ENDPOINTS,
-  USAGE_METRIC_META,
-  USAGE_RANGE_OPTIONS
-} from "@/components/console/types";
-import {
-  MarkdownLogBlock,
-  formatCnDate,
-  formatNumber,
-  pickUsageMetricValue,
-  summarizeLogPreview
+  formatCnDate
 } from "@/components/console/settings-console-helpers";
-import { ActiveFilterSummary } from "@/components/console/filters";
+import { ActiveFilterSummary, type ActiveFilterItem } from "@/components/console/filters/ActiveFilterSummary";
 
+type SelectOption = {
+  label: string;
+  value: string;
+};
 
-export function SettingsLogsPanel(props: any) {
+type SettingsLogsPanelProps = {
+  t: (zh: string, en: string) => string;
+  autoRefreshLogs: boolean;
+  setAutoRefreshLogs: (value: boolean) => void;
+  logLimit: number;
+  setLogLimit: (value: number) => void;
+  normalizeSelectValue: (value: unknown) => string;
+  clearApiLogs: () => Promise<void> | void;
+  loadingLogs: boolean;
+  apiLogs: ApiLogEntry[];
+  loadedApiLogCount: number;
+  apiLogKeywordFilter: string;
+  setApiLogKeywordFilter: (value: string) => void;
+  apiLogRouteFilter: string;
+  apiLogRouteOptions: SelectOption[];
+  setApiLogRouteFilter: (value: string) => void;
+  apiLogMethodFilter: string;
+  apiLogMethodOptions: SelectOption[];
+  setApiLogMethodFilter: (value: string) => void;
+  apiLogStatusFilter: "all" | "success" | "warning" | "error";
+  setApiLogStatusFilter: (value: "all" | "success" | "warning" | "error") => void;
+  apiLogErrorOnly: boolean;
+  setApiLogErrorOnly: (value: boolean) => void;
+  apiLogActiveFilters: ActiveFilterItem[];
+  resetApiLogFilters: () => void;
+  statusClassName: (status: number | null) => "ok" | "warn" | "err";
+  statusTheme: (status: number | null) => TagProps["theme"];
+};
+
+export function SettingsLogsPanel(props: SettingsLogsPanelProps) {
   const {
     t,
     autoRefreshLogs,
@@ -59,6 +78,10 @@ export function SettingsLogsPanel(props: any) {
     statusClassName,
     statusTheme
   } = props;
+  const isApiLogStatusFilter = (
+    value: string
+  ): value is "all" | "success" | "warning" | "error" =>
+    value === "all" || value === "success" || value === "warning" || value === "error";
 
   return (
     <section className="tc-section">
@@ -149,7 +172,12 @@ export function SettingsLogsPanel(props: any) {
                 { label: t("错误", "Error"), value: "error" }
               ]}
               style={{ width: 150 }}
-              onChange={(value) => setApiLogStatusFilter(normalizeSelectValue(value))}
+              onChange={(value) => {
+                const next = normalizeSelectValue(value);
+                if (isApiLogStatusFilter(next)) {
+                  setApiLogStatusFilter(next);
+                }
+              }}
             />
           </label>
         </div>
@@ -196,7 +224,7 @@ export function SettingsLogsPanel(props: any) {
               `Showing ${apiLogs.length} entries out of ${loadedApiLogCount} loaded logs.`
             )}
           </p>
-          {apiLogs.map((item: any) => (
+          {apiLogs.map((item) => (
             <article
               className={`tc-log-item tc-log-item-${statusClassName(item.status)}`}
               key={`${item.id}-${item.createdAt}`}
@@ -228,19 +256,23 @@ export function SettingsLogsPanel(props: any) {
                   <JsonViewer value={item.error ? item.error : item.responseBody} />
                 </div>
               </div>
-              <details className="tc-log-detail">
-                <summary>{t("展开请求/响应头", "Expand Request/Response Headers")}</summary>
-                <div className="tc-log-panels">
-                  <div className="tc-log-panel">
-                    <strong>{t("请求头", "Request Headers")}</strong>
-                    <JsonViewer value={item.requestHeaders} />
+              <Collapse borderless className="tc-log-detail">
+                <Collapse.Panel
+                  header={t("展开请求/响应头", "Expand Request/Response Headers")}
+                  value="headers"
+                >
+                  <div className="tc-log-panels">
+                    <div className="tc-log-panel">
+                      <strong>{t("请求头", "Request Headers")}</strong>
+                      <JsonViewer value={item.requestHeaders} />
+                    </div>
+                    <div className="tc-log-panel">
+                      <strong>{t("响应头", "Response Headers")}</strong>
+                      <JsonViewer value={item.responseHeaders} />
+                    </div>
                   </div>
-                  <div className="tc-log-panel">
-                    <strong>{t("响应头", "Response Headers")}</strong>
-                    <JsonViewer value={item.responseHeaders} />
-                  </div>
-                </div>
-              </details>
+                </Collapse.Panel>
+              </Collapse>
             </article>
           ))}
         </div>

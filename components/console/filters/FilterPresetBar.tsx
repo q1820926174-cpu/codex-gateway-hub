@@ -1,4 +1,4 @@
-import type { ChangeEventHandler } from "react";
+import { Button, Select } from "tdesign-react";
 
 export type FilterPreset = {
   id: string;
@@ -23,8 +23,8 @@ export function FilterPresetBar({
   onDeletePreset,
   onReset
 }: FilterPresetBarProps) {
-  const handlePresetChange: ChangeEventHandler<HTMLSelectElement> = (event) => {
-    const next = event.target.value;
+  const handlePresetChange = (value: unknown) => {
+    const next = Array.isArray(value) ? String(value[0] ?? "") : String(value ?? "");
     if (next) {
       onSelectPreset?.(next);
     }
@@ -33,31 +33,36 @@ export function FilterPresetBar({
   return (
     <div className="tc-filter-preset-bar">
       <div className="tc-filter-presets">
-        <label>
+        <div className="tc-filter-preset-select">
           <span className="tc-filter-section-title">常用视图</span>
-          <select value={activePresetId ?? ""} onChange={handlePresetChange}>
-            <option value="">默认</option>
-            {presets.map((preset) => (
-              <option key={preset.id} value={preset.id}>
-                {preset.name}
-              </option>
-            ))}
-          </select>
-        </label>
+          <Select
+            clearable={false}
+            onChange={handlePresetChange}
+            options={[
+              { label: "默认", value: "" },
+              ...presets.map((preset) => ({
+                label: preset.name,
+                value: preset.id
+              }))
+            ]}
+            size="small"
+            value={activePresetId ?? ""}
+          />
+        </div>
       </div>
       <div className="tc-filter-preset-controls">
-        <button type="button" onClick={() => onSavePreset?.("新筛选")}>
+        <Button onClick={() => onSavePreset?.("新筛选")} size="small" variant="outline">
           保存当前
-        </button>
+        </Button>
         {activePresetId ? (
-          <button type="button" onClick={() => onDeletePreset?.(activePresetId)}>
+          <Button onClick={() => onDeletePreset?.(activePresetId)} size="small" theme="danger" variant="outline">
             删除
-          </button>
+          </Button>
         ) : null}
         {onReset ? (
-          <button type="button" onClick={onReset}>
+          <Button onClick={onReset} size="small" variant="outline">
             重置
-          </button>
+          </Button>
         ) : null}
       </div>
     </div>

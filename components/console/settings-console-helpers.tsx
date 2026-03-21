@@ -327,6 +327,39 @@ export function formatMinuteLabel(value: string) {
   return CN_MINUTE_FORMATTER.format(date);
 }
 
+function padUsageCalendarPart(value: number) {
+  return String(value).padStart(2, "0");
+}
+
+function toUsageCalendarDate(date: Date) {
+  return `${date.getFullYear()}-${padUsageCalendarPart(date.getMonth() + 1)}-${padUsageCalendarPart(date.getDate())}`;
+}
+
+function startOfUsageDay(date: Date) {
+  const next = new Date(date);
+  next.setHours(0, 0, 0, 0);
+  return next;
+}
+
+export function buildUsageCalendarRange(days: number, now = new Date()) {
+  const safeDays = Math.max(1, Math.floor(days) || 1);
+  const today = startOfUsageDay(now);
+  const start = new Date(today);
+  start.setDate(today.getDate() - (safeDays - 1));
+  const startDate = toUsageCalendarDate(start);
+  const endDate = toUsageCalendarDate(today);
+  return [`${startDate} 00:00:00`, `${endDate} 23:59:59`] as const;
+}
+
+export function isUsageCalendarRange(value: string[], days: number, now = new Date()) {
+  const [from = "", to = ""] = value;
+  if (!from.trim() || !to.trim()) {
+    return false;
+  }
+  const [expectedFrom, expectedTo] = buildUsageCalendarRange(days, now);
+  return from.slice(0, 10) === expectedFrom.slice(0, 10) && to.slice(0, 10) === expectedTo.slice(0, 10);
+}
+
 export function formatCompactNumber(value: number) {
   if (!Number.isFinite(value)) {
     return "0";

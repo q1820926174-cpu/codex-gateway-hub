@@ -12,8 +12,6 @@ import {
 import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import {
-  BulkJsonExportDialog,
-  BulkJsonImportDialog,
   type BulkJsonImportPreview
 } from "@/components/console/bulk-json-dialogs";
 import {
@@ -22,6 +20,8 @@ import {
   type CodexExportBundle
 } from "@/lib/codex-export";
 import { CodeBlock } from "@/components/code-block";
+import type { ChartDatum } from "@/components/ui/AntVPlots";
+import { HiddenFileInput } from "@/components/ui/HiddenFileInput";
 import {
   parseOverflowModelSelection,
   serializeOverflowModelSelection
@@ -37,10 +37,10 @@ import {
   quickImportKeyMappings,
   quickImportModels
 } from "@/lib/quick-import-export";
-import { JsonViewer } from "@/components/json-viewer";
 import { useLocale } from "@/components/locale-provider";
 import type {
   PromptLabFailureCase,
+  PromptOptimizerResult,
   PromptLabRun,
   RulePreviewResult
 } from "@/lib/prompt-lab-types";
@@ -78,15 +78,55 @@ import {
   Terminal,
   HelpCircle
 } from "lucide-react";
-import type { EChartsOption } from "echarts";
-
-const ReactECharts = dynamic(() => import("echarts-for-react"), { ssr: false });
-
-import { UsageLoadingSkeleton, UsagePulseLoader } from "@/components/ui/UsageLoadingSkeleton";
-import { WorkspaceDashboard } from "@/components/console/workspace-dashboard";
-import { UsageStatCard } from "@/components/ui/UsageStatCard";
-import { UsagePieChart, PIE_COLORS } from "@/components/ui/UsagePieChart";
-import type { PieSlice } from "@/components/ui/UsagePieChart";
+const renderNothing = () => null;
+const BulkJsonImportDialog = dynamic(
+  () => import("@/components/console/bulk-json-dialogs").then((module) => module.BulkJsonImportDialog),
+  { ssr: false, loading: renderNothing }
+);
+const BulkJsonExportDialog = dynamic(
+  () => import("@/components/console/bulk-json-dialogs").then((module) => module.BulkJsonExportDialog),
+  { ssr: false, loading: renderNothing }
+);
+const WorkspaceDashboard = dynamic(
+  () => import("@/components/console/workspace-dashboard").then((module) => module.WorkspaceDashboard),
+  { loading: renderNothing }
+);
+const SettingsAccessPanel = dynamic(
+  () => import("@/components/console/editor-panels/settings-access-panel").then((module) => module.SettingsAccessPanel),
+  { loading: renderNothing }
+);
+const SettingsPromptPanel = dynamic(
+  () => import("@/components/console/editor-panels/settings-prompt-panel").then((module) => module.SettingsPromptPanel),
+  { loading: renderNothing }
+);
+const SettingsExportPanel = dynamic(
+  () => import("@/components/console/editor-panels/settings-export-panel").then((module) => module.SettingsExportPanel),
+  { loading: renderNothing }
+);
+const SettingsUpstreamPanel = dynamic(
+  () => import("@/components/console/editor-panels/settings-upstream-panel").then((module) => module.SettingsUpstreamPanel),
+  { loading: renderNothing }
+);
+const SettingsLogsPanel = dynamic(
+  () => import("@/components/console/panels/settings-logs-panel").then((module) => module.SettingsLogsPanel),
+  { loading: renderNothing }
+);
+const SettingsCallsPanel = dynamic(
+  () => import("@/components/console/panels/settings-calls-panel").then((module) => module.SettingsCallsPanel),
+  { loading: renderNothing }
+);
+const SettingsUsagePanel = dynamic(
+  () => import("@/components/console/panels/settings-usage-panel").then((module) => module.SettingsUsagePanel),
+  { loading: renderNothing }
+);
+const SettingsDocsPanel = dynamic(
+  () => import("@/components/console/panels/settings-docs-panel").then((module) => module.SettingsDocsPanel),
+  { loading: renderNothing }
+);
+const SettingsRuntimePanel = dynamic(
+  () => import("@/components/console/panels/settings-runtime-panel").then((module) => module.SettingsRuntimePanel),
+  { loading: renderNothing }
+);
 import {
   AI_CALL_RANGE_OPTIONS,
   API_DOC_GATEWAY_ENDPOINTS,
@@ -160,6 +200,7 @@ import {
   humanizeConsoleErrorMessage,
   inferContextWindowFromModel,
   inspectCompatPromptRules,
+  isUsageCalendarRange,
   maskLocalKey,
   normalizeAiCallFilterOptions,
   normalizeCompatPromptRule,
@@ -191,23 +232,8 @@ import {
   type PromptLabReportResponse,
   type PromptLabRunSummaryResponse
 } from "@/components/console/settings-console-helpers";
-import {
-  SettingsCallsPanel,
-  SettingsDocsPanel,
-  SettingsLogsPanel,
-  SettingsRuntimePanel,
-  SettingsUsagePanel
-} from "@/components/console/settings-console-panels";
-import {
-  SettingsAccessPanel,
-  SettingsExportPanel,
-  SettingsPromptPanel,
-  SettingsUpstreamPanel
-} from "@/components/console/settings-console-editor-panels";
-import {
-  ActiveFilterSummary,
-  FilterSection
-} from "@/components/console/filters";
+import { ActiveFilterSummary } from "@/components/console/filters/ActiveFilterSummary";
+import { FilterSection } from "@/components/console/filters/FilterSection";
 
 export type { EditorModule } from "@/components/console/types";
 export { formatCompactNumber, formatNumber } from "@/components/console/settings-console-helpers";
@@ -431,6 +457,15 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     return t("自动判断", "Auto");
   };
   const routeModule = module;
+  const isAccessRoute = routeModule === "access";
+  const isPromptRoute = routeModule === "prompt";
+  const isExportRoute = routeModule === "export";
+  const isUpstreamRoute = routeModule === "upstream";
+  const isRuntimeRoute = routeModule === "runtime";
+  const isLogsRoute = routeModule === "logs";
+  const isCallsRoute = routeModule === "calls";
+  const isUsageRoute = routeModule === "usage";
+  const shouldBuildKeyViews = isAccessRoute || isExportRoute || isRuntimeRoute;
 
   function createIdleBulkImportPreview<T>(): BulkImportPreviewState<T> {
     return {
@@ -737,6 +772,22 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   const [rulePreviewLoading, setRulePreviewLoading] = useState(false);
   const [rulePreviewResult, setRulePreviewResult] = useState<RulePreviewResult | null>(null);
   const [showPromptLabRegressionCta, setShowPromptLabRegressionCta] = useState(false);
+  const [promptOptimizerProviderInput, setPromptOptimizerProviderInput] = useState("");
+  const [promptOptimizerUpstreamModelInput, setPromptOptimizerUpstreamModelInput] = useState("");
+  const [promptOptimizerClientModelInput, setPromptOptimizerClientModelInput] = useState("");
+  const [promptOptimizerBasePromptInput, setPromptOptimizerBasePromptInput] = useState("");
+  const [promptOptimizerFocus, setPromptOptimizerFocus] = useState<
+    "balanced" | "tool-calling" | "strict"
+  >("balanced");
+  const [promptOptimizerPreserveOriginal, setPromptOptimizerPreserveOriginal] = useState(true);
+  const [promptOptimizerIssuesInput, setPromptOptimizerIssuesInput] = useState(
+    "schema_error\nmissing_tool_call\nincomplete_task"
+  );
+  const [promptOptimizerRunning, setPromptOptimizerRunning] = useState(false);
+  const [promptOptimizerResult, setPromptOptimizerResult] = useState<PromptOptimizerResult | null>(
+    null
+  );
+  const [promptOptimizerError, setPromptOptimizerError] = useState("");
 
   const selectedKey = useMemo(
     () => keys.find((item) => item.id === selectedKeyId) ?? null,
@@ -1112,6 +1163,9 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   );
 
   const apiLogRouteOptions = useMemo(() => {
+    if (!isLogsRoute) {
+      return [{ label: t("全部路由", "All Routes"), value: "__all__" }];
+    }
     const values = Array.from(
       new Set(
         apiLogs
@@ -1123,9 +1177,12 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       { label: t("全部路由", "All Routes"), value: "__all__" },
       ...values.map((item) => ({ label: item, value: item }))
     ];
-  }, [apiLogs, t]);
+  }, [apiLogs, isLogsRoute, t]);
 
   const apiLogMethodOptions = useMemo(() => {
+    if (!isLogsRoute) {
+      return [{ label: t("全部方法", "All Methods"), value: "__all__" }];
+    }
     const values = Array.from(
       new Set(
         apiLogs
@@ -1137,11 +1194,14 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       { label: t("全部方法", "All Methods"), value: "__all__" },
       ...values.map((item) => ({ label: item, value: item }))
     ];
-  }, [apiLogs, t]);
+  }, [apiLogs, isLogsRoute, t]);
 
   const filteredApiLogs = useMemo(
-    () =>
-      deferredApiLogs.filter((item) => {
+    () => {
+      if (!isLogsRoute) {
+        return [];
+      }
+      return deferredApiLogs.filter((item) => {
         if (apiLogRouteFilter && apiLogRouteFilter !== "__all__" && item.route !== apiLogRouteFilter) {
           return false;
         }
@@ -1160,29 +1220,36 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
           [item.id, item.route, item.method, item.path, item.requestBody, item.responseBody, item.error],
           apiLogKeywordFilter
         );
-      }),
+      });
+    },
     [
       apiLogErrorOnly,
       apiLogKeywordFilter,
       apiLogMethodFilter,
       apiLogRouteFilter,
       apiLogStatusFilter,
-      deferredApiLogs
+      deferredApiLogs,
+      isLogsRoute
     ]
   );
 
-  const aiCallKeyOptions = useMemo(
-    () => [
+  const aiCallKeyOptions = useMemo(() => {
+    if (!isCallsRoute) {
+      return [{ label: t("全部 Key", "All Keys"), value: "__all__" }];
+    }
+    return [
       { label: t("全部 Key", "All Keys"), value: "__all__" },
       ...keys.map((item) => ({
         label: `${item.name} · ${maskLocalKey(item.localKey)}`,
         value: String(item.id)
       }))
-    ],
-    [keys, t]
-  );
+    ];
+  }, [isCallsRoute, keys, t]);
 
   const aiCallModelSelectOptions = useMemo(() => {
+    if (!isCallsRoute) {
+      return [{ label: t("全部模型", "All Models"), value: "__all__" }];
+    }
     const source =
       aiCallFilterOptions.upstreamModels.length > 0
         ? aiCallFilterOptions.upstreamModels
@@ -1194,7 +1261,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
         value: model
       }))
     ];
-  }, [aiCallFilterOptions.upstreamModels, aiCallModelOptions, t]);
+  }, [aiCallFilterOptions.upstreamModels, aiCallModelOptions, isCallsRoute, t]);
 
   const aiCallTypeOptions = useMemo(
     () => [
@@ -1206,58 +1273,83 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   );
 
   const aiCallRouteOptions = useMemo(
-    () => [
-      { label: t("全部路由", "All Routes"), value: "__all__" },
-      ...aiCallFilterOptions.routes.map((item) => ({
-        label: item,
-        value: item
-      }))
-    ],
-    [aiCallFilterOptions.routes, t]
+    () => {
+      if (!isCallsRoute) {
+        return [{ label: t("全部路由", "All Routes"), value: "__all__" }];
+      }
+      return [
+        { label: t("全部路由", "All Routes"), value: "__all__" },
+        ...aiCallFilterOptions.routes.map((item) => ({
+          label: item,
+          value: item
+        }))
+      ];
+    },
+    [aiCallFilterOptions.routes, isCallsRoute, t]
   );
 
   const aiCallRequestWireOptions = useMemo(
-    () => [
-      { label: t("全部请求协议", "All Request APIs"), value: "__all__" },
-      ...aiCallFilterOptions.requestWireApis.map((item) => ({
-        label: item,
-        value: item
-      }))
-    ],
-    [aiCallFilterOptions.requestWireApis, t]
+    () => {
+      if (!isCallsRoute) {
+        return [{ label: t("全部请求协议", "All Request APIs"), value: "__all__" }];
+      }
+      return [
+        { label: t("全部请求协议", "All Request APIs"), value: "__all__" },
+        ...aiCallFilterOptions.requestWireApis.map((item) => ({
+          label: item,
+          value: item
+        }))
+      ];
+    },
+    [aiCallFilterOptions.requestWireApis, isCallsRoute, t]
   );
 
   const aiCallUpstreamWireOptions = useMemo(
-    () => [
-      { label: t("全部上游协议", "All Upstream APIs"), value: "__all__" },
-      ...aiCallFilterOptions.upstreamWireApis.map((item) => ({
-        label: item,
-        value: item
-      }))
-    ],
-    [aiCallFilterOptions.upstreamWireApis, t]
+    () => {
+      if (!isCallsRoute) {
+        return [{ label: t("全部上游协议", "All Upstream APIs"), value: "__all__" }];
+      }
+      return [
+        { label: t("全部上游协议", "All Upstream APIs"), value: "__all__" },
+        ...aiCallFilterOptions.upstreamWireApis.map((item) => ({
+          label: item,
+          value: item
+        }))
+      ];
+    },
+    [aiCallFilterOptions.upstreamWireApis, isCallsRoute, t]
   );
 
   const aiCallRequestedModelOptions = useMemo(
-    () => [
-      { label: t("全部请求模型", "All Requested Models"), value: "__all__" },
-      ...aiCallFilterOptions.requestedModels.map((item) => ({
-        label: item,
-        value: item
-      }))
-    ],
-    [aiCallFilterOptions.requestedModels, t]
+    () => {
+      if (!isCallsRoute) {
+        return [{ label: t("全部请求模型", "All Requested Models"), value: "__all__" }];
+      }
+      return [
+        { label: t("全部请求模型", "All Requested Models"), value: "__all__" },
+        ...aiCallFilterOptions.requestedModels.map((item) => ({
+          label: item,
+          value: item
+        }))
+      ];
+    },
+    [aiCallFilterOptions.requestedModels, isCallsRoute, t]
   );
 
   const aiCallClientModelOptions = useMemo(
-    () => [
-      { label: t("全部客户端模型", "All Client Models"), value: "__all__" },
-      ...aiCallFilterOptions.clientModels.map((item) => ({
-        label: item,
-        value: item
-      }))
-    ],
-    [aiCallFilterOptions.clientModels, t]
+    () => {
+      if (!isCallsRoute) {
+        return [{ label: t("全部客户端模型", "All Client Models"), value: "__all__" }];
+      }
+      return [
+        { label: t("全部客户端模型", "All Client Models"), value: "__all__" },
+        ...aiCallFilterOptions.clientModels.map((item) => ({
+          label: item,
+          value: item
+        }))
+      ];
+    },
+    [aiCallFilterOptions.clientModels, isCallsRoute, t]
   );
 
   const aiCallStreamOptions = useMemo(
@@ -1268,46 +1360,54 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     ],
     [t]
   );
-  const usageModelOptions = useMemo(
-    () => [
+  const usageModelOptions = useMemo(() => {
+    if (!isUsageRoute) {
+      return [{ label: t("全部真实模型", "All Upstream Models"), value: "__all__" }];
+    }
+    return [
       { label: t("全部真实模型", "All Upstream Models"), value: "__all__" },
       ...usageFilterOptions.upstreamModels.map((item: string) => ({
         label: item,
         value: item
       }))
-    ],
-    [t, usageFilterOptions.upstreamModels]
-  );
-  const usageRouteOptions = useMemo(
-    () => [
+    ];
+  }, [isUsageRoute, t, usageFilterOptions.upstreamModels]);
+  const usageRouteOptions = useMemo(() => {
+    if (!isUsageRoute) {
+      return [{ label: t("全部路由", "All Routes"), value: "__all__" }];
+    }
+    return [
       { label: t("全部路由", "All Routes"), value: "__all__" },
       ...usageFilterOptions.routes.map((item: string) => ({
         label: item,
         value: item
       }))
-    ],
-    [t, usageFilterOptions.routes]
-  );
-  const usageRequestWireOptions = useMemo(
-    () => [
+    ];
+  }, [isUsageRoute, t, usageFilterOptions.routes]);
+  const usageRequestWireOptions = useMemo(() => {
+    if (!isUsageRoute) {
+      return [{ label: t("全部请求协议", "All Request APIs"), value: "__all__" }];
+    }
+    return [
       { label: t("全部请求协议", "All Request APIs"), value: "__all__" },
       ...usageFilterOptions.requestWireApis.map((item: string) => ({
         label: item,
         value: item
       }))
-    ],
-    [t, usageFilterOptions.requestWireApis]
-  );
-  const usageUpstreamWireOptions = useMemo(
-    () => [
+    ];
+  }, [isUsageRoute, t, usageFilterOptions.requestWireApis]);
+  const usageUpstreamWireOptions = useMemo(() => {
+    if (!isUsageRoute) {
+      return [{ label: t("全部上游协议", "All Upstream APIs"), value: "__all__" }];
+    }
+    return [
       { label: t("全部上游协议", "All Upstream APIs"), value: "__all__" },
       ...usageFilterOptions.upstreamWireApis.map((item: string) => ({
         label: item,
         value: item
       }))
-    ],
-    [t, usageFilterOptions.upstreamWireApis]
-  );
+    ];
+  }, [isUsageRoute, t, usageFilterOptions.upstreamWireApis]);
   const expandedAiCallLogIdSet = useMemo(
     () => new Set(expandedAiCallLogIds),
     [expandedAiCallLogIds]
@@ -1325,62 +1425,101 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   const hasCustomUsageDateRange = Boolean(
     usageDateRange[0]?.trim() && usageDateRange[1]?.trim()
   );
+  const isTodayUsageRange = hasCustomUsageDateRange && isUsageCalendarRange(usageDateRange, 1);
+  const isLast3DaysUsageRange = hasCustomUsageDateRange && isUsageCalendarRange(usageDateRange, 3);
+  const isLast7DaysUsageRange = hasCustomUsageDateRange && isUsageCalendarRange(usageDateRange, 7);
   const usageDateFrom = usageDateRange[0] ?? "";
   const usageDateTo = usageDateRange[1] ?? "";
   const usageRangeTagLabel = hasCustomUsageDateRange
-    ? `${t("范围", "Range")} ${usageDateRange[0]} ~ ${usageDateRange[1]}`
+    ? isTodayUsageRange
+      ? t("范围 今天", "Range Today")
+      : isLast3DaysUsageRange
+        ? t("范围 近 3 天", "Range Last 3 Days")
+        : isLast7DaysUsageRange
+          ? t("范围 近 7 天", "Range Last 7 Days")
+          : `${t("范围", "Range")} ${usageDateRange[0]} ~ ${usageDateRange[1]}`
     : `${t("窗口", "Window")} ${usageMinutes} ${t("分钟", "minutes")}`;
-  const keyMappingVisibleItems = keyForm.modelMappings.filter((item) => {
-    if (keyMappingStatusFilter === "enabled" && !item.enabled) {
-      return false;
+  const keyMappingVisibleItems = useMemo(() => {
+    if (!shouldBuildKeyViews) {
+      return [];
     }
-    if (keyMappingStatusFilter === "disabled" && item.enabled) {
-      return false;
+    return keyForm.modelMappings.filter((item) => {
+      if (keyMappingStatusFilter === "enabled" && !item.enabled) {
+        return false;
+      }
+      if (keyMappingStatusFilter === "disabled" && item.enabled) {
+        return false;
+      }
+      if (keyMappingBindingFilter === "inherit" && item.upstreamChannelId !== null) {
+        return false;
+      }
+      if (keyMappingBindingFilter === "bound" && item.upstreamChannelId === null) {
+        return false;
+      }
+      if (keyMappingOverflowFilter === "yes" && !item.dynamicModelSwitch) {
+        return false;
+      }
+      if (keyMappingOverflowFilter === "no" && item.dynamicModelSwitch) {
+        return false;
+      }
+      const mappingChannel =
+        typeof item.upstreamChannelId === "number"
+          ? channels.find((channel) => channel.id === item.upstreamChannelId) ?? null
+          : selectedChannelForKey;
+      return matchesTextSearch(
+        [
+          item.clientModel,
+          item.targetModel,
+          mappingChannel?.name,
+          item.contextOverflowModel,
+          item.thinkingType
+        ],
+        keyMappingSearch
+      );
+    });
+  }, [
+    channels,
+    keyForm.modelMappings,
+    keyMappingBindingFilter,
+    keyMappingOverflowFilter,
+    keyMappingSearch,
+    keyMappingStatusFilter,
+    selectedChannelForKey,
+    shouldBuildKeyViews
+  ]);
+  const channelModelVisibleItems = useMemo(() => {
+    if (!isUpstreamRoute) {
+      return [];
     }
-    if (keyMappingBindingFilter === "inherit" && item.upstreamChannelId !== null) {
-      return false;
-    }
-    if (keyMappingBindingFilter === "bound" && item.upstreamChannelId === null) {
-      return false;
-    }
-    if (keyMappingOverflowFilter === "yes" && !item.dynamicModelSwitch) {
-      return false;
-    }
-    if (keyMappingOverflowFilter === "no" && item.dynamicModelSwitch) {
-      return false;
-    }
-    return matchesTextSearch(
-      [
-        item.clientModel,
-        item.targetModel,
-        resolveMappingChannel(item)?.name,
-        item.contextOverflowModel,
-        item.thinkingType
-      ],
-      keyMappingSearch
-    );
-  });
-  const channelModelVisibleItems = channelForm.upstreamModels.filter((item) => {
-    if (channelModelStatusFilter === "enabled" && !item.enabled) {
-      return false;
-    }
-    if (channelModelStatusFilter === "disabled" && item.enabled) {
-      return false;
-    }
-    if (channelModelWireApiFilter !== "all" && item.upstreamWireApi !== channelModelWireApiFilter) {
-      return false;
-    }
-    if (channelModelVisionFilter === "yes" && !item.supportsVision) {
-      return false;
-    }
-    if (channelModelVisionFilter === "no" && item.supportsVision) {
-      return false;
-    }
-    return matchesTextSearch(
-      [item.name, item.aliasModel, item.model, item.contextWindow, item.visionModel],
-      channelModelSearch
-    );
-  });
+    return channelForm.upstreamModels.filter((item) => {
+      if (channelModelStatusFilter === "enabled" && !item.enabled) {
+        return false;
+      }
+      if (channelModelStatusFilter === "disabled" && item.enabled) {
+        return false;
+      }
+      if (channelModelWireApiFilter !== "all" && item.upstreamWireApi !== channelModelWireApiFilter) {
+        return false;
+      }
+      if (channelModelVisionFilter === "yes" && !item.supportsVision) {
+        return false;
+      }
+      if (channelModelVisionFilter === "no" && item.supportsVision) {
+        return false;
+      }
+      return matchesTextSearch(
+        [item.name, item.aliasModel, item.model, item.contextWindow, item.visionModel],
+        channelModelSearch
+      );
+    });
+  }, [
+    channelForm.upstreamModels,
+    channelModelSearch,
+    channelModelStatusFilter,
+    channelModelVisionFilter,
+    channelModelWireApiFilter,
+    isUpstreamRoute
+  ]);
 
   const keySelectorFilterChips: ActiveFilterChip[] = [];
   if (keySelectorSearch.trim()) {
@@ -1724,6 +1863,9 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
   }
 
   const usageTimelinePoints = useMemo(() => {
+    if (!isUsageRoute) {
+      return [];
+    }
     if (!usageReport || usageReport.timeline.length === 0) {
       return [];
     }
@@ -1756,7 +1898,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     }
 
     return Array.from(minuteMap.values()).sort((a, b) => a.minute.localeCompare(b.minute));
-  }, [resolvedUsageBucketMinutes, usageReport]);
+  }, [isUsageRoute, resolvedUsageBucketMinutes, usageReport]);
 
   // 自适应趋势图高度：数据少时矮，多时高
   const usageTimelineChartHeight = useMemo(() => {
@@ -1767,112 +1909,25 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     return 360;
   }, [usageTimelinePoints]);
 
-  const usageTimelineChartOption = useMemo<EChartsOption | null>(() => {
-    if (!usageTimelinePoints.length) {
-      return null;
+  const usageTimelineChartData = useMemo<ChartDatum[]>(() => {
+    if (!isUsageRoute) {
+      return [];
     }
-    const metricLabel = usagePrimaryMetricMeta.label;
-    const isTokenMetric = usagePrimaryMetricMeta.isToken;
+    if (!usageTimelinePoints.length) {
+      return [];
+    }
+    return usageTimelinePoints.map((item) => ({
+      label: formatMinuteLabel(item.minute),
+      value: pickUsageMetricValue(item, usageMetric)
+    }));
+  }, [isUsageRoute, usageMetric, usagePrimaryMetricMeta, usageTimelinePoints]);
 
-    return {
-      color: PIE_COLORS,
-      tooltip: {
-        trigger: "axis",
-        backgroundColor: "rgba(15, 23, 42, 0.92)",
-        borderColor: "rgba(255, 255, 255, 0.08)",
-        borderWidth: 0,
-        textStyle: {
-          color: "#f8fafc"
-        },
-        extraCssText: "border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);",
-        valueFormatter: (value) =>
-          typeof value === "number" ? formatCompactNumber(value) : String(value ?? "")
-      },
-      legend: {
-        top: 6,
-        textStyle: {
-          color: "#475569"
-        }
-      },
-      grid: {
-        left: 56,
-        right: 24,
-        top: 44,
-        bottom: 52
-      },
-      xAxis: {
-        type: "category",
-        boundaryGap: false,
-        axisLine: {
-          lineStyle: {
-            color: "#dbe3ef"
-          }
-        },
-        axisLabel: {
-          color: "#64748b",
-          rotate: usageTimelinePoints.length > 20 ? 35 : 0
-        },
-        data: usageTimelinePoints.map((item) => formatMinuteLabel(item.minute))
-      },
-      yAxis: {
-        type: "value",
-        name: isTokenMetric ? "Token" : "请求",
-        axisLabel: {
-          color: "#64748b",
-          formatter: (value: number) => formatCompactNumber(value)
-        },
-        splitLine: {
-          lineStyle: {
-            color: "#e2e8f0",
-            type: "dashed"
-          }
-        },
-        nameTextStyle: {
-          color: "#64748b"
-        }
-      },
-      dataZoom: usageTimelinePoints.length > 90 ? [{ type: "inside", start: 40, end: 100 }] : [],
-      animationDuration: 800,
-      animationEasing: "cubicOut",
-      series: [
-        {
-          name: metricLabel,
-          type: "line",
-          smooth: 0.35,
-          showSymbol: false,
-          lineStyle: {
-            width: 2.5,
-            shadowColor: "rgba(59, 130, 246, 0.3)",
-            shadowBlur: 8,
-            shadowOffsetY: 4
-          },
-          areaStyle: {
-            color: {
-              type: "linear",
-              x: 0, y: 0, x2: 0, y2: 1,
-              colorStops: [
-                { offset: 0, color: "rgba(59, 130, 246, 0.25)" },
-                { offset: 0.5, color: "rgba(59, 130, 246, 0.08)" },
-                { offset: 1, color: "rgba(59, 130, 246, 0.01)" }
-              ]
-            }
-          },
-          emphasis: {
-            focus: "series",
-            itemStyle: {
-              borderWidth: 2,
-              borderColor: "#fff"
-            }
-          },
-          data: usageTimelinePoints.map((item) => pickUsageMetricValue(item, usageMetric))
-        }
-      ]
-    };
-  }, [usageMetric, usagePrimaryMetricMeta, usageTimelinePoints]);
-
-  const usagePerKeyChartOption = useMemo<EChartsOption | null>(() => {
+  const usagePerKeyChartData = useMemo<ChartDatum[]>(() => {
+    if (!isUsageRoute) {
+      return [];
+    }
     if (!usageReport || usageReport.perKey.length === 0) {
-      return null;
+      return [];
     }
     const topKeys = [...usageReport.perKey]
       .sort(
@@ -1882,70 +1937,18 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       .slice(0, 12)
       .reverse();
 
-    return {
-      color: PIE_COLORS,
-      tooltip: {
-        trigger: "axis",
-        axisPointer: {
-          type: "shadow"
-        },
-        backgroundColor: "rgba(15, 23, 42, 0.92)",
-        borderColor: "rgba(255, 255, 255, 0.08)",
-        borderWidth: 0,
-        textStyle: { color: "#f8fafc", fontSize: 12 },
-        extraCssText: "border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);",
-        valueFormatter: (value) =>
-          typeof value === "number" ? formatCompactNumber(value) : String(value ?? "")
-      },
-      grid: {
-        left: 180,
-        right: 24,
-        top: 20,
-        bottom: 28
-      },
-      xAxis: {
-        type: "value",
-        axisLabel: {
-          color: "#64748b",
-          formatter: (value: number) => formatCompactNumber(value)
-        },
-        splitLine: {
-          lineStyle: {
-            color: "#e2e8f0",
-            type: "dashed"
-          }
-        }
-      },
-      yAxis: {
-        type: "category",
-        axisLabel: {
-          color: "#334155",
-          formatter: (value: string) => (value.length > 24 ? `${value.slice(0, 24)}...` : value)
-        },
-        data: topKeys.map((item) => item.keyName)
-      },
-      animationDuration: 600,
-      animationEasing: "cubicOut",
-      series: [
-        {
-          name: usagePrimaryMetricMeta.label,
-          type: "bar",
-          barMaxWidth: 14,
-          data: topKeys.map((item) => pickUsageMetricValue(item, usageMetric)),
-          itemStyle: {
-            borderRadius: [0, 6, 6, 0],
-            shadowColor: "rgba(59, 130, 246, 0.15)",
-            shadowBlur: 6,
-            shadowOffsetY: 2
-          }
-        }
-      ]
-    };
-  }, [usageMetric, usagePrimaryMetricMeta, usageReport]);
+    return topKeys.map((item) => ({
+      label: item.keyName,
+      value: pickUsageMetricValue(item, usageMetric)
+    }));
+  }, [isUsageRoute, usageMetric, usagePrimaryMetricMeta, usageReport]);
 
-  const usagePerModelChartOption = useMemo<EChartsOption | null>(() => {
+  const usagePerModelChartData = useMemo<ChartDatum[]>(() => {
+    if (!isUsageRoute) {
+      return [];
+    }
     if (!usageReport || usageReport.perModel.length === 0) {
-      return null;
+      return [];
     }
     const topModels = [...usageReport.perModel]
       .sort(
@@ -1955,89 +1958,31 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       .slice(0, 10)
       .reverse();
 
-    return {
-      color: PIE_COLORS,
-      tooltip: {
-        trigger: "axis",
-        axisPointer: {
-          type: "shadow"
-        },
-        backgroundColor: "rgba(15, 23, 42, 0.92)",
-        borderColor: "rgba(255, 255, 255, 0.08)",
-        borderWidth: 0,
-        textStyle: { color: "#f8fafc", fontSize: 12 },
-        extraCssText: "border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);",
-        valueFormatter: (value) =>
-          typeof value === "number" ? formatCompactNumber(value) : String(value ?? "")
-      },
-      grid: {
-        left: 200,
-        right: 24,
-        top: 20,
-        bottom: 28
-      },
-      xAxis: {
-        type: "value",
-        axisLabel: {
-          color: "#64748b",
-          formatter: (value: number) => formatCompactNumber(value)
-        },
-        splitLine: {
-          lineStyle: {
-            color: "#e2e8f0",
-            type: "dashed"
-          }
-        }
-      },
-      yAxis: {
-        type: "category",
-        axisLabel: {
-          color: "#334155",
-          formatter: (value: string) => (value.length > 30 ? `${value.slice(0, 30)}...` : value)
-        },
-        data: topModels.map((item) => `${item.model} · ${item.keyName}`)
-      },
-      animationDuration: 600,
-      animationEasing: "cubicOut",
-      series: [
-        {
-          name: usagePrimaryMetricMeta.label,
-          type: "bar",
-          barMaxWidth: 14,
-          data: topModels.map((item) => pickUsageMetricValue(item, usageMetric)),
-          itemStyle: {
-            borderRadius: [0, 6, 6, 0],
-            shadowColor: "rgba(59, 130, 246, 0.15)",
-            shadowBlur: 6,
-            shadowOffsetY: 2
-          },
-          label: {
-            show: true,
-            position: "right",
-            color: "#475569",
-            formatter: (params: { value?: unknown }) => {
-              const rawValue = params?.value;
-              const value = Array.isArray(rawValue) ? Number(rawValue[0] ?? 0) : Number(rawValue ?? 0);
-              return formatCompactNumber(value);
-            }
-          }
-        }
-      ]
-    };
-  }, [usageMetric, usagePrimaryMetricMeta, usageReport]);
+    return topModels.map((item) => ({
+      label: `${item.model} · ${item.keyName}`,
+      value: pickUsageMetricValue(item, usageMetric)
+    }));
+  }, [isUsageRoute, usageMetric, usagePrimaryMetricMeta, usageReport]);
 
   const channelModelOptions = useMemo(
-    () =>
-      channelForm.upstreamModels.map((item) => ({
+    () => {
+      if (!isUpstreamRoute) {
+        return [];
+      }
+      return channelForm.upstreamModels.map((item) => ({
         label: item.aliasModel
           ? `${item.name} · ${item.aliasModel} -> ${item.model}${item.contextWindow ? ` · ctx=${formatNumber(item.contextWindow)}` : ""}`
           : `${item.name} · ${item.model}${item.contextWindow ? ` · ctx=${formatNumber(item.contextWindow)}` : ""}`,
         value: item.model
-      })),
-    [channelForm.upstreamModels]
+      }));
+    },
+    [channelForm.upstreamModels, isUpstreamRoute]
   );
 
   const keyOverflowModelOptions = useMemo(() => {
+    if (!shouldBuildKeyViews) {
+      return [];
+    }
     const prioritizedChannels = [...channels]
       .filter((item) => item.enabled)
       .sort((a, b) => {
@@ -2073,9 +2018,12 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     }
 
     return options;
-  }, [channels, keyForm.contextOverflowModel, keyForm.upstreamChannelId, t]);
+  }, [channels, keyForm.contextOverflowModel, keyForm.upstreamChannelId, shouldBuildKeyViews, t]);
 
   const mappingOverflowModelOptions = useMemo(() => {
+    if (!shouldBuildKeyViews) {
+      return [];
+    }
     const prioritizedChannels = [...channels]
       .filter((item) => item.enabled)
       .sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
@@ -2092,19 +2040,24 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     );
 
     return options;
-  }, [channels, t]);
+  }, [channels, shouldBuildKeyViews, t]);
 
   const visionChannelOptions = useMemo(
-    () => [
-      { label: "当前渠道", value: "__self__" },
-      ...channels
-        .filter((item) => item.id !== selectedChannelId)
-        .map((item) => ({
-          label: `${item.name} · ${PROVIDER_META[item.provider].label}`,
-          value: String(item.id)
-        }))
-    ],
-    [channels, selectedChannelId]
+    () => {
+      if (!isUpstreamRoute) {
+        return [];
+      }
+      return [
+        { label: "当前渠道", value: "__self__" },
+        ...channels
+          .filter((item) => item.id !== selectedChannelId)
+          .map((item) => ({
+            label: `${item.name} · ${PROVIDER_META[item.provider].label}`,
+            value: String(item.id)
+          }))
+      ];
+    },
+    [channels, isUpstreamRoute, selectedChannelId]
   );
 
   function resolveVisionModelOptions(model: UpstreamModelConfig) {
@@ -3815,10 +3768,10 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     }
   }
 
-  async function copyTextToClipboard(text: string, successMessage: string) {
+  async function copyTextToClipboard(text: string, successMessage?: string) {
     try {
       await navigator.clipboard.writeText(text);
-      notifySuccess(successMessage);
+      notifySuccess(successMessage ?? t("内容已复制。", "Copied."));
     } catch {
       notifyError(t("复制失败，请检查浏览器权限。", "Copy failed. Please check browser permissions."));
     }
@@ -4192,6 +4145,107 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     setPromptConfigTab("lab");
     setPromptLabMode("cli");
     await runPromptLab();
+  }
+
+  function parsePromptOptimizerIssuesInput(value: string) {
+    const output: string[] = [];
+    const seen = new Set<string>();
+    for (const item of value.split(/[\r\n,]+/)) {
+      const normalized = item.trim().toLowerCase();
+      if (!normalized) {
+        continue;
+      }
+      if (seen.has(normalized)) {
+        continue;
+      }
+      seen.add(normalized);
+      output.push(normalized);
+      if (output.length >= 32) {
+        break;
+      }
+    }
+    return output;
+  }
+
+  async function runPromptOptimizer() {
+    setPromptOptimizerRunning(true);
+    setPromptOptimizerError("");
+    try {
+      const observedIssues = parsePromptOptimizerIssuesInput(promptOptimizerIssuesInput);
+      const basePrompt = promptOptimizerBasePromptInput.trim() || compatPromptHintInput.trim();
+
+      const payload: Record<string, unknown> = {
+        provider: promptOptimizerProviderInput.trim(),
+        upstreamModel: promptOptimizerUpstreamModelInput.trim(),
+        clientModel: promptOptimizerClientModelInput.trim(),
+        basePrompt,
+        focus: promptOptimizerFocus,
+        preserveOriginal: promptOptimizerPreserveOriginal,
+        observedIssues
+      };
+      if (promptLabReport?.report?.failures?.length) {
+        payload.reportJson = {
+          report: {
+            failures: promptLabReport.report.failures
+          }
+        };
+      }
+
+      const response = await fetch("/api/prompt-lab/optimize", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      const body = (await response.json().catch(() => ({}))) as PromptOptimizerResult & {
+        error?: string;
+      };
+      if (!response.ok) {
+        throw new Error(body.error ?? `提示词优化失败 (${response.status})`);
+      }
+      setPromptOptimizerResult(body);
+      notifySuccess(t("提示词优化完成。", "Prompt optimization completed."));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "提示词优化失败";
+      setPromptOptimizerError(message);
+      notifyError(message);
+    } finally {
+      setPromptOptimizerRunning(false);
+    }
+  }
+
+  function applyPromptOptimizerToDefaultHint() {
+    if (!promptOptimizerResult) {
+      notifyError(t("请先执行一次提示词优化。", "Run prompt optimization first."));
+      return;
+    }
+    setCompatPromptHintInput(promptOptimizerResult.optimizedPrompt);
+    notifySuccess(t("已应用到默认提示词草稿。", "Applied to default prompt draft."));
+  }
+
+  function applyPromptOptimizerAsModelRule() {
+    if (!promptOptimizerResult) {
+      notifyError(t("请先执行一次提示词优化。", "Run prompt optimization first."));
+      return;
+    }
+    const suggestedRule = promptOptimizerResult.suggestedRule;
+    addCompatPromptRule({
+      id: suggestedRule.id,
+      provider: suggestedRule.provider,
+      upstreamModelPattern: suggestedRule.upstreamModelPattern,
+      hint: suggestedRule.hint
+    });
+    notifySuccess(t("已创建模型规则草稿。", "Model rule draft created."));
+  }
+
+  async function copyPromptOptimizerResult() {
+    if (!promptOptimizerResult) {
+      notifyError(t("请先执行一次提示词优化。", "Run prompt optimization first."));
+      return;
+    }
+    await copyTextToClipboard(
+      promptOptimizerResult.optimizedPrompt,
+      t("优化后的提示词已复制。", "Optimized prompt copied.")
+    );
   }
 
   async function copyNativeCodexBundleFile(
@@ -4962,68 +5016,100 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     parseCompatPromptExemptionsInput(compatPromptExemptionsInput).length;
   const compatPromptHintLength = compatPromptHintInput.trim().length;
   const compatPromptRuleCount = compatPromptRulesDraft.length;
-  const compatPromptRuleEnabledCount = compatPromptRulesDraft.filter((item) => item.enabled).length;
-  const compatPromptRuleCheckIssues = inspectCompatPromptRules(compatPromptRulesDraft);
-  const compatPromptRuleErrorCount = compatPromptRuleCheckIssues.filter(
-    (item) => item.level === "error"
-  ).length;
-  const compatPromptRuleWarnCount = compatPromptRuleCheckIssues.filter(
-    (item) => item.level === "warn"
-  ).length;
-  const compatPromptRuleIssueMap = compatPromptRuleCheckIssues.reduce((map, issue) => {
-    issue.relatedIndexes.forEach((index) => {
-      const prev = map.get(index);
-      if (issue.level === "error" || !prev) {
-        map.set(index, issue.level);
-      }
-    });
-    return map;
-  }, new Map<number, "warn" | "error">());
-  const compatPromptRuleProviderOptions = Array.from(
-    new Set(
-      compatPromptRulesDraft
-        .map((item) => item.provider.trim())
-        .filter(Boolean)
-        .map((item) => item.toLowerCase())
-    )
-  ).sort((a, b) => a.localeCompare(b));
+  const compatPromptRuleEnabledCount = useMemo(() => {
+    if (!isPromptRoute) {
+      return 0;
+    }
+    return compatPromptRulesDraft.filter((item) => item.enabled).length;
+  }, [compatPromptRulesDraft, isPromptRoute]);
+  const compatPromptRuleCheckIssues = useMemo(
+    () => (isPromptRoute ? inspectCompatPromptRules(compatPromptRulesDraft) : []),
+    [compatPromptRulesDraft, isPromptRoute]
+  );
+  const compatPromptRuleErrorCount = useMemo(
+    () => compatPromptRuleCheckIssues.filter((item) => item.level === "error").length,
+    [compatPromptRuleCheckIssues]
+  );
+  const compatPromptRuleWarnCount = useMemo(
+    () => compatPromptRuleCheckIssues.filter((item) => item.level === "warn").length,
+    [compatPromptRuleCheckIssues]
+  );
+  const compatPromptRuleIssueMap = useMemo(
+    () =>
+      compatPromptRuleCheckIssues.reduce((map, issue) => {
+        issue.relatedIndexes.forEach((index) => {
+          const prev = map.get(index);
+          if (issue.level === "error" || !prev) {
+            map.set(index, issue.level);
+          }
+        });
+        return map;
+      }, new Map<number, "warn" | "error">()),
+    [compatPromptRuleCheckIssues]
+  );
+  const compatPromptRuleProviderOptions = useMemo(() => {
+    if (!isPromptRoute) {
+      return [];
+    }
+    return Array.from(
+      new Set(
+        compatPromptRulesDraft
+          .map((item) => item.provider.trim())
+          .filter(Boolean)
+          .map((item) => item.toLowerCase())
+      )
+    ).sort((a, b) => a.localeCompare(b));
+  }, [compatPromptRulesDraft, isPromptRoute]);
   const compatPromptRuleSearchKeyword = compatPromptRuleSearch.trim().toLowerCase();
-  const compatPromptRuleVisibleItems = compatPromptRulesDraft
-    .map((rule, index) => ({ rule, index }))
-    .filter(({ rule, index }) => {
-      if (
-        compatPromptRuleSearchKeyword &&
-        !stringifyCompatPromptRuleForSearch(rule).includes(compatPromptRuleSearchKeyword)
-      ) {
-        return false;
-      }
-      if (compatPromptRuleStatusFilter === "enabled" && !rule.enabled) {
-        return false;
-      }
-      if (compatPromptRuleStatusFilter === "disabled" && rule.enabled) {
-        return false;
-      }
-      if (
-        compatPromptRuleProviderFilter !== "all" &&
-        rule.provider.trim().toLowerCase() !== compatPromptRuleProviderFilter
-      ) {
-        return false;
-      }
-      const issueLevel = compatPromptRuleIssueMap.get(index) ?? null;
-      if (compatPromptRuleIssueFilter === "error" && issueLevel !== "error") {
-        return false;
-      }
-      if (compatPromptRuleIssueFilter === "warn" && issueLevel !== "warn") {
-        return false;
-      }
-      if (compatPromptRuleIssueFilter === "attention" && !issueLevel) {
-        return false;
-      }
-      if (compatPromptRuleIssueFilter === "clean" && issueLevel) {
-        return false;
-      }
-      return true;
-    });
+  const compatPromptRuleVisibleItems = useMemo(() => {
+    if (!isPromptRoute) {
+      return [];
+    }
+    return compatPromptRulesDraft
+      .map((rule, index) => ({ rule, index }))
+      .filter(({ rule, index }) => {
+        if (
+          compatPromptRuleSearchKeyword &&
+          !stringifyCompatPromptRuleForSearch(rule).includes(compatPromptRuleSearchKeyword)
+        ) {
+          return false;
+        }
+        if (compatPromptRuleStatusFilter === "enabled" && !rule.enabled) {
+          return false;
+        }
+        if (compatPromptRuleStatusFilter === "disabled" && rule.enabled) {
+          return false;
+        }
+        if (
+          compatPromptRuleProviderFilter !== "all" &&
+          rule.provider.trim().toLowerCase() !== compatPromptRuleProviderFilter
+        ) {
+          return false;
+        }
+        const issueLevel = compatPromptRuleIssueMap.get(index) ?? null;
+        if (compatPromptRuleIssueFilter === "error" && issueLevel !== "error") {
+          return false;
+        }
+        if (compatPromptRuleIssueFilter === "warn" && issueLevel !== "warn") {
+          return false;
+        }
+        if (compatPromptRuleIssueFilter === "attention" && !issueLevel) {
+          return false;
+        }
+        if (compatPromptRuleIssueFilter === "clean" && issueLevel) {
+          return false;
+        }
+        return true;
+      });
+  }, [
+    compatPromptRuleIssueFilter,
+    compatPromptRuleIssueMap,
+    compatPromptRuleProviderFilter,
+    compatPromptRuleSearchKeyword,
+    compatPromptRuleStatusFilter,
+    compatPromptRulesDraft,
+    isPromptRoute
+  ]);
   const compatPromptRuleActiveFilters: ActiveFilterChip[] = [];
   if (compatPromptRuleSearch.trim()) {
     compatPromptRuleActiveFilters.push({
@@ -5069,16 +5155,21 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       onClear: () => setCompatPromptRuleIssueFilter("all")
     });
   }
-  const compatPromptUpstreamModelSuggestions = Array.from(
-    new Set(
-      channels
-        .flatMap((channel) => channel.upstreamModels)
-        .map((model) => model.model.trim())
-        .filter(Boolean)
+  const compatPromptUpstreamModelSuggestions = useMemo(() => {
+    if (!isPromptRoute) {
+      return [];
+    }
+    return Array.from(
+      new Set(
+        channels
+          .flatMap((channel) => channel.upstreamModels)
+          .map((model) => model.model.trim())
+          .filter(Boolean)
+      )
     )
-  )
-    .sort((a, b) => a.localeCompare(b))
-    .slice(0, 16);
+      .sort((a, b) => a.localeCompare(b))
+      .slice(0, 16);
+  }, [channels, isPromptRoute]);
   const upstreamModelsExportPreviewJson = useMemo(
     () => quickExportModels(channelForm.upstreamModels),
     [channelForm.upstreamModels]
@@ -5092,10 +5183,16 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     [channels, keyForm.modelMappings]
   );
   const compatPromptRulesExportPreviewJson = useMemo(
-    () => quickExportCompatPromptRules(normalizeCompatPromptRules(compatPromptRulesDraft)),
-    [compatPromptRulesDraft]
+    () =>
+      compatPromptRulesExportDialogVisible
+        ? quickExportCompatPromptRules(normalizeCompatPromptRules(compatPromptRulesDraft))
+        : "",
+    [compatPromptRulesDraft, compatPromptRulesExportDialogVisible]
   );
   const compatPromptRulesQuickImportPreview = useMemo(() => {
+    if (!compatPromptRulesImportDialogVisible) {
+      return createIdleBulkImportPreview<CompatPromptRule>();
+    }
     return buildBulkImportPreview<CompatPromptRule>({
       rawValue: compatPromptRulesQuickImportJson,
       currentCount: compatPromptRuleCount,
@@ -5138,8 +5235,16 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
           "Replacing would still exceed the 128-rule limit. Reduce the import size."
         )
     });
-  }, [compatPromptRuleCount, compatPromptRulesQuickImportJson, t]);
+  }, [
+    compatPromptRuleCount,
+    compatPromptRulesImportDialogVisible,
+    compatPromptRulesQuickImportJson,
+    t
+  ]);
   const upstreamModelsQuickImportPreview = useMemo(() => {
+    if (!quickImportDialogVisible) {
+      return createIdleBulkImportPreview<Omit<UpstreamModelConfig, "id">>();
+    }
     return buildBulkImportPreview<Omit<UpstreamModelConfig, "id">>({
       rawValue: quickImportJson,
       currentCount: channelForm.upstreamModels.length,
@@ -5173,8 +5278,11 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
           "Replacing would still exceed the 64-model limit. Reduce the import size."
         )
     });
-  }, [channelForm.upstreamModels.length, quickImportJson, t]);
+  }, [channelForm.upstreamModels.length, quickImportDialogVisible, quickImportJson, t]);
   const keyMappingsQuickImportPreview = useMemo(() => {
+    if (!quickImportKeyMappingDialogVisible) {
+      return createIdleBulkImportPreview<KeyModelMapping>();
+    }
     return buildBulkImportPreview({
       rawValue: quickImportKeyMappingJson,
       currentCount: keyForm.modelMappings.length,
@@ -5233,7 +5341,13 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
           "Replacing would still exceed the 128-mapping limit. Reduce the import size."
         )
     });
-  }, [keyForm.modelMappings.length, quickImportKeyMappingJson, t, channels]);
+  }, [
+    channels,
+    keyForm.modelMappings.length,
+    quickImportKeyMappingDialogVisible,
+    quickImportKeyMappingJson,
+    t
+  ]);
   const compatPromptRulesAppendDisabled =
     compatPromptRulesQuickImportPreview.state !== "ready" ||
     compatPromptRulesQuickImportPreview.appendTotal > MAX_COMPAT_PROMPT_RULES;
@@ -5267,7 +5381,12 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
     }),
     [t]
   );
-  const promptLabCandidateModels = parsePromptLabModelListInput(promptLabCandidateModelsInput);
+  const promptLabCandidateModels = useMemo(() => {
+    if (!isPromptRoute) {
+      return [];
+    }
+    return parsePromptLabModelListInput(promptLabCandidateModelsInput);
+  }, [isPromptRoute, promptLabCandidateModelsInput]);
   const promptLabRunning =
     promptLabRunSummary?.status === "queued" || promptLabRunSummary?.status === "running";
   const promptLabBaselineMetrics =
@@ -5275,11 +5394,259 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
       (item) => item.model.toLowerCase() === promptLabReport.report.baselineModel.toLowerCase()
     ) ?? null;
   const promptLabThresholds = promptLabReport?.thresholds ?? null;
+  const promptOptimizerSuggestedRulePreview = promptOptimizerResult
+    ? JSON.stringify(promptOptimizerResult.suggestedRule, null, 2)
+    : "";
   const routeModuleTitle = t(MODULE_LABEL[routeModule].zh, MODULE_LABEL[routeModule].en);
   const routeModuleSummary = t(MODULE_SUMMARY[routeModule].zh, MODULE_SUMMARY[routeModule].en);
-
+  const routeModuleIcon =
+    routeModule === "dashboard" ? <LayoutDashboard size={18} /> :
+    routeModule === "access" ? <User size={18} /> :
+    routeModule === "prompt" ? <Code2 size={18} /> :
+    routeModule === "export" ? <FileOutput size={18} /> :
+    routeModule === "upstream" ? <Globe size={18} /> :
+    routeModule === "runtime" ? <ArrowUpDown size={18} /> :
+    routeModule === "logs" ? <FileText size={18} /> :
+    routeModule === "calls" ? <Activity size={18} /> :
+    routeModule === "usage" ? <Database size={18} /> :
+    <BookOpen size={18} />;
+  const moduleHeroMetrics =
+    routeModule === "dashboard"
+      ? [
+          {
+            id: "hero-keys",
+            label: t("启用 Key", "Enabled Keys"),
+            value: `${enabledKeyCount}/${keys.length}`,
+            note: t("本地 Key 工作中", "Local keys online")
+          },
+          {
+            id: "hero-upstreams",
+            label: t("启用渠道", "Enabled Upstreams"),
+            value: `${enabledChannelCount}/${channels.length}`,
+            note: t("可用上游连接", "Healthy upstreams")
+          },
+          {
+            id: "hero-requests",
+            label: t("请求总量", "Request Volume"),
+            value: formatNumber(usageReport?.summary.requestCount ?? 0),
+            note: t("最近统计窗口", "Current reporting window")
+          },
+          {
+            id: "hero-tokens",
+            label: t("Token 总量", "Token Volume"),
+            value: formatCompactNumber(usageReport?.summary.totalTokens ?? 0),
+            note: t("已聚合消耗", "Aggregated usage")
+          }
+        ]
+      : routeModule === "upstream"
+        ? [
+            {
+              id: "hero-channel-total",
+              label: t("渠道总数", "Total Upstreams"),
+              value: formatNumber(channels.length),
+              note: t("当前工作区配置", "Workspace configured")
+            },
+            {
+              id: "hero-channel-provider",
+              label: t("当前供应商", "Current Provider"),
+              value: PROVIDER_META[channelForm.provider].label,
+              note: selectedChannel ? selectedChannel.name : t("新建草稿", "New draft")
+            },
+            {
+              id: "hero-channel-models",
+              label: t("可见模型", "Visible Models"),
+              value: `${channelModelVisibleItems.length}/${channelForm.upstreamModels.length}`,
+              note: t("按筛选后的模型池", "Filtered model pool")
+            },
+            {
+              id: "hero-channel-status",
+              label: t("当前状态", "Current Status"),
+              value: selectedChannel
+                ? selectedChannel.enabled
+                  ? t("已启用", "Enabled")
+                  : t("已停用", "Disabled")
+                : t("新建草稿", "New draft"),
+              note: t("保存后立即生效", "Applies after saving")
+            }
+          ]
+        : routeModule === "prompt"
+          ? [
+              {
+                id: "hero-prompt-rules",
+                label: t("规则总数", "Rules"),
+                value: formatNumber(compatPromptRuleCount),
+                note: t("当前提示词规则", "Current prompt rules")
+              },
+              {
+                id: "hero-prompt-enabled",
+                label: t("启用规则", "Enabled"),
+                value: formatNumber(compatPromptRuleEnabledCount),
+                note: t("正在参与匹配", "Actively matching")
+              },
+              {
+                id: "hero-prompt-keywords",
+                label: t("AGENTS 关键词", "AGENTS Keywords"),
+                value: formatNumber(compatPromptKeywordCount),
+                note: t("入口识别用", "Used for detection")
+              },
+              {
+                id: "hero-prompt-defaults",
+                label: t("默认配置", "Defaults"),
+                value: compatPromptDefaults ? t("就绪", "Ready") : t("加载中", "Loading"),
+                note: t("网关注入策略", "Gateway injection policy")
+              }
+            ]
+          : routeModule === "logs"
+            ? [
+                {
+                  id: "hero-logs-loaded",
+                  label: t("已加载", "Loaded"),
+                  value: formatNumber(apiLogs.length),
+                  note: t("最近抓取日志", "Fetched recently")
+                },
+                {
+                  id: "hero-logs-matched",
+                  label: t("筛选命中", "Matched"),
+                  value: formatNumber(filteredApiLogs.length),
+                  note: t("当前条件结果", "Filtered results")
+                },
+                {
+                  id: "hero-logs-errors",
+                  label: t("异常记录", "Errors"),
+                  value: formatNumber(
+                    filteredApiLogs.filter(
+                      (item) => item.error || item.status === null || item.status >= 400
+                    ).length
+                  ),
+                  note: t("便于快速排障", "Fast issue triage")
+                },
+                {
+                  id: "hero-logs-refresh",
+                  label: t("自动刷新", "Auto Refresh"),
+                  value: autoRefreshLogs ? t("开启", "On") : t("关闭", "Off"),
+                  note: t("日志轮询状态", "Polling status")
+                }
+              ]
+            : routeModule === "calls"
+              ? [
+                  {
+                    id: "hero-calls-current",
+                    label: t("当前日志", "Current Logs"),
+                    value: formatNumber(aiCallLogs.length),
+                    note: t("本次载入结果", "Loaded entries")
+                  },
+                  {
+                    id: "hero-calls-matched",
+                    label: t("匹配结果", "Matched"),
+                    value: formatNumber(aiCallStats.matched),
+                    note: t("满足筛选条件", "Matches filters")
+                  },
+                  {
+                    id: "hero-calls-vision",
+                    label: t("辅助视觉", "Vision Fallback"),
+                    value: formatNumber(aiCallStats.visionFallback),
+                    note: t("跨模型视觉调用", "Cross-model vision calls")
+                  },
+                  {
+                    id: "hero-calls-refresh",
+                    label: t("自动刷新", "Auto Refresh"),
+                    value: autoRefreshAiCallLogs ? t("开启", "On") : t("关闭", "Off"),
+                    note: t("调用日志轮询", "Call log polling")
+                  }
+                ]
+              : routeModule === "usage"
+                ? [
+                    {
+                      id: "hero-usage-requests",
+                      label: t("请求总量", "Requests"),
+                      value: formatNumber(usageReport?.summary.requestCount ?? 0),
+                      note: t("当前报表窗口", "Current report window")
+                    },
+                    {
+                      id: "hero-usage-tokens",
+                      label: t("Token 总量", "Total Tokens"),
+                      value: formatCompactNumber(usageReport?.summary.totalTokens ?? 0),
+                      note: t("总消耗", "Aggregated usage")
+                    },
+                    {
+                      id: "hero-usage-keys",
+                      label: t("活跃 Key", "Active Keys"),
+                      value: formatNumber(usageReport?.summary.uniqueKeys ?? 0),
+                      note: t("有请求的本地 Key", "Keys with traffic")
+                    },
+                    {
+                      id: "hero-usage-window",
+                      label: t("统计窗口", "Window"),
+                      value: usageRangeTagLabel,
+                      note: t("可随时切换", "Adjustable range")
+                    }
+                  ]
+                : routeModule === "docs"
+                  ? [
+                      {
+                        id: "hero-docs-gateway",
+                        label: t("网关路由", "Gateway Routes"),
+                        value: formatNumber(API_DOC_GATEWAY_ENDPOINTS.length),
+                        note: t("兼容 OpenAI 风格", "OpenAI-style routes")
+                      },
+                      {
+                        id: "hero-docs-management",
+                        label: t("管理路由", "Management Routes"),
+                        value: formatNumber(API_DOC_MANAGEMENT_ENDPOINTS.length),
+                        note: t("控制台管理接口", "Console management APIs")
+                      },
+                      {
+                        id: "hero-docs-auth",
+                        label: t("鉴权方式", "Auth Modes"),
+                        value: "2",
+                        note: "Authorization / x-api-key"
+                      },
+                      {
+                        id: "hero-docs-base",
+                        label: t("基础路径", "Base Path"),
+                        value: "/v1",
+                        note: t("复制后即可接入", "Ready to integrate")
+                      }
+                    ]
+                  : [
+                      {
+                        id: "hero-key-total",
+                        label: t("本地 Key", "Local Keys"),
+                        value: formatNumber(keys.length),
+                        note: t("工作区全部 Key", "All workspace keys")
+                      },
+                      {
+                        id: "hero-key-enabled",
+                        label: t("启用中", "Enabled"),
+                        value: formatNumber(enabledKeyCount),
+                        note: t("当前可接入", "Ready to serve")
+                      },
+                      {
+                        id: "hero-key-mappings",
+                        label: t("可见映射", "Visible Mappings"),
+                        value: `${keyMappingVisibleItems.length}/${keyForm.modelMappings.length}`,
+                        note: t("按筛选后的结果", "Filtered mappings")
+                      },
+                      {
+                        id: "hero-key-state",
+                        label: t("草稿状态", "Draft State"),
+                        value: isNewKey
+                          ? t("新建草稿", "New draft")
+                          : isKeyDirty
+                            ? t("待保存", "Unsaved")
+                            : t("已同步", "Synced"),
+                        note: routeModule === "runtime"
+                          ? t("运行时切换不会改写原模型", "Runtime switch does not overwrite defaults")
+                          : routeModule === "export"
+                            ? t("导出前可先确认绑定配置", "Verify bindings before export")
+                        : t("保存后更新接入行为", "Access behavior updates after saving")
+                      }
+                    ];
   return (
     <div className="tc-console">
+      <a className="tc-skip-link" href="#legacy-console-main">
+        {t("跳到主内容", "Skip to main content")}
+      </a>
       <Layout className="tc-layout">
         <Layout.Aside width="232px" className="tc-aside">
           <div className="tc-brand">
@@ -5291,6 +5658,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
             value={routeModule}
             className="tc-side-menu"
             expanded={["key-mgmt"]}
+            theme="dark"
             onChange={(value) => handleMenuRoute(String(value))}
           >
             <Menu.MenuItem value="dashboard" icon={<LayoutDashboard size={18} />}>
@@ -5332,7 +5700,7 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
           </div>
         </Layout.Aside>
 
-        <Layout className="tc-main">
+        <main id="legacy-console-main" className="tc-main" tabIndex={-1}>
           <Layout.Header className="tc-header" height="56px">
             <div className="tc-header-left">
               <div className="tc-header-title-wrap">
@@ -5352,7 +5720,12 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                   }
                 }}
               />
-              <Button variant="text" shape="circle" icon={<UserCircle size={18} />} />
+              <Button
+                variant="text"
+                shape="circle"
+                icon={<UserCircle size={18} />}
+                aria-label={t("用户菜单", "User menu")}
+              />
             </div>
           </Layout.Header>
 
@@ -5377,7 +5750,37 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
           </div>
 
           <Layout.Content className="tc-content">
-            <Card className="tc-panel" bordered>
+            <section className="tc-console-hero">
+              <div className="tc-console-hero-head">
+                <div className="tc-console-hero-copy">
+                  <div className="tc-console-hero-kicker">
+                    <span className="tc-console-hero-icon">{routeModuleIcon}</span>
+                    <span>{t("Gateway Workspace", "Gateway Workspace")}</span>
+                  </div>
+                  <h1>{routeModuleTitle}</h1>
+                  <p>{routeModuleSummary}</p>
+                </div>
+                <aside className="tc-console-hero-context">
+                  <span>{t("Gateway Endpoint", "Gateway Endpoint")}</span>
+                  <code>{gatewayV1Endpoint}</code>
+                  <small>
+                    {t("当前语言", "Current locale")}: {locale === "zh-CN" ? "简体中文" : "English"}
+                  </small>
+                </aside>
+              </div>
+
+              <div className="tc-console-hero-metrics">
+                {moduleHeroMetrics.map((item) => (
+                  <article key={item.id} className="tc-console-hero-metric">
+                    <span>{item.label}</span>
+                    <strong>{item.value}</strong>
+                    <small>{item.note}</small>
+                  </article>
+                ))}
+              </div>
+            </section>
+
+            <Card className="tc-panel tc-panel-shell" bordered>
               <div className="tc-toolbar">
                 {routeModule === "logs" ? (
                   <div className="tc-toolbar-left">
@@ -5802,6 +6205,10 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                   loadingUsage={loadingUsage}
                   onNavigate={handleMenuRoute}
                   onRefreshUsage={() => void loadUsageReport()}
+                  usageMinutes={usageMinutes}
+                  setUsageMinutes={setUsageMinutes}
+                  usageDateRange={usageDateRange}
+                  setUsageDateRange={setUsageDateRange}
                   t={t}
                   enabledKeyCount={enabledKeyCount}
                   enabledChannelCount={enabledChannelCount}
@@ -5911,6 +6318,172 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                   compatPromptDefaults={compatPromptDefaults}
                   applyCompatPromptConfig={applyCompatPromptConfig}
                 />
+              ) : null}
+
+              {routeModule === "prompt" ? (
+                <section className="tc-section">
+                  <h3>{t("第三方模型提示词优化工具", "Third-Party Prompt Optimizer")}</h3>
+                  <p className="tc-upstream-advice">
+                    {t(
+                      "输入第三方模型信息和基础提示词，自动生成更适配 Codex 的约束版本。你可以直接应用为默认提示词，或一键生成为模型规则草稿。",
+                      "Provide model metadata and a base prompt to generate a Codex-compatible optimized hint. You can apply it as the default hint or create a model-rule draft in one click."
+                    )}
+                  </p>
+
+                  <div className="tc-form-grid">
+                    <label className="tc-field">
+                      <span>{t("供应商（可选）", "Provider (optional)")}</span>
+                      <Input
+                        value={promptOptimizerProviderInput}
+                        onChange={(value) => setPromptOptimizerProviderInput(value)}
+                        clearable
+                        placeholder={t("如 openai / anthropic / glm", "e.g. openai / anthropic / glm")}
+                      />
+                    </label>
+
+                    <label className="tc-field">
+                      <span>{t("上游真实模型（可选）", "Upstream Model (optional)")}</span>
+                      <Input
+                        value={promptOptimizerUpstreamModelInput}
+                        onChange={(value) => setPromptOptimizerUpstreamModelInput(value)}
+                        clearable
+                        placeholder={t("如 glm-5 / claude-3-7-sonnet", "e.g. glm-5 / claude-3-7-sonnet")}
+                      />
+                    </label>
+
+                    <label className="tc-field">
+                      <span>{t("客户端模型名（可选）", "Client Model (optional)")}</span>
+                      <Input
+                        value={promptOptimizerClientModelInput}
+                        onChange={(value) => setPromptOptimizerClientModelInput(value)}
+                        clearable
+                        placeholder={t("如 gpt-5.4 / gpt-4.1-mini", "e.g. gpt-5.4 / gpt-4.1-mini")}
+                      />
+                    </label>
+
+                    <label className="tc-field">
+                      <span>{t("优化策略", "Optimization Focus")}</span>
+                      <Select
+                        value={promptOptimizerFocus}
+                        options={[
+                          { label: t("平衡模式", "Balanced"), value: "balanced" },
+                          { label: t("工具调用优先", "Tool Calling First"), value: "tool-calling" },
+                          { label: t("严格模式", "Strict"), value: "strict" }
+                        ]}
+                        style={{ width: 220 }}
+                        onChange={(value) => {
+                          const next = normalizeSelectValue(value);
+                          if (
+                            next === "balanced" ||
+                            next === "tool-calling" ||
+                            next === "strict"
+                          ) {
+                            setPromptOptimizerFocus(next);
+                          }
+                        }}
+                      />
+                    </label>
+
+                    <label className="tc-switchline">
+                      <span>{t("保留原始业务提示词", "Preserve Original Prompt")}</span>
+                      <Switch
+                        value={promptOptimizerPreserveOriginal}
+                        onChange={(value) => setPromptOptimizerPreserveOriginal(Boolean(value))}
+                      />
+                    </label>
+
+                    <label className="tc-field">
+                      <span>{t("观测问题标签（每行一个）", "Observed Issues (one per line)")}</span>
+                      <Textarea
+                        value={promptOptimizerIssuesInput}
+                        onChange={(value) => setPromptOptimizerIssuesInput(value)}
+                        autosize={{ minRows: 4, maxRows: 10 }}
+                        placeholder={"schema_error\nmissing_tool_call\nfake_patch"}
+                      />
+                    </label>
+
+                    <label className="tc-field">
+                      <span>{t("基础提示词", "Base Prompt")}</span>
+                      <Textarea
+                        value={promptOptimizerBasePromptInput}
+                        onChange={(value) => setPromptOptimizerBasePromptInput(value)}
+                        autosize={{ minRows: 8, maxRows: 14 }}
+                        placeholder={t(
+                          "留空时自动使用当前“默认提示词正文”作为优化输入。",
+                          "Leave empty to use the current default prompt body as optimization input."
+                        )}
+                      />
+                    </label>
+                  </div>
+
+                  <div className="tc-actions-row">
+                    <Button
+                      theme="primary"
+                      loading={promptOptimizerRunning}
+                      onClick={() => void runPromptOptimizer()}
+                    >
+                      {t("优化提示词", "Optimize Prompt")}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      onClick={applyPromptOptimizerToDefaultHint}
+                      disabled={!promptOptimizerResult}
+                    >
+                      {t("应用到默认提示词", "Apply to Default Hint")}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      onClick={applyPromptOptimizerAsModelRule}
+                      disabled={!promptOptimizerResult}
+                    >
+                      {t("生成为模型规则", "Create Model Rule")}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      onClick={() => void copyPromptOptimizerResult()}
+                      disabled={!promptOptimizerResult}
+                    >
+                      {t("复制优化结果", "Copy Optimized Prompt")}
+                    </Button>
+                  </div>
+
+                  {promptOptimizerError ? (
+                    <p className="tc-upstream-advice">{promptOptimizerError}</p>
+                  ) : null}
+
+                  {promptOptimizerResult ? (
+                    <>
+                      <div className="tc-actions-row">
+                        <Tag variant="light-outline">
+                          family={promptOptimizerResult.profile.family}
+                        </Tag>
+                        <Tag variant="light-outline">
+                          issue_tags={promptOptimizerResult.issueTags.length}
+                        </Tag>
+                        <Tag variant="light-outline">
+                          est_tokens={promptOptimizerResult.metrics.estimatedTokens}
+                        </Tag>
+                        <Tag variant="light-outline">
+                          source_failures={promptOptimizerResult.metrics.sourceFailureCount}
+                        </Tag>
+                      </div>
+
+                      <CodeBlock
+                        value={promptOptimizerResult.optimizedPrompt}
+                        language="markdown"
+                        maxHeight={360}
+                      />
+
+                      <p className="tc-upstream-advice">
+                        {t(
+                          "建议规则草稿（可直接用于模型规则导入）：",
+                          "Suggested rule draft (ready for model-rule import):"
+                        )}
+                      </p>
+                      <CodeBlock value={promptOptimizerSuggestedRulePreview} language="json" maxHeight={220} />
+                    </>
+                  ) : null}
+                </section>
               ) : null}
 
               {routeModule === "export" ? (
@@ -6131,11 +6704,10 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
                   deleteUsagePreset={deleteUsagePreset}
                   usagePrimaryMetricMeta={usagePrimaryMetricMeta}
                   resolvedUsageBucketMinutes={resolvedUsageBucketMinutes}
-                  usageTimelineChartOption={usageTimelineChartOption}
+                  usageTimelineChartData={usageTimelineChartData}
                   usageTimelineChartHeight={usageTimelineChartHeight}
-                  usagePerKeyChartOption={usagePerKeyChartOption}
-                  usagePerModelChartOption={usagePerModelChartOption}
-                  ReactECharts={ReactECharts}
+                  usagePerKeyChartData={usagePerKeyChartData}
+                  usagePerModelChartData={usagePerModelChartData}
                 />
               ) : null}
 
@@ -6262,168 +6834,178 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
               ) : null}
             </Dialog>
 
-            <input
+            <HiddenFileInput
               ref={bulkJsonFileInputRef}
-              type="file"
               accept=".json,application/json"
-              style={{ display: "none" }}
               onChange={(event) => void handleBulkJsonFileChange(event)}
             />
 
-            <BulkJsonImportDialog
-              visible={compatPromptRulesImportDialogVisible}
-              title={t("批量导入模型规则", "Bulk Import Model Rules")}
-              description={t(
-                "先粘贴 JSON，或直接从剪贴板 / 文件载入；确认摘要后再决定追加还是覆盖。导入只更新当前草稿，仍需点击页面底部“保存提示词配置”才会生效。",
-                "Paste JSON first, or load it from the clipboard / a file; then choose append or replace after reviewing the summary. Import only updates the current draft, so you still need to click Save Prompt Config at the bottom."
-              )}
-              placeholder='{"modelPromptRules":[...]}\n\nor\n[{"id":"rule-1","upstreamModelPattern":"gpt-4.1-mini","hint":"..."}]'
-              value={compatPromptRulesQuickImportJson}
-              sourceLabel={compatPromptRulesQuickImportSource}
-              idleHint={t(
-                "支持规则数组，或包含 modelPromptRules / compatPromptConfig.modelPromptRules 的对象。",
-                "Supports either a rules array, or an object containing modelPromptRules / compatPromptConfig.modelPromptRules."
-              )}
-              labels={bulkDialogLabels}
-              preview={compatPromptRulesQuickImportPreview}
-              appendLabel={t("追加到当前规则", "Append to Current Rules")}
-              replaceLabel={t("覆盖当前规则", "Replace Current Rules")}
-              appendDisabled={compatPromptRulesAppendDisabled}
-              replaceDisabled={compatPromptRulesReplaceDisabled}
-              onChange={handleCompatPromptRulesQuickImportJsonChange}
-              onClose={() => setCompatPromptRulesImportDialogVisible(false)}
-              onClear={() => clearBulkJsonImportDraft("compatPromptRules")}
-              onLoadClipboard={() => void loadCompatPromptRulesFromClipboardToDraft()}
-              onChooseFile={() => openCompatPromptRulesFileImporter()}
-              onAppend={() => applyCompatPromptRulesQuickImport("append")}
-              onReplace={() => applyCompatPromptRulesQuickImport("replace")}
-            />
+            {compatPromptRulesImportDialogVisible ? (
+              <BulkJsonImportDialog
+                visible={compatPromptRulesImportDialogVisible}
+                title={t("批量导入模型规则", "Bulk Import Model Rules")}
+                description={t(
+                  "先粘贴 JSON，或直接从剪贴板 / 文件载入；确认摘要后再决定追加还是覆盖。导入只更新当前草稿，仍需点击页面底部“保存提示词配置”才会生效。",
+                  "Paste JSON first, or load it from the clipboard / a file; then choose append or replace after reviewing the summary. Import only updates the current draft, so you still need to click Save Prompt Config at the bottom."
+                )}
+                placeholder='{"modelPromptRules":[...]}\n\nor\n[{"id":"rule-1","upstreamModelPattern":"gpt-4.1-mini","hint":"..."}]'
+                value={compatPromptRulesQuickImportJson}
+                sourceLabel={compatPromptRulesQuickImportSource}
+                idleHint={t(
+                  "支持规则数组，或包含 modelPromptRules / compatPromptConfig.modelPromptRules 的对象。",
+                  "Supports either a rules array, or an object containing modelPromptRules / compatPromptConfig.modelPromptRules."
+                )}
+                labels={bulkDialogLabels}
+                preview={compatPromptRulesQuickImportPreview}
+                appendLabel={t("追加到当前规则", "Append to Current Rules")}
+                replaceLabel={t("覆盖当前规则", "Replace Current Rules")}
+                appendDisabled={compatPromptRulesAppendDisabled}
+                replaceDisabled={compatPromptRulesReplaceDisabled}
+                onChange={handleCompatPromptRulesQuickImportJsonChange}
+                onClose={() => setCompatPromptRulesImportDialogVisible(false)}
+                onClear={() => clearBulkJsonImportDraft("compatPromptRules")}
+                onLoadClipboard={() => void loadCompatPromptRulesFromClipboardToDraft()}
+                onChooseFile={() => openCompatPromptRulesFileImporter()}
+                onAppend={() => applyCompatPromptRulesQuickImport("append")}
+                onReplace={() => applyCompatPromptRulesQuickImport("replace")}
+              />
+            ) : null}
 
-            <BulkJsonExportDialog
-              visible={compatPromptRulesExportDialogVisible}
-              title={t("批量导出模型规则", "Bulk Export Model Rules")}
-              description={t(
-                "导出使用标准对象格式 `{ modelPromptRules: [...] }`，可直接用于剪贴板分享、文件备份，或回填到导入弹窗中。",
-                "Export uses the standard `{ modelPromptRules: [...] }` object format, which is ready for clipboard sharing, file backup, or round-tripping into the import dialog."
-              )}
-              preview={compatPromptRulesExportPreviewJson}
-              stats={[
-                { label: t("当前", "Current"), value: compatPromptRuleCount },
-                { label: t("启用", "Enabled"), value: compatPromptRuleEnabledCount }
-              ]}
-              closeLabel={t("关闭", "Close")}
-              copyLabel={t("复制到剪贴板", "Copy to Clipboard")}
-              downloadLabel={t("下载 JSON 文件", "Download JSON File")}
-              onClose={() => setCompatPromptRulesExportDialogVisible(false)}
-              onCopy={() => void copyCompatPromptRulesToClipboard("wrapped")}
-              onDownload={() => downloadCompatPromptRulesJsonFile("wrapped")}
-            />
+            {compatPromptRulesExportDialogVisible ? (
+              <BulkJsonExportDialog
+                visible={compatPromptRulesExportDialogVisible}
+                title={t("批量导出模型规则", "Bulk Export Model Rules")}
+                description={t(
+                  "导出使用标准对象格式 `{ modelPromptRules: [...] }`，可直接用于剪贴板分享、文件备份，或回填到导入弹窗中。",
+                  "Export uses the standard `{ modelPromptRules: [...] }` object format, which is ready for clipboard sharing, file backup, or round-tripping into the import dialog."
+                )}
+                preview={compatPromptRulesExportPreviewJson}
+                stats={[
+                  { label: t("当前", "Current"), value: compatPromptRuleCount },
+                  { label: t("启用", "Enabled"), value: compatPromptRuleEnabledCount }
+                ]}
+                closeLabel={t("关闭", "Close")}
+                copyLabel={t("复制到剪贴板", "Copy to Clipboard")}
+                downloadLabel={t("下载 JSON 文件", "Download JSON File")}
+                onClose={() => setCompatPromptRulesExportDialogVisible(false)}
+                onCopy={() => void copyCompatPromptRulesToClipboard("wrapped")}
+                onDownload={() => downloadCompatPromptRulesJsonFile("wrapped")}
+              />
+            ) : null}
 
-            <BulkJsonExportDialog
-              visible={quickExportDialogVisible}
-              title={t("批量导出模型池", "Bulk Export Model Pool")}
-              description={t(
-                "以下 JSON 可保存到文件或粘贴到其他渠道的「批量导入」中。内部 ID 和 API Key 已移除，可安全分享。",
-                "Save this JSON to a file or paste it into another channel's Bulk Import dialog. Internal IDs and API keys are stripped for safe sharing."
-              )}
-              preview={upstreamModelsExportPreviewJson}
-              stats={[
-                { label: t("当前", "Current"), value: channelForm.upstreamModels.length },
-                {
-                  label: t("启用", "Enabled"),
-                  value: channelForm.upstreamModels.filter((item) => item.enabled).length
-                }
-              ]}
-              closeLabel={t("关闭", "Close")}
-              copyLabel={t("复制到剪贴板", "Copy to Clipboard")}
-              downloadLabel={t("下载 JSON 文件", "Download JSON File")}
-              onClose={() => setQuickExportDialogVisible(false)}
-              onCopy={() => void handleQuickCopyModels()}
-              onDownload={downloadUpstreamModelsJsonFile}
-            />
+            {quickExportDialogVisible ? (
+              <BulkJsonExportDialog
+                visible={quickExportDialogVisible}
+                title={t("批量导出模型池", "Bulk Export Model Pool")}
+                description={t(
+                  "以下 JSON 可保存到文件或粘贴到其他渠道的「批量导入」中。内部 ID 和 API Key 已移除，可安全分享。",
+                  "Save this JSON to a file or paste it into another channel's Bulk Import dialog. Internal IDs and API keys are stripped for safe sharing."
+                )}
+                preview={upstreamModelsExportPreviewJson}
+                stats={[
+                  { label: t("当前", "Current"), value: channelForm.upstreamModels.length },
+                  {
+                    label: t("启用", "Enabled"),
+                    value: channelForm.upstreamModels.filter((item) => item.enabled).length
+                  }
+                ]}
+                closeLabel={t("关闭", "Close")}
+                copyLabel={t("复制到剪贴板", "Copy to Clipboard")}
+                downloadLabel={t("下载 JSON 文件", "Download JSON File")}
+                onClose={() => setQuickExportDialogVisible(false)}
+                onCopy={() => void handleQuickCopyModels()}
+                onDownload={downloadUpstreamModelsJsonFile}
+              />
+            ) : null}
 
-            <BulkJsonImportDialog
-              visible={quickImportDialogVisible}
-              title={t("批量导入模型池", "Bulk Import Model Pool")}
-              description={t(
-                "先粘贴 JSON，或直接从剪贴板 / 文件载入；确认摘要后再决定追加还是覆盖。导入只更新当前草稿，仍需点击页面底部“保存渠道”才会生效。",
-                "Paste JSON first, or load it from the clipboard / a file; then choose append or replace after reviewing the summary. Import only updates the current draft, so you still need to click Save Upstream at the bottom."
-              )}
-              placeholder='{"version":1,"models":[...]}\n\nor\n[{"model":"glm-5","name":"GLM-5",...}]'
-              value={quickImportJson}
-              sourceLabel={quickImportSource}
-              idleHint={t(
-                "支持模型快照 `{ models: [...] }`，也支持直接粘贴模型数组。",
-                "Supports model snapshots in `{ models: [...] }`, or a bare model array."
-              )}
-              labels={bulkDialogLabels}
-              preview={upstreamModelsQuickImportPreview}
-              appendLabel={t("追加到当前模型池", "Append to Current Model Pool")}
-              replaceLabel={t("覆盖当前模型池", "Replace Current Model Pool")}
-              appendDisabled={upstreamModelsAppendDisabled}
-              replaceDisabled={upstreamModelsReplaceDisabled}
-              onChange={handleQuickImportJsonChange}
-              onClose={() => setQuickImportDialogVisible(false)}
-              onClear={() => clearBulkJsonImportDraft("upstreamModels")}
-              onLoadClipboard={() => void loadUpstreamModelsFromClipboardToDraft()}
-              onChooseFile={openUpstreamModelsFileImporter}
-              onAppend={handleQuickImportConfirm}
-              onReplace={handleQuickImportReplace}
-            />
+            {quickImportDialogVisible ? (
+              <BulkJsonImportDialog
+                visible={quickImportDialogVisible}
+                title={t("批量导入模型池", "Bulk Import Model Pool")}
+                description={t(
+                  "先粘贴 JSON，或直接从剪贴板 / 文件载入；确认摘要后再决定追加还是覆盖。导入只更新当前草稿，仍需点击页面底部“保存渠道”才会生效。",
+                  "Paste JSON first, or load it from the clipboard / a file; then choose append or replace after reviewing the summary. Import only updates the current draft, so you still need to click Save Upstream at the bottom."
+                )}
+                placeholder='{"version":1,"models":[...]}\n\nor\n[{"model":"glm-5","name":"GLM-5",...}]'
+                value={quickImportJson}
+                sourceLabel={quickImportSource}
+                idleHint={t(
+                  "支持模型快照 `{ models: [...] }`，也支持直接粘贴模型数组。",
+                  "Supports model snapshots in `{ models: [...] }`, or a bare model array."
+                )}
+                labels={bulkDialogLabels}
+                preview={upstreamModelsQuickImportPreview}
+                appendLabel={t("追加到当前模型池", "Append to Current Model Pool")}
+                replaceLabel={t("覆盖当前模型池", "Replace Current Model Pool")}
+                appendDisabled={upstreamModelsAppendDisabled}
+                replaceDisabled={upstreamModelsReplaceDisabled}
+                onChange={handleQuickImportJsonChange}
+                onClose={() => setQuickImportDialogVisible(false)}
+                onClear={() => clearBulkJsonImportDraft("upstreamModels")}
+                onLoadClipboard={() => void loadUpstreamModelsFromClipboardToDraft()}
+                onChooseFile={openUpstreamModelsFileImporter}
+                onAppend={handleQuickImportConfirm}
+                onReplace={handleQuickImportReplace}
+              />
+            ) : null}
 
-            <BulkJsonExportDialog
-              visible={quickExportKeyMappingDialogVisible}
-              title={t("批量导出模型映射", "Bulk Export Model Mappings")}
-              description={t(
-                "以下 JSON 可粘贴到其他本地 Key 的「批量导入」中。内部映射 ID 已移除；映射级渠道绑定会附带渠道名，导入时优先按渠道名恢复。",
-                "Paste this JSON into another local key's Bulk Import dialog. Internal mapping IDs are removed, and mapping-level upstream bindings include channel names so import can restore them by name first."
-              )}
-              preview={keyMappingsExportPreviewJson}
-              stats={[
-                { label: t("当前", "Current"), value: keyForm.modelMappings.length },
-                {
-                  label: t("启用", "Enabled"),
-                  value: keyForm.modelMappings.filter((item) => item.enabled).length
-                }
-              ]}
-              closeLabel={t("关闭", "Close")}
-              copyLabel={t("复制到剪贴板", "Copy to Clipboard")}
-              downloadLabel={t("下载 JSON 文件", "Download JSON File")}
-              onClose={() => setQuickExportKeyMappingDialogVisible(false)}
-              onCopy={() => void handleQuickCopyKeyMappings()}
-              onDownload={downloadKeyMappingsJsonFile}
-            />
+            {quickExportKeyMappingDialogVisible ? (
+              <BulkJsonExportDialog
+                visible={quickExportKeyMappingDialogVisible}
+                title={t("批量导出模型映射", "Bulk Export Model Mappings")}
+                description={t(
+                  "以下 JSON 可粘贴到其他本地 Key 的「批量导入」中。内部映射 ID 已移除；映射级渠道绑定会附带渠道名，导入时优先按渠道名恢复。",
+                  "Paste this JSON into another local key's Bulk Import dialog. Internal mapping IDs are removed, and mapping-level upstream bindings include channel names so import can restore them by name first."
+                )}
+                preview={keyMappingsExportPreviewJson}
+                stats={[
+                  { label: t("当前", "Current"), value: keyForm.modelMappings.length },
+                  {
+                    label: t("启用", "Enabled"),
+                    value: keyForm.modelMappings.filter((item) => item.enabled).length
+                  }
+                ]}
+                closeLabel={t("关闭", "Close")}
+                copyLabel={t("复制到剪贴板", "Copy to Clipboard")}
+                downloadLabel={t("下载 JSON 文件", "Download JSON File")}
+                onClose={() => setQuickExportKeyMappingDialogVisible(false)}
+                onCopy={() => void handleQuickCopyKeyMappings()}
+                onDownload={downloadKeyMappingsJsonFile}
+              />
+            ) : null}
 
-            <BulkJsonImportDialog
-              visible={quickImportKeyMappingDialogVisible}
-              title={t("批量导入模型映射", "Bulk Import Model Mappings")}
-              description={t(
-                "先粘贴 JSON，或直接从剪贴板 / 文件载入；确认摘要后再决定追加还是覆盖。导入只更新当前草稿，仍需点击页面底部“保存 Key”才会生效。",
-                "Paste JSON first, or load it from the clipboard / a file; then choose append or replace after reviewing the summary. Import only updates the current draft, so you still need to click Save Key at the bottom."
-              )}
-              placeholder='{"version":1,"mappings":[...]}\n\nor\n[{"clientModel":"gpt-5.4","targetModel":"glm-5",...}]'
-              value={quickImportKeyMappingJson}
-              sourceLabel={quickImportKeyMappingSource}
-              idleHint={t(
-                "支持映射快照 `{ mappings: [...] }`，也支持直接粘贴映射数组。",
-                "Supports mapping snapshots in `{ mappings: [...] }`, or a bare mapping array."
-              )}
-              labels={bulkDialogLabels}
-              preview={keyMappingsQuickImportPreview}
-              appendLabel={t("追加到当前映射", "Append to Current Mappings")}
-              replaceLabel={t("覆盖当前映射", "Replace Current Mappings")}
-              appendDisabled={keyMappingsAppendDisabled}
-              replaceDisabled={keyMappingsReplaceDisabled}
-              onChange={handleQuickImportKeyMappingJsonChange}
-              onClose={() => setQuickImportKeyMappingDialogVisible(false)}
-              onClear={() => clearBulkJsonImportDraft("keyMappings")}
-              onLoadClipboard={() => void loadKeyMappingsFromClipboardToDraft()}
-              onChooseFile={openKeyMappingsFileImporter}
-              onAppend={() => handleQuickImportKeyMappings(false)}
-              onReplace={() => handleQuickImportKeyMappings(true)}
-            />
+            {quickImportKeyMappingDialogVisible ? (
+              <BulkJsonImportDialog
+                visible={quickImportKeyMappingDialogVisible}
+                title={t("批量导入模型映射", "Bulk Import Model Mappings")}
+                description={t(
+                  "先粘贴 JSON，或直接从剪贴板 / 文件载入；确认摘要后再决定追加还是覆盖。导入只更新当前草稿，仍需点击页面底部“保存 Key”才会生效。",
+                  "Paste JSON first, or load it from the clipboard / a file; then choose append or replace after reviewing the summary. Import only updates the current draft, so you still need to click Save Key at the bottom."
+                )}
+                placeholder='{"version":1,"mappings":[...]}\n\nor\n[{"clientModel":"gpt-5.4","targetModel":"glm-5",...}]'
+                value={quickImportKeyMappingJson}
+                sourceLabel={quickImportKeyMappingSource}
+                idleHint={t(
+                  "支持映射快照 `{ mappings: [...] }`，也支持直接粘贴映射数组。",
+                  "Supports mapping snapshots in `{ mappings: [...] }`, or a bare mapping array."
+                )}
+                labels={bulkDialogLabels}
+                preview={keyMappingsQuickImportPreview}
+                appendLabel={t("追加到当前映射", "Append to Current Mappings")}
+                replaceLabel={t("覆盖当前映射", "Replace Current Mappings")}
+                appendDisabled={keyMappingsAppendDisabled}
+                replaceDisabled={keyMappingsReplaceDisabled}
+                onChange={handleQuickImportKeyMappingJsonChange}
+                onClose={() => setQuickImportKeyMappingDialogVisible(false)}
+                onClear={() => clearBulkJsonImportDraft("keyMappings")}
+                onLoadClipboard={() => void loadKeyMappingsFromClipboardToDraft()}
+                onChooseFile={openKeyMappingsFileImporter}
+                onAppend={() => handleQuickImportKeyMappings(false)}
+                onReplace={() => handleQuickImportKeyMappings(true)}
+              />
+            ) : null}
           </Layout.Content>
-        </Layout>
+        </main>
       </Layout>
     </div>
   );

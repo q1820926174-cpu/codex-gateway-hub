@@ -1,6 +1,6 @@
 "use client";
 
-import { motion } from "framer-motion";
+import { motion, useReducedMotion } from "framer-motion";
 import { BarChart3, Zap, ArrowDownToLine, ArrowUpFromLine } from "lucide-react";
 
 export type StatCardVariant = "requests" | "prompt" | "completion" | "total";
@@ -64,14 +64,15 @@ export function UsageStatCard({ variant, value, delay = 0, locale = "zh-CN" }: U
   const cfg = VARIANT_CONFIG[variant];
   const Icon = cfg.icon;
   const displayLabel = locale === "zh-CN" ? cfg.label : cfg.labelEn;
+  const shouldReduceMotion = useReducedMotion() ?? false;
 
   return (
     <motion.div
       className="tc-stat-card"
-      initial={{ opacity: 0, y: 20, scale: 0.96 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      transition={{ duration: 0.45, delay, ease: [0.25, 0.46, 0.45, 0.94] }}
-      whileHover={{ y: -3, boxShadow: "0 12px 28px rgba(15, 23, 42, 0.12)" }}
+      initial={shouldReduceMotion ? false : { opacity: 0, y: 20, scale: 0.96 }}
+      animate={shouldReduceMotion ? { opacity: 1 } : { opacity: 1, y: 0, scale: 1 }}
+      transition={shouldReduceMotion ? { duration: 0 } : { duration: 0.45, delay, ease: [0.25, 0.46, 0.45, 0.94] }}
+      whileHover={shouldReduceMotion ? undefined : { y: -3, boxShadow: "0 12px 28px rgba(15, 23, 42, 0.12)" }}
     >
       {/* 顶部渐变条 */}
       <div className="tc-stat-card-bar" style={{ background: cfg.gradient }} />
@@ -87,9 +88,9 @@ export function UsageStatCard({ variant, value, delay = 0, locale = "zh-CN" }: U
         <motion.div
           className="tc-stat-card-value"
           key={value}
-          initial={{ opacity: 0.4, y: 6 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.35, delay: delay + 0.15 }}
+          initial={shouldReduceMotion ? false : { opacity: 0.4, y: 6 }}
+          animate={shouldReduceMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
+          transition={shouldReduceMotion ? { duration: 0 } : { duration: 0.35, delay: delay + 0.15 }}
         >
           {formatStatNumber(value)}
         </motion.div>

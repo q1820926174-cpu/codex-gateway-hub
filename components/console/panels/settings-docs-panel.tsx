@@ -1,34 +1,35 @@
 import {
   Button,
-  Checkbox,
-  DateRangePicker,
-  Input,
-  Select,
-  Switch,
-  Tag
+  Tag,
+  type TableProps
 } from "tdesign-react";
 import { CodeBlock } from "@/components/code-block";
-import { JsonViewer } from "@/components/json-viewer";
-import { UsageLoadingSkeleton } from "@/components/ui/UsageLoadingSkeleton";
-import { UsagePieChart } from "@/components/ui/UsagePieChart";
-import { UsageStatCard } from "@/components/ui/UsageStatCard";
+import { StaticTable } from "@/components/ui/StaticTable";
 import {
-  AI_CALL_RANGE_OPTIONS,
+  type ApiDocEndpoint,
   API_DOC_GATEWAY_ENDPOINTS,
-  API_DOC_MANAGEMENT_ENDPOINTS,
-  USAGE_METRIC_META,
-  USAGE_RANGE_OPTIONS
+  API_DOC_MANAGEMENT_ENDPOINTS
 } from "@/components/console/types";
-import {
-  MarkdownLogBlock,
-  formatCnDate,
-  formatNumber,
-  pickUsageMetricValue,
-  summarizeLogPreview
-} from "@/components/console/settings-console-helpers";
 
+type ApiDocExampleKey = "chatCompletions" | "responses" | "anthropicMessages";
+type DocsPanelExamples = Record<ApiDocExampleKey, string>;
+type ApiDocTableRow = {
+  id: string;
+  method: ApiDocEndpoint["method"];
+  path: string;
+  description: string;
+};
 
-export function SettingsDocsPanel(props: any) {
+type SettingsDocsPanelProps = {
+  t: (zh: string, en: string) => string;
+  gatewayV1Endpoint: string;
+  gatewayOrigin: string;
+  apiDocExamples: DocsPanelExamples;
+  copyTextToClipboard: (value: string, successMessage?: string) => Promise<void> | void;
+  downloadApiDocExample: (key: ApiDocExampleKey) => void;
+};
+
+export function SettingsDocsPanel(props: SettingsDocsPanelProps) {
   const {
     t,
     gatewayV1Endpoint,
@@ -37,6 +38,37 @@ export function SettingsDocsPanel(props: any) {
     copyTextToClipboard,
     downloadApiDocExample
   } = props;
+  const endpointColumns: NonNullable<TableProps<ApiDocTableRow>["columns"]> = [
+    {
+      colKey: "method",
+      title: t("方法", "Method"),
+      width: 120,
+      cell: ({ row }) => <Tag variant="light-outline">{row.method}</Tag>
+    },
+    {
+      colKey: "path",
+      title: t("路径", "Path"),
+      cell: ({ row }) => <code>{row.path}</code>
+    },
+    {
+      colKey: "description",
+      title: t("说明", "Description"),
+      cell: ({ row }) => row.description
+    }
+  ];
+  const gatewayEndpointRows: ApiDocTableRow[] = API_DOC_GATEWAY_ENDPOINTS.map((item) => ({
+    id: `${item.method}-${item.path}`,
+    method: item.method,
+    path: item.path,
+    description: t(item.zh, item.en)
+  }));
+  const managementEndpointRows: ApiDocTableRow[] = API_DOC_MANAGEMENT_ENDPOINTS.map((item) => ({
+    id: `${item.method}-${item.path}`,
+    method: item.method,
+    path: item.path,
+    description: t(item.zh, item.en)
+  }));
+
   return (
     <section className="tc-section">
       <h3>{t("本端接口文档", "Gateway API Documentation")}</h3>
@@ -57,48 +89,14 @@ export function SettingsDocsPanel(props: any) {
         <div className="tc-usage-block">
           <h4>{t("网关推理接口", "Gateway Inference Endpoints")}</h4>
           <div className="tc-usage-table-wrap">
-            <table className="tc-usage-table">
-              <thead>
-                <tr>
-                  <th>{t("方法", "Method")}</th>
-                  <th>{t("路径", "Path")}</th>
-                  <th>{t("说明", "Description")}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {API_DOC_GATEWAY_ENDPOINTS.map((item) => (
-                  <tr key={`${item.method}-${item.path}`}>
-                    <td><Tag variant="light-outline">{item.method}</Tag></td>
-                    <td><code>{item.path}</code></td>
-                    <td>{t(item.zh, item.en)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <StaticTable columns={endpointColumns} data={gatewayEndpointRows} className="tc-static-table" />
           </div>
         </div>
 
         <div className="tc-usage-block">
           <h4>{t("管理与运维接口", "Management and Ops Endpoints")}</h4>
           <div className="tc-usage-table-wrap">
-            <table className="tc-usage-table">
-              <thead>
-                <tr>
-                  <th>{t("方法", "Method")}</th>
-                  <th>{t("路径", "Path")}</th>
-                  <th>{t("说明", "Description")}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {API_DOC_MANAGEMENT_ENDPOINTS.map((item) => (
-                  <tr key={`${item.method}-${item.path}`}>
-                    <td><Tag variant="light-outline">{item.method}</Tag></td>
-                    <td><code>{item.path}</code></td>
-                    <td>{t(item.zh, item.en)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <StaticTable columns={endpointColumns} data={managementEndpointRows} className="tc-static-table" />
           </div>
         </div>
       </div>
