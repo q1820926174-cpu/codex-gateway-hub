@@ -3189,3 +3189,321 @@ body::before {
     grid-template-columns: 1fr;
   }
 }
+
+/* ── SSO Module ────────────────────────────── */
+
+.tc-sso-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.tc-sso-section-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 0 0 12px;
+}
+
+.tc-sso-card {
+  display: grid;
+  gap: 12px;
+  padding: 20px;
+  border-radius: var(--tc-radius-xl, 16px);
+  border: 1px solid var(--tc-border);
+  background: #fff;
+  box-shadow: var(--tc-shadow-md, 0 2px 8px rgba(0,0,0,0.06));
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.tc-sso-card:hover {
+  border-color: rgba(15, 111, 255, 0.25);
+}
+
+.tc-sso-card.is-unconfigured {
+  opacity: 0.75;
+}
+
+.tc-sso-card.is-expanded {
+  border-color: var(--tc-brand, #0f6fff);
+  box-shadow: 0 0 0 2px rgba(15, 111, 255, 0.12);
+}
+
+.tc-sso-card.is-skeleton {
+  pointer-events: none;
+}
+
+.tc-sso-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.tc-sso-card-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+}
+
+.tc-sso-card-title > div {
+  min-width: 0;
+}
+
+.tc-sso-card-title strong {
+  display: block;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--tc-text, #10233f);
+  margin-bottom: 2px;
+}
+
+.tc-sso-card-title p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--tc-text-muted, #5d728f);
+}
+
+.tc-sso-card-controls {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.tc-sso-progress {
+  display: grid;
+  gap: 6px;
+}
+
+.tc-sso-progress-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.tc-sso-progress-head strong {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--tc-text, #10233f);
+}
+
+.tc-sso-progress-head span {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--tc-text-muted, #5d728f);
+}
+
+.tc-sso-progress-track {
+  width: 100%;
+  height: 6px;
+  border-radius: 3px;
+  background: #edf2f7;
+  overflow: hidden;
+}
+
+.tc-sso-progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--tc-brand, #0f6fff);
+  transition: width 0.3s ease;
+}
+
+.tc-sso-card.is-enabled .tc-sso-progress-fill {
+  background: #10733a;
+}
+
+.tc-sso-expand-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: none;
+  padding: 4px 0;
+  font-size: 13px;
+  color: var(--tc-brand, #0f6fff);
+  cursor: pointer;
+}
+
+.tc-sso-expand-btn:hover {
+  color: var(--tc-brand-strong, #0a52be);
+}
+
+.tc-sso-details {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border-radius: 12px;
+  background: #f8fafc;
+  border: 1px solid var(--tc-border);
+  margin-top: 4px;
+}
+
+.tc-sso-details-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: 16px;
+}
+
+.tc-sso-checklist {
+  display: grid;
+  gap: 8px;
+}
+
+.tc-sso-checklist-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--tc-border);
+  background: #fff;
+}
+
+.tc-sso-checklist-item.is-complete {
+  background: #edf9f2;
+  border-color: rgba(16, 115, 58, 0.2);
+}
+
+.tc-sso-checklist-item.is-pending {
+  background: #fffbeb;
+  border-color: rgba(146, 64, 14, 0.15);
+}
+
+.tc-sso-checklist-num {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  font-size: 12px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.tc-sso-checklist-item.is-complete .tc-sso-checklist-num {
+  background: #d1fae5;
+  color: #10733a;
+}
+
+.tc-sso-checklist-item.is-pending .tc-sso-checklist-num {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.tc-sso-checklist-item strong {
+  font-size: 13px;
+  color: var(--tc-text, #10233f);
+}
+
+.tc-sso-checklist-item p {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--tc-text-muted, #5d728f);
+}
+
+.tc-sso-meta {
+  display: grid;
+  gap: 8px;
+}
+
+.tc-sso-meta > div {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--tc-border);
+  background: #fff;
+}
+
+.tc-sso-meta span {
+  display: block;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--tc-text-muted, #5d728f);
+  margin-bottom: 4px;
+}
+
+.tc-sso-meta code,
+.tc-sso-meta p {
+  font-size: 13px;
+  color: var(--tc-text, #10233f);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.tc-sso-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: #fffbeb;
+  border: 1px solid rgba(146, 64, 14, 0.15);
+  color: #92400e;
+  font-size: 13px;
+}
+
+.tc-sso-note svg {
+  flex-shrink: 0;
+}
+
+.tc-sso-sk {
+  border-radius: 4px;
+  background: linear-gradient(90deg, #e9edf5 25%, #f0f3f8 50%, #e9edf5 75%);
+  background-size: 200% 100%;
+  animation: tc-shimmer 1.5s ease-in-out infinite;
+}
+
+.tc-secret-sso-provider-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 700;
+  flex-shrink: 0;
+  background: rgba(15, 111, 255, 0.08);
+  color: var(--tc-brand, #0f6fff);
+}
+
+/* ── SSO Responsive ────────────────────────── */
+
+@media (max-width: 768px) {
+  .tc-sso-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .tc-sso-card {
+    padding: 16px;
+  }
+
+  .tc-sso-card-head {
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .tc-sso-card-controls {
+    flex-direction: row;
+    align-items: center;
+    width: 100%;
+  }
+
+  .tc-sso-expand-btn {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .tc-sso-details-grid {
+    grid-template-columns: 1fr;
+  }
+}

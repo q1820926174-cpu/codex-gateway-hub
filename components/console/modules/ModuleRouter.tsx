@@ -3,9 +3,10 @@
 import dynamic from "next/dynamic";
 import type { EditorModule } from "@/components/console/types";
 import { PromptModule } from "@/components/console/modules/PromptModule";
+import { SsoModule } from "@/components/console/modules/SsoModule";
 
 type ModuleRouterProps = {
-  module?: EditorModule;
+  module?: EditorModule | "sso";
 };
 
 const LegacySettingsConsole = dynamic(
@@ -22,6 +23,9 @@ const LegacySettingsConsole = dynamic(
  * 新组件体系（ConsoleLayout, TanStack Query 等）将在后续逐步替换各模块内部实现
  */
 export function ModuleRouter({ module }: ModuleRouterProps) {
+  if (module === "sso") {
+    return <SsoModule />;
+  }
   if (module === "prompt") {
     return <PromptModule />;
   }
