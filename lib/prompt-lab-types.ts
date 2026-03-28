@@ -21,6 +21,31 @@ export type RulePreviewResult = {
   hintPreview: string;
 };
 
+export type PromptOptimizerFocus = "balanced" | "tool-calling" | "strict";
+
+export type PromptOptimizerResult = {
+  profile: {
+    provider: string;
+    upstreamModel: string;
+    clientModel: string;
+    family: string;
+    focus: PromptOptimizerFocus;
+    preserveOriginal: boolean;
+  };
+  issueTags: string[];
+  metrics: {
+    estimatedTokens: number;
+    sourceFailureCount: number;
+  };
+  optimizedPrompt: string;
+  suggestedRule: {
+    id: string;
+    provider: string;
+    upstreamModelPattern: string;
+    hint: string;
+  };
+};
+
 export type PromptLabRunRequest = {
   mode: PromptLabRunMode;
   baselineModel: string;
