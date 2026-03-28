@@ -57,7 +57,6 @@ import {
   Select,
   Switch,
   Textarea,
-  Tabs,
   Tag
 } from "tdesign-react";
 import {
@@ -5728,26 +5727,6 @@ export function SettingsConsole({ module = "access" }: SettingsConsoleProps) {
               />
             </div>
           </Layout.Header>
-
-          <div className="tc-route-tabs">
-            <Tabs
-              value={routeModule}
-              size="medium"
-              theme="card"
-              onChange={(value) => handleMenuRoute(String(value))}
-            >
-              <Tabs.TabPanel value="access" label={t("基础接入", "Access")} />
-              <Tabs.TabPanel value="prompt" label={t("提示词配置", "Prompt Config")} />
-              <Tabs.TabPanel value="export" label={t("配置导出", "Export")} />
-              <Tabs.TabPanel value="upstream" label={t("上游渠道", "Upstreams")} />
-              <Tabs.TabPanel value="runtime" label={t("运行时调度", "Runtime")} disabled={keys.length === 0} />
-              <Tabs.TabPanel value="logs" label={t("请求日志", "Request Logs")} />
-              <Tabs.TabPanel value="calls" label={t("AI 调用日志", "AI Call Logs")} />
-              <Tabs.TabPanel value="usage" label={t("用量报表", "Usage Report")} />
-              <Tabs.TabPanel value="docs" label={t("接口文档", "API Docs")} />
-              <Tabs.TabPanel value="dashboard" label={t("工作台", "Dashboard")} />
-            </Tabs>
-          </div>
 
           <Layout.Content className="tc-content">
             <section className="tc-console-hero">
